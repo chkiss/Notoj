@@ -1,0 +1,1037 @@
+#!/usr/bin/env python3
+import curses
+import os
+import glob
+import re
+import subprocess
+import uuid
+from datetime import datetime, timezone
+
+NOTES_DIR = os.path.expanduser("~/Notoj/test_files/converted")
+TRASH_DIR = os.path.join(NOTES_DIR, ".trash")
+STATE_FILE = os.path.join(NOTES_DIR, ".notoj_state")
+TITLE_MAX = 72
+
+LRM = "\u200e"
+
+# ----------------------------
+# Time utils
+# ----------------------------
+
+def fmt(ts):
+    if not ts:
+        return "-"
+    return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+
+
+def ago(ts):
+    if not ts:
+        return "-"
+
+    diff = int(datetime.now().timestamp() - float(ts))
+
+    if diff < 60:
+        return f"{diff}s"
+    if diff < 3600:
+        return f"{diff // 60}m"
+    if diff < 86400:
+        return f"{diff // 3600}h"
+
+    return f"{diff // 86400}d"
+
+
+# ----------------------------
+# Load notes
+# ----------------------------
+
+def yaml_scalar(value):
+    if not value:
+        return '""'
+    need_quote = any(c in value for c in ':#{}[]|>&*!,')
+    need_quote = need_quote or value[0] in '"\'%@`'
+    need_quote = need_quote or value.lower() in ('true', 'false', 'yes', 'no', 'null', '~')
+    if need_quote:
+        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    return value
+
+
+def slugify(title):
+    safe = re.sub(r'[/\\:\0]', '-', title)
+    safe = re.sub(r'\s+', ' ', safe).strip().lstrip('.')
+    return safe or 'untitled'
+
+
+def iso_to_ts(s):
+    if not s:
+        return 0.0
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
+def parse_frontmatter(text):
+    result = {}
+    lines = text.splitlines()
+    i = 0
+    current_list_key = None
+
+    while i < len(lines):
+        line = lines[i]
+
+        if line.startswith("  - ") and current_list_key is not None:
+            item = line[4:]
+            if item.startswith('"') and item.endswith('"'):
+                item = item[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            result[current_list_key].append(item)
+            i += 1
+            continue
+
+        current_list_key = None
+
+        if ":" not in line:
+            i += 1
+            continue
+
+        key, _, raw = line.partition(":")
+        key = key.strip()
+        raw = raw.strip()
+
+        if raw == "[]":
+            result[key] = []
+        elif raw == "":
+            result[key] = []
+            current_list_key = key
+        else:
+            if raw.startswith('"') and raw.endswith('"'):
+                raw = raw[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            result[key] = raw
+
+        i += 1
+
+    return result
+
+
+def load_md(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        if not text.startswith("---\n"):
+            return None
+
+        end = text.find("\n---\n", 4)
+        if end == -1:
+            return None
+
+        meta = parse_frontmatter(text[4:end])
+        body = text[end + 5:]
+        if body.startswith("\n"):
+            body = body[1:]
+
+        return {
+            "path": path,
+            "content": body,
+            "title": meta.get("title") or "",
+            "tags": meta.get("tags") or [],
+            "system_tags": meta.get("system_tags") or [],
+            "modificationDate": iso_to_ts(meta.get("modified")),
+            "creationDate": iso_to_ts(meta.get("created")),
+            "id": meta.get("id") or "",
+            "version": meta.get("version"),
+        }
+    except Exception:
+        return None
+
+
+def load():
+    notes = []
+
+    for f in glob.glob(os.path.join(NOTES_DIR, "*.md")):
+        n = load_md(f)
+        if n:
+            notes.append(n)
+
+    return notes
+
+
+# ----------------------------
+# Helpers
+# ----------------------------
+
+def title(n):
+    t = n.get("title") or ""
+    if not t:
+        c = (n.get("content") or "").strip()
+        t = c.split("\n")[0] if c else ""
+    return t or "(untitled)"
+
+
+def content(n):
+    return n.get("content") or ""
+
+
+def tags(n):
+    return " ".join(n.get("tags") or [])
+
+
+def is_recent(n):
+    m = n.get("modificationDate", 0)
+    return m and (datetime.now().timestamp() - float(m)) < 3600
+
+
+# ----------------------------
+# Sorting / filtering
+# ----------------------------
+
+def sort_notes(notes, key, rev):
+    def k(n):
+        if key == "title":
+            return title(n).lower()
+
+        if key == "created":
+            return n.get("creationDate", 0)
+
+        return n.get("modificationDate", 0)
+
+    return sorted(notes, key=k, reverse=rev)
+
+
+
+def _edit_dist(a, b):
+    if abs(len(a) - len(b)) > 2:
+        return 99
+    dp = list(range(len(b) + 1))
+    for ca in a:
+        ndp = [dp[0] + 1]
+        for j, cb in enumerate(b):
+            ndp.append(min(dp[j] + (ca != cb), dp[j + 1] + 1, ndp[j] + 1))
+        dp = ndp
+    return dp[-1]
+
+
+def save_cursor(path):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            f.write(path + "\n")
+    except Exception:
+        pass
+
+
+def load_cursor():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def file_snapshot(directory):
+    snap = {}
+    for f in glob.glob(os.path.join(directory, "*.md")):
+        try:
+            snap[f] = os.path.getmtime(f)
+        except OSError:
+            pass
+    return snap
+
+
+def incremental_update(notes, snap_old, snap_new):
+    added_or_modified = {
+        p for p, m in snap_new.items()
+        if p not in snap_old or snap_old[p] != m
+    }
+    deleted = set(snap_old) - set(snap_new)
+
+    if not added_or_modified and not deleted:
+        return notes, False
+
+    result = [n for n in notes if n["path"] not in deleted and n["path"] not in added_or_modified]
+    for path in added_or_modified:
+        sync_hashtags(path)
+        n = load_md(path)
+        if n:
+            result.append(n)
+
+    return result, True
+
+
+class FullScanSearcher:
+    def __init__(self):
+        self._notes = []
+
+    def update(self, notes):
+        self._notes = notes
+
+    def search(self, q):
+        return rank_notes(self._notes, q)
+
+
+def rank_notes(notes, q):
+    q = q.strip()
+    if not q:
+        return notes
+
+    tokens = q.lower().split()
+    q_lower = q.lower()
+    now = datetime.now().timestamp()
+    results = []
+
+    for n in notes:
+        t = title(n).lower()
+        body = content(n).lower()
+        tag_str = tags(n).lower()
+        t_words = t.split()
+
+        score = 0
+
+        if t == q_lower:
+            score += 1000
+        elif t.startswith(q_lower):
+            score += 500
+        elif q_lower in t:
+            score += 200
+
+        for tok in tokens:
+            if tok in t:
+                score += 100
+            if tok in tag_str:
+                score += 80
+            if tok in body:
+                score += 20
+
+            if len(tok) >= 4:
+                for word in t_words:
+                    if _edit_dist(tok, word) <= 1:
+                        score += 30
+                        break
+
+        if score > 0:
+            age = now - (n.get("modificationDate") or 0)
+            if age < 7 * 86400:
+                score += 15
+            elif age < 30 * 86400:
+                score += 5
+            results.append((score, n))
+
+    results.sort(key=lambda x: (-x[0], -(x[1].get("modificationDate") or 0)))
+    return [n for _, n in results]
+
+
+# ----------------------------
+# Hashtag sync
+# ----------------------------
+
+def extract_hashtags(text):
+    raw = re.findall(r'(?<![/\w])#([a-zA-Z][a-zA-Z0-9_-]*)', text)
+    return list(dict.fromkeys(raw))
+
+
+def sync_hashtags(path):
+    """Add any inline #hashtags found in the note body to the YAML tags field."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return
+
+    if not text.startswith("---\n"):
+        return
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        return
+
+    meta = parse_frontmatter(text[4:fm_end])
+    existing = meta.get("tags") or []
+    if isinstance(existing, str):
+        existing = [existing] if existing else []
+
+    body = text[fm_end + 5:]
+    if body.startswith("\n"):
+        body = body[1:]
+
+    new_tags = [t for t in extract_hashtags(body) if t not in existing]
+    if not new_tags:
+        return
+
+    all_tags = existing + new_tags
+    new_fm_lines = []
+    skip_items = False
+    for line in text[4:fm_end].splitlines():
+        if line.startswith("tags:"):
+            new_fm_lines.append("tags:")
+            for t in all_tags:
+                new_fm_lines.append(f"  - {yaml_scalar(t)}")
+            skip_items = True
+            continue
+        if skip_items:
+            if line.startswith("  - "):
+                continue
+            skip_items = False
+        new_fm_lines.append(line)
+
+    new_text = "---\n" + "\n".join(new_fm_lines) + text[fm_end:]
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_text)
+    except Exception:
+        pass
+
+
+# ----------------------------
+# Actions
+# ----------------------------
+
+def check_rename(n):
+    """After editing: if first content line changed, update frontmatter and rename file."""
+    path = n["path"]
+    if not os.path.exists(path):
+        return
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return
+
+    if not text.startswith("---\n"):
+        return
+
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        return
+
+    body = text[fm_end + 5:]
+    if body.startswith("\n"):
+        body = body[1:]
+
+    new_first_line = ""
+    for line in body.split("\n"):
+        s = line.strip()
+        if s:
+            new_first_line = s[:TITLE_MAX]
+            break
+
+    if not new_first_line or new_first_line == n.get("title", ""):
+        return
+
+    # Title changed — rewrite frontmatter
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new_yaml_lines = []
+    title_written = False
+    for line in text[4:fm_end].splitlines():
+        if line.startswith("title:"):
+            new_yaml_lines.append(f"title: {yaml_scalar(new_first_line)}")
+            title_written = True
+        elif line.startswith("modified:"):
+            new_yaml_lines.append(f"modified: {now_iso}")
+        else:
+            new_yaml_lines.append(line)
+            if line.startswith("id:") and not title_written:
+                new_yaml_lines.append(f"title: {yaml_scalar(new_first_line)}")
+                title_written = True
+
+    new_text = "---\n" + "\n".join(new_yaml_lines) + text[fm_end:]
+
+    new_stem = slugify(new_first_line)
+    new_path = os.path.join(NOTES_DIR, new_stem + ".md")
+
+    if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(path):
+        i = 2
+        while os.path.exists(new_path):
+            new_path = os.path.join(NOTES_DIR, f"{new_stem} ({i}).md")
+            i += 1
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_text)
+
+    if new_path != path:
+        os.rename(path, new_path)
+
+    sync_hashtags(new_path)
+
+
+def open_note(n):
+    curses.endwin()
+    subprocess.call(["vim", n["path"]])
+    check_rename(n)
+
+
+
+def trash_note(n):
+    os.makedirs(TRASH_DIR, exist_ok=True)
+
+    base = os.path.basename(n["path"])
+    dest = os.path.join(TRASH_DIR, base)
+
+    if os.path.exists(dest):
+        stem, ext = os.path.splitext(base)
+        i = 2
+        while os.path.exists(dest):
+            dest = os.path.join(TRASH_DIR, f"{stem} ({i}){ext}")
+            i += 1
+
+    os.rename(n["path"], dest)
+
+
+
+def undo_trash():
+    if not os.path.exists(TRASH_DIR):
+        return False
+
+    candidates = [
+        (os.path.getmtime(p), p)
+        for p in glob.glob(os.path.join(TRASH_DIR, "*.md"))
+        if os.path.isfile(p)
+    ]
+
+    if not candidates:
+        return False
+
+    candidates.sort(reverse=True)
+
+    src = candidates[0][1]
+    dst = os.path.join(NOTES_DIR, os.path.basename(src))
+
+    if os.path.exists(dst):
+        stem, ext = os.path.splitext(os.path.basename(src))
+        i = 2
+        while os.path.exists(dst):
+            dst = os.path.join(NOTES_DIR, f"{stem} ({i}){ext}")
+            i += 1
+
+    try:
+        os.rename(src, dst)
+        return True
+    except Exception:
+        return False
+
+
+def finalize_new_note(tmp_path):
+    try:
+        with open(tmp_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None
+
+    if not text.startswith("---\n"):
+        os.unlink(tmp_path)
+        return None
+
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        os.unlink(tmp_path)
+        return None
+
+    body = text[fm_end + 5:]
+    if body.startswith("\n"):
+        body = body[1:]
+
+    first_line = ""
+    for line in body.split("\n"):
+        s = line.strip()
+        if s:
+            first_line = s[:TITLE_MAX]
+            break
+
+    if not first_line:
+        os.unlink(tmp_path)
+        return None
+
+    # Rewrite frontmatter: insert title: after id:, update modified:
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new_yaml_lines = []
+    for line in text[4:fm_end].splitlines():
+        if line.startswith("modified:"):
+            new_yaml_lines.append(f"modified: {now_iso}")
+        else:
+            new_yaml_lines.append(line)
+            if line.startswith("id:"):
+                new_yaml_lines.append(f"title: {yaml_scalar(first_line)}")
+
+    new_text = "---\n" + "\n".join(new_yaml_lines) + text[fm_end:]
+
+    stem = slugify(first_line)
+    dest = os.path.join(NOTES_DIR, stem + ".md")
+    if os.path.exists(dest):
+        i = 2
+        while os.path.exists(dest):
+            dest = os.path.join(NOTES_DIR, f"{stem} ({i}).md")
+            i += 1
+
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    os.rename(tmp_path, dest)
+    sync_hashtags(dest)
+    return dest
+
+
+def new_note():
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    key = uuid.uuid4().hex
+    frontmatter = (
+        f"---\n"
+        f"id: {key}\n"
+        f"created: {now_iso}\n"
+        f"modified: {now_iso}\n"
+        f"version: 1\n"
+        f"tags: []\n"
+        f"---\n"
+    )
+    tmp_path = os.path.join(NOTES_DIR, f".new_{key}.md")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(frontmatter + "\n")
+
+    curses.endwin()
+    subprocess.call(["vim", "-c", "normal G", "-c", "startinsert", tmp_path])
+    return finalize_new_note(tmp_path)
+
+
+def new_note_with_title(title_text):
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    key = uuid.uuid4().hex
+    frontmatter = (
+        f"---\n"
+        f"id: {key}\n"
+        f"created: {now_iso}\n"
+        f"modified: {now_iso}\n"
+        f"version: 1\n"
+        f"tags: []\n"
+        f"---\n"
+    )
+    tmp_path = os.path.join(NOTES_DIR, f".new_{key}.md")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(frontmatter + "\n" + title_text + "\n\n")
+
+    curses.endwin()
+    subprocess.call(["vim", "-c", "normal G", "-c", "startinsert", tmp_path])
+    return finalize_new_note(tmp_path)
+
+
+# ----------------------------
+# UI helpers
+# ----------------------------
+
+SORTS = ["title", "created", "modified"]
+
+
+
+def init_colors():
+    curses.start_color()
+    curses.use_default_colors()
+
+    curses.init_pair(1, curses.COLOR_YELLOW, -1)  # amber
+    curses.init_pair(2, curses.COLOR_RED, -1)     # dates
+    curses.init_pair(3, curses.COLOR_GREEN, -1)   # tags
+    curses.init_pair(4, curses.COLOR_CYAN, -1)    # preview
+    curses.init_pair(5, curses.COLOR_GREEN, -1)   # search match (lime-green = bold green)
+
+
+
+def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens):
+    """Render text at (y, x), switching to hi_attr on token match substrings."""
+    if not tokens or not text:
+        stdscr.addnstr(y, x, text, max_w, base_attr)
+        return
+    pos = 0
+    col = x
+    rem = max_w
+    tl = text.lower()
+    while pos < len(text) and rem > 0:
+        best = None
+        for tok in tokens:
+            idx = tl.find(tok, pos)
+            if idx != -1 and (best is None or idx < best[0]):
+                best = (idx, tok)
+        if best is None:
+            stdscr.addnstr(y, col, text[pos:], rem, base_attr)
+            break
+        mi, tok = best
+        if mi > pos:
+            n = min(mi - pos, rem)
+            stdscr.addnstr(y, col, text[pos:mi], n, base_attr)
+            col += n
+            rem -= n
+            pos = mi
+        if rem <= 0:
+            break
+        n = min(len(tok), rem)
+        stdscr.addnstr(y, col, text[mi:mi + len(tok)], n, hi_attr)
+        col += n
+        rem -= n
+        pos = mi + len(tok)
+
+
+def clamp_scroll(state, filtered, height):
+    max_idx = max(0, len(filtered) - 1)
+
+    state["cur"] = max(0, min(state["cur"], max_idx))
+
+    page_h = height - 3
+
+    if state["cur"] < state["off"]:
+        state["off"] = state["cur"]
+
+    elif state["cur"] >= state["off"] + page_h:
+        state["off"] = state["cur"] - page_h + 1
+
+
+# ----------------------------
+# Drawing
+# ----------------------------
+
+def draw(stdscr, notes, state):
+    stdscr.erase()
+
+    h, w = stdscr.getmaxyx()
+
+    mid = w // 2
+    list_w = mid - 2
+    preview_w = max(1, w - mid - 5)
+
+    header = (
+        f"notes | filter:{state['q']} | "
+        f"sort:{state['sort']} | rev:{state['rev']}"
+    )
+
+    stdscr.addnstr(0, 0, header, w - 1)
+
+    visible = notes[state["off"]:state["off"] + h - 3]
+    tokens = state["q"].lower().split() if state["q"].strip() else []
+
+    # ----------------------------
+    # LEFT PANE
+    # ----------------------------
+
+    for i, n in enumerate(visible):
+        y = i + 1
+
+        attr_title = curses.color_pair(1) | curses.A_BOLD
+        attr_date = curses.color_pair(2)
+        attr_tag = curses.color_pair(3)
+
+        selected = (i == state["cur"] - state["off"])
+        if selected:
+            attr_title |= curses.A_REVERSE
+
+        if is_recent(n):
+            attr_title |= curses.A_UNDERLINE
+
+        t = title(n)
+        m = fmt(n.get("modificationDate"))
+        a = ago(n.get("modificationDate"))
+        tg = tags(n)
+
+        hi_title = curses.color_pair(5) | curses.A_BOLD | (curses.A_REVERSE if selected else 0)
+        t_clip = t[:28]
+        draw_line_highlighted(stdscr, y, 0, t_clip, 28, attr_title, hi_title, tokens)
+        pad = 28 - len(t_clip)
+        if pad > 0:
+            try:
+                stdscr.addnstr(y, len(t_clip), " " * pad, pad, attr_title)
+            except curses.error:
+                pass
+
+        stdscr.addnstr(
+            y,
+            30,
+            LRM + m,
+            18,
+            attr_date,
+        )
+
+        stdscr.addnstr(
+            y,
+            50,
+            LRM + f"({a})",
+            10,
+            attr_date,
+        )
+
+        stdscr.addnstr(
+            y,
+            62,
+            tg,
+            max(0, list_w - 62),
+            attr_tag,
+        )
+
+    # vertical divider
+    for y in range(1, h - 1):
+        stdscr.addch(y, mid, curses.ACS_VLINE)
+
+    # ----------------------------
+    # RIGHT PANE (preview)
+    # ----------------------------
+
+    cur_idx = state["cur"]
+
+    if 0 <= cur_idx < len(notes):
+        cur = notes[cur_idx]
+
+        lines = content(cur).split("\n")
+
+        start = state["p_scroll"]
+        end = start + h - 3
+
+        preview_lines = lines[start:end]
+
+        for i, line in enumerate(preview_lines):
+            if i >= h - 3:
+                break
+
+            clipped = line.expandtabs(4).replace("\n", "")
+
+            safe = clipped[:preview_w - 1]
+
+            draw_line_highlighted(
+                stdscr, i + 1, mid + 1, safe, preview_w - 1,
+                curses.color_pair(4),
+                curses.color_pair(5) | curses.A_BOLD,
+                tokens,
+            )
+
+    footer = (
+        "j/k nav | / search | gg/G | "
+        "C-f/b page | C-d/u half | n new | d trash | u undo | Enter open/create | q quit"
+    )
+
+    stdscr.addnstr(h - 1, 0, footer, w - 1)
+
+    stdscr.refresh()
+
+
+# ----------------------------
+# Main loop
+# ----------------------------
+
+def run(stdscr):
+    curses.curs_set(0)
+    init_colors()
+    stdscr.timeout(2000)
+
+    state = {
+        "cur": 0,
+        "off": 0,
+        "p_scroll": 0,
+        "q": "",
+        "sort": "modified",
+        "rev": True,
+        "search_mode": False,
+    }
+
+    notes = load()
+    snap = file_snapshot(NOTES_DIR)
+    searcher = FullScanSearcher()
+    searcher.update(notes)
+
+    saved = load_cursor()
+    if saved:
+        state["_restore_path"] = saved
+
+    def refresh_notes():
+        nonlocal notes, snap
+        notes = load()
+        snap = file_snapshot(NOTES_DIR)
+        searcher.update(notes)
+
+    while True:
+        filtered = searcher.search(state["q"])
+        if not state["q"]:
+            filtered = sort_notes(filtered, state["sort"], state["rev"])
+
+        # Restore cursor to a specific note after external reload
+        restore_path = state.pop("_restore_path", None)
+        if restore_path is not None:
+            for i, n in enumerate(filtered):
+                if n["path"] == restore_path:
+                    state["cur"] = i
+                    break
+            else:
+                state["cur"] = 0
+
+        h, _ = stdscr.getmaxyx()
+        clamp_scroll(state, filtered, h)
+
+        draw(stdscr, filtered, state)
+
+        k = stdscr.getch()
+
+        # ----------------------------
+        # Quit
+        # ----------------------------
+
+        if k == -1:
+            new_snap = file_snapshot(NOTES_DIR)
+            notes, changed = incremental_update(notes, snap, new_snap)
+            if changed:
+                snap = new_snap
+                searcher.update(notes)
+                cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
+                state["_restore_path"] = cur_path
+
+        # ----------------------------
+        # Quit
+        # ----------------------------
+
+        elif k == ord("q"):
+            if 0 <= state["cur"] < len(filtered):
+                save_cursor(filtered[state["cur"]]["path"])
+            break
+
+        # ----------------------------
+        # Open note
+        # ----------------------------
+
+        elif k in [10, 13] and filtered:
+            open_note(filtered[state["cur"]])
+            refresh_notes()
+
+        # ----------------------------
+        # Incremental search mode
+        # ----------------------------
+
+        elif state["search_mode"]:
+            if k == 27:  # ESC
+                state["search_mode"] = False
+
+            elif k in [10, 13]:
+                if state["q"].strip():
+                    new_note_with_title(state["q"].strip())
+                    refresh_notes()
+                    state["q"] = ""
+                    state["cur"] = 0
+                    state["off"] = 0
+                    state["p_scroll"] = 0
+                state["search_mode"] = False
+
+            elif k == curses.KEY_DOWN:
+                state["cur"] += 1
+                state["p_scroll"] = 0
+
+            elif k == curses.KEY_UP:
+                state["cur"] -= 1
+                state["p_scroll"] = 0
+
+            elif k in [curses.KEY_BACKSPACE, 127, 8]:
+                state["q"] = state["q"][:-1]
+                state["cur"] = 0
+                state["off"] = 0
+
+            elif 32 <= k <= 126:
+                state["q"] += chr(k)
+                state["cur"] = 0
+                state["off"] = 0
+
+            continue
+
+        # ----------------------------
+        # Enter search mode
+        # ----------------------------
+
+        elif k == ord("/"):
+            state["search_mode"] = True
+            state["q"] = ""
+            state["cur"] = 0
+            state["off"] = 0
+
+        # ----------------------------
+        # Navigation
+        # ----------------------------
+
+        elif k in [ord("j"), curses.KEY_DOWN]:
+            state["cur"] += 1
+            state["p_scroll"] = 0
+
+        elif k in [ord("k"), curses.KEY_UP]:
+            state["cur"] -= 1
+            state["p_scroll"] = 0
+
+        elif k == ord("G"):
+            state["cur"] = len(filtered) - 1
+            state["p_scroll"] = 0
+            clamp_scroll(state, filtered, h)
+
+        elif k == ord("g"):
+            nxt = stdscr.getch()
+
+            if nxt == ord("g"):
+                state["cur"] = 0
+                state["off"] = 0
+                state["p_scroll"] = 0
+                clamp_scroll(state, filtered, h)
+
+        # Ctrl-f
+        elif k == 6:
+            state["cur"] += h - 4
+            state["p_scroll"] = 0
+            clamp_scroll(state, filtered, h)
+
+        # Ctrl-b
+        elif k == 2:
+            state["cur"] -= h - 4
+            state["p_scroll"] = 0
+            clamp_scroll(state, filtered, h)
+
+        # Ctrl-d
+        elif k == 4:
+            state["cur"] += max(1, (h - 4) // 2)
+            state["p_scroll"] = 0
+            clamp_scroll(state, filtered, h)
+
+        # Ctrl-u
+        elif k == 21:
+            state["cur"] -= max(1, (h - 4) // 2)
+            state["p_scroll"] = 0
+            clamp_scroll(state, filtered, h)
+
+        # ----------------------------
+        # Preview scrolling
+        # ----------------------------
+
+        elif k == curses.KEY_NPAGE:
+            state["p_scroll"] += 5
+
+        elif k == curses.KEY_PPAGE:
+            state["p_scroll"] = max(0, state["p_scroll"] - 5)
+
+        # ----------------------------
+        # Trash note
+        # ----------------------------
+
+        elif k == ord("d") and filtered:
+            trash_note(filtered[state["cur"]])
+            refresh_notes()
+            state["cur"] = 0
+            state["off"] = 0
+            state["p_scroll"] = 0
+
+        # ----------------------------
+        # Sort mode
+        # ----------------------------
+
+        elif k == ord("t"):
+            idx = SORTS.index(state["sort"])
+            state["sort"] = SORTS[(idx + 1) % len(SORTS)]
+
+        # reverse sort
+        elif k == ord("r"):
+            state["rev"] = not state["rev"]
+
+        # undo trash
+        elif k == ord("u"):
+            if undo_trash():
+                refresh_notes()
+
+        # new note
+        elif k == ord("n"):
+            new_note()
+            refresh_notes()
+            state["cur"] = 0
+            state["off"] = 0
+            state["p_scroll"] = 0
+
+
+if __name__ == "__main__":
+    curses.wrapper(run)
