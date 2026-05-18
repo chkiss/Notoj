@@ -37,7 +37,16 @@ def ago(ts):
     if diff < 86400:
         return f"{diff // 3600}h"
 
-    return f"{diff // 86400}d"
+    days = diff // 86400
+    if days < 90:
+        return f"{days}d"
+
+    months = days // 30
+    if months < 24:
+        return f"{months}m"
+
+    years, rem_months = divmod(months, 12)
+    return f"{years}y{rem_months}m" if rem_months else f"{years}y"
 
 
 # ----------------------------
@@ -373,10 +382,76 @@ def sync_hashtags(path):
 
     new_text = "---\n" + "\n".join(new_fm_lines) + text[fm_end:]
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(new_text)
+        atomic_write(path, new_text)
     except Exception:
         pass
+
+
+# ----------------------------
+# Atomic write helper
+# ----------------------------
+
+def atomic_write(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+# ----------------------------
+# Git snapshot helpers
+# ----------------------------
+
+def git_init():
+    git_dir = os.path.join(NOTES_DIR, ".git")
+    gitignore = os.path.join(NOTES_DIR, ".gitignore")
+    if not os.path.exists(git_dir):
+        subprocess.run(["git", "init"], cwd=NOTES_DIR, capture_output=True)
+        with open(gitignore, "w", encoding="utf-8") as f:
+            f.write(".trash/\n.notoj_state\n.new_*.md\n")
+        subprocess.run(["git", "add", "-A"], cwd=NOTES_DIR, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init: notoj snapshot history"],
+            cwd=NOTES_DIR, capture_output=True,
+        )
+
+
+def git_commit(msg):
+    subprocess.run(["git", "add", "-A"], cwd=NOTES_DIR, capture_output=True)
+    subprocess.run(["git", "commit", "-m", msg], cwd=NOTES_DIR, capture_output=True)
+
+
+# ----------------------------
+# Conflict detection / resolution
+# ----------------------------
+
+CONFLICT_RE = re.compile(r'^(.+)\.sync-conflict-[\d]+-[\d]+-[A-Z0-9]+(\.[^.]+)$')
+
+
+def find_conflicts():
+    """Return list of (original_path, conflict_path) pairs for Syncthing conflicts, oldest first."""
+    results = []
+    for p in sorted(glob.glob(os.path.join(NOTES_DIR, "*.sync-conflict-*.md"))):
+        m = CONFLICT_RE.match(os.path.basename(p))
+        if m:
+            original = os.path.join(NOTES_DIR, m.group(1) + m.group(2))
+            results.append((original, p))
+    return results
+
+
+def resolve_conflict(original, conflict):
+    curses.endwin()
+    if os.path.exists(original):
+        subprocess.call(["vimdiff", original, conflict])
+    else:
+        subprocess.call(["vim", conflict])
+        if os.path.exists(conflict):
+            os.rename(conflict, original)
+            conflict = None
+    if conflict and os.path.exists(conflict):
+        os.remove(conflict)
+    stem = os.path.splitext(os.path.basename(original))[0]
+    git_commit(f"resolve: {stem}")
 
 
 # ----------------------------
@@ -443,8 +518,7 @@ def check_rename(n):
             new_path = os.path.join(NOTES_DIR, f"{new_stem} ({i}).md")
             i += 1
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(new_text)
+    atomic_write(path, new_text)
 
     if new_path != path:
         os.rename(path, new_path)
@@ -456,6 +530,7 @@ def open_note(n):
     curses.endwin()
     subprocess.call(["vim", n["path"]])
     check_rename(n)
+    git_commit(f"edit: {title(n)}")
 
 
 
@@ -473,7 +548,7 @@ def trash_note(n):
             i += 1
 
     os.rename(n["path"], dest)
-
+    git_commit(f"trash: {title(n)}")
 
 
 def undo_trash():
@@ -503,6 +578,7 @@ def undo_trash():
 
     try:
         os.rename(src, dst)
+        git_commit(f"restore: {os.path.splitext(os.path.basename(dst))[0]}")
         return True
     except Exception:
         return False
@@ -564,6 +640,7 @@ def finalize_new_note(tmp_path):
         f.write(new_text)
     os.rename(tmp_path, dest)
     sync_hashtags(dest)
+    git_commit(f"add: {first_line}")
     return dest
 
 
@@ -614,6 +691,13 @@ def new_note_with_title(title_text):
 # ----------------------------
 
 SORTS = ["title", "created", "modified"]
+
+MIN_W_ERROR   = 20   # below this: show error, refuse to draw
+MIN_PREVIEW_W = 20   # collapse preview when it would be narrower than this
+LIST_MAX_W    = 80   # cap list panel here; extra space goes to preview
+SHOW_DATE_MIN = 38   # min list_w to show modification date truncated to 8 chars (col 30 + 8)
+SHOW_AGO_MIN  = 56   # min list_w to show relative date      (col 50 + 6)
+SHOW_TAGS_MIN = 63   # min list_w to show tags               (col 62 + 1)
 
 
 
@@ -686,13 +770,35 @@ def draw(stdscr, notes, state):
 
     h, w = stdscr.getmaxyx()
 
-    mid = w // 2
-    list_w = mid - 2
-    preview_w = max(1, w - mid - 5)
+    if h < 3 or w < MIN_W_ERROR:
+        try:
+            stdscr.addnstr(0, 0, "window too narrow", w)
+        except curses.error:
+            pass
+        stdscr.refresh()
+        return
 
+    show_preview = (w - w // 2 - 5) >= MIN_PREVIEW_W
+    if show_preview:
+        natural_list_w = w // 2 - 2
+        list_w = min(natural_list_w, LIST_MAX_W)
+        mid = list_w + 2
+        preview_w = w - mid - 5
+    else:
+        mid = None
+        list_w = w - 1
+        preview_w = 0
+
+    show_date = list_w >= SHOW_DATE_MIN
+    show_ago  = list_w >= SHOW_AGO_MIN
+    show_tags = list_w >= SHOW_TAGS_MIN
+
+    conflicts = find_conflicts()
+    conflict_badge = f" | [{len(conflicts)} conflict(s)]" if conflicts else ""
     header = (
         f"notes | filter:{state['q']} | "
-        f"sort:{state['sort']} | rev:{state['rev']}"
+        f"sort:{state['sort']} {'🞃' if state['rev'] else '🞁'}"
+        f"{conflict_badge}"
     )
 
     stdscr.addnstr(0, 0, header, w - 1)
@@ -719,82 +825,64 @@ def draw(stdscr, notes, state):
             attr_title |= curses.A_UNDERLINE
 
         t = title(n)
-        m = fmt(n.get("modificationDate"))
-        a = ago(n.get("modificationDate"))
         tg = tags(n)
 
         hi_title = curses.color_pair(5) | curses.A_BOLD | (curses.A_REVERSE if selected else 0)
-        t_clip = t[:28]
-        draw_line_highlighted(stdscr, y, 0, t_clip, 28, attr_title, hi_title, tokens)
-        pad = 28 - len(t_clip)
+        title_w = min(28, list_w)
+        t_clip = t[:title_w]
+        draw_line_highlighted(stdscr, y, 0, t_clip, title_w, attr_title, hi_title, tokens)
+        pad = title_w - len(t_clip)
         if pad > 0:
             try:
                 stdscr.addnstr(y, len(t_clip), " " * pad, pad, attr_title)
             except curses.error:
                 pass
 
-        stdscr.addnstr(
-            y,
-            30,
-            LRM + m,
-            18,
-            attr_date,
-        )
+        if show_date:
+            m = fmt(n.get("modificationDate"))
+            stdscr.addnstr(y, 30, LRM + m, min(16, list_w - 30), attr_date)
 
-        stdscr.addnstr(
-            y,
-            50,
-            LRM + f"({a})",
-            10,
-            attr_date,
-        )
+        if show_ago:
+            a = ago(n.get("modificationDate"))
+            stdscr.addnstr(y, 50, LRM + f"({a})", min(10, list_w - 50), attr_date)
 
-        stdscr.addnstr(
-            y,
-            62,
-            tg,
-            max(0, list_w - 62),
-            attr_tag,
-        )
-
-    # vertical divider
-    for y in range(1, h - 1):
-        stdscr.addch(y, mid, curses.ACS_VLINE)
+        if show_tags:
+            stdscr.addnstr(y, 62, tg, list_w - 62, attr_tag)
 
     # ----------------------------
     # RIGHT PANE (preview)
     # ----------------------------
 
-    cur_idx = state["cur"]
+    if show_preview:
+        for y in range(1, h - 1):
+            stdscr.addch(y, mid, curses.ACS_VLINE)
 
-    if 0 <= cur_idx < len(notes):
-        cur = notes[cur_idx]
+        cur_idx = state["cur"]
 
-        lines = content(cur).split("\n")
+        if 0 <= cur_idx < len(notes):
+            cur = notes[cur_idx]
 
-        start = state["p_scroll"]
-        end = start + h - 3
+            lines = content(cur).split("\n")
 
-        preview_lines = lines[start:end]
+            start = state["p_scroll"]
+            end = start + h - 3
 
-        for i, line in enumerate(preview_lines):
-            if i >= h - 3:
-                break
+            for i, line in enumerate(lines[start:end]):
+                if i >= h - 3:
+                    break
 
-            clipped = line.expandtabs(4).replace("\n", "")
+                safe = line.expandtabs(4).replace("\n", "")[:preview_w - 1]
 
-            safe = clipped[:preview_w - 1]
+                draw_line_highlighted(
+                    stdscr, i + 1, mid + 1, safe, preview_w - 1,
+                    curses.color_pair(4),
+                    curses.color_pair(5) | curses.A_BOLD,
+                    tokens,
+                )
 
-            draw_line_highlighted(
-                stdscr, i + 1, mid + 1, safe, preview_w - 1,
-                curses.color_pair(4),
-                curses.color_pair(5) | curses.A_BOLD,
-                tokens,
-            )
-
+    conflict_hint = " | c conflicts" if conflicts else ""
     footer = (
-        "j/k nav | / search | gg/G | "
-        "C-f/b page | C-d/u half | n new | d trash | u undo | Enter open/create | q quit"
+        f"s sort | r reverse order | / search | Enter open | n new | d trash | u undo{conflict_hint} | q quit"
     )
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
@@ -807,6 +895,7 @@ def draw(stdscr, notes, state):
 # ----------------------------
 
 def run(stdscr):
+    git_init()
     curses.curs_set(0)
     init_colors()
     stdscr.timeout(2000)
@@ -832,8 +921,9 @@ def run(stdscr):
 
     def refresh_notes():
         nonlocal notes, snap
-        notes = load()
-        snap = file_snapshot(NOTES_DIR)
+        new_snap = file_snapshot(NOTES_DIR)
+        notes, _ = incremental_update(notes, snap, new_snap)
+        snap = new_snap
         searcher.update(notes)
 
     while True:
@@ -870,6 +960,7 @@ def run(stdscr):
                 searcher.update(notes)
                 cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
                 state["_restore_path"] = cur_path
+                git_commit("sync: external changes")
 
         # ----------------------------
         # Quit
@@ -1011,7 +1102,7 @@ def run(stdscr):
         # Sort mode
         # ----------------------------
 
-        elif k == ord("t"):
+        elif k == ord("s"):
             idx = SORTS.index(state["sort"])
             state["sort"] = SORTS[(idx + 1) % len(SORTS)]
 
@@ -1031,6 +1122,14 @@ def run(stdscr):
             state["cur"] = 0
             state["off"] = 0
             state["p_scroll"] = 0
+
+        # resolve conflict
+        elif k == ord("c"):
+            conflicts = find_conflicts()
+            if conflicts:
+                original, conflict = conflicts[0]
+                resolve_conflict(original, conflict)
+                refresh_notes()
 
 
 if __name__ == "__main__":
