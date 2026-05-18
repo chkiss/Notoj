@@ -45,7 +45,8 @@ Keybindings:
     PgDn/PgUp   scroll preview pane
 
   Notes
-    Enter       open selected note in Vim
+    Enter       open note in Vim at top
+    e           open note in Vim at bottom
     n           create new blank note
     d           trash selected note
     u           restore most recently trashed note
@@ -589,9 +590,10 @@ def check_rename(n):
     sync_hashtags(new_path)
 
 
-def open_note(n):
+def open_note(n, end=False):
     curses.endwin()
-    subprocess.call(["vim", n["path"]])
+    cmd = ["vim", n["path"]] if not end else ["vim", "-c", "normal G", n["path"]]
+    subprocess.call(cmd)
     check_rename(n)
     git_commit(f"edit: {title(n)}")
 
@@ -945,7 +947,7 @@ def draw(stdscr, notes, state):
 
     conflict_hint = " | c conflicts" if conflicts else ""
     footer = (
-        f"s sort | r reverse order | / search | ⮐ open | n new | d trash | u undo{conflict_hint} | q quit"
+        f"s sort | r reverse order | / search | ⮐ top | e bottom | n new | d trash | u undo{conflict_hint} | q quit"
     )
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
@@ -1040,6 +1042,10 @@ def run(stdscr):
 
         elif k in [10, 13] and filtered:
             open_note(filtered[state["cur"]])
+            refresh_notes()
+
+        elif k == ord("e") and filtered:
+            open_note(filtered[state["cur"]], end=True)
             refresh_notes()
 
         # ----------------------------
