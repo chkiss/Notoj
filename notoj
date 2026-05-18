@@ -46,10 +46,12 @@ Keybindings:
 Notes are stored as Markdown files in ~/Notoj/test_files/converted/
 """
 
-NOTES_DIR = os.path.expanduser("~/Notoj/test_files/converted")
-TRASH_DIR = os.path.join(NOTES_DIR, ".trash")
-STATE_FILE = os.path.join(NOTES_DIR, ".notoj_state")
+NOTES_DIR = ""
+TRASH_DIR = ""
+STATE_FILE = ""
 TITLE_MAX = 72
+
+CONFIG_FILE = os.path.expanduser("~/.config/notoj/config")
 
 LRM = "\u200e"
 
@@ -934,7 +936,6 @@ def draw(stdscr, notes, state):
 # ----------------------------
 
 def run(stdscr):
-    os.makedirs(NOTES_DIR, exist_ok=True)
     git_init()
     curses.curs_set(0)
     init_colors()
@@ -1172,8 +1173,54 @@ def run(stdscr):
                 refresh_notes()
 
 
+def load_notes_dir():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("notes_dir="):
+                    return os.path.expanduser(line.split("=", 1)[1].strip())
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def save_notes_dir(path):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        f.write(f"notes_dir={path}\n")
+
+
+def prompt_notes_dir(current=None):
+    default = current or os.path.expanduser("~/notes")
+    if current:
+        print(f"notoj: notes directory not found: {current}")
+    else:
+        print("notoj: no notes directory configured.")
+    while True:
+        print(f"Notes directory [{default}]: ", end="", flush=True)
+        ans = input().strip()
+        path = os.path.expanduser(ans if ans else default)
+        if os.path.isdir(path):
+            return path
+        print(f"  '{path}' does not exist. Create it? [y/N] ", end="", flush=True)
+        if input().strip().lower() == "y":
+            os.makedirs(path)
+            return path
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print(HELP)
         sys.exit(0)
+
+    saved = load_notes_dir()
+    if saved and os.path.isdir(saved):
+        NOTES_DIR = saved
+    else:
+        NOTES_DIR = prompt_notes_dir(saved)
+        save_notes_dir(NOTES_DIR)
+
+    TRASH_DIR = os.path.join(NOTES_DIR, ".trash")
+    STATE_FILE = os.path.join(NOTES_DIR, ".notoj_state")
+
     curses.wrapper(run)
