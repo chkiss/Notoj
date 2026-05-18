@@ -934,6 +934,7 @@ def draw(stdscr, notes, state):
 # ----------------------------
 
 def run(stdscr):
+    os.makedirs(NOTES_DIR, exist_ok=True)
     git_init()
     curses.curs_set(0)
     init_colors()
