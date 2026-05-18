@@ -5,6 +5,7 @@ import glob
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
 from datetime import datetime, timezone
 
@@ -62,6 +63,8 @@ Keybindings:
     r           reverse sort order
 
   Other
+    h           diff vs previous version (vimdiff)
+    H           browse full history with diff preview
     c           resolve next Syncthing conflict (vimdiff)
     q           quit
 
@@ -483,6 +486,138 @@ def git_init():
 def git_commit(msg):
     subprocess.run(["git", "add", "-A"], cwd=NOTES_DIR, capture_output=True)
     subprocess.run(["git", "commit", "-m", msg], cwd=NOTES_DIR, capture_output=True)
+
+
+# ----------------------------
+# History helpers
+# ----------------------------
+
+def get_note_commits(path):
+    rel = os.path.relpath(path, NOTES_DIR)
+    r = subprocess.run(
+        ["git", "log", "--follow", "--format=%H\t%at\t%s", "--", rel],
+        cwd=NOTES_DIR, capture_output=True, text=True
+    )
+    commits = []
+    for line in r.stdout.strip().splitlines():
+        if "\t" not in line:
+            continue
+        h, ts, msg = line.split("\t", 2)
+        commits.append({"hash": h, "ts": float(ts), "msg": msg})
+    return commits
+
+
+def get_diff_lines(path, commit_hash):
+    rel = os.path.relpath(path, NOTES_DIR)
+    r = subprocess.run(
+        ["git", "diff", commit_hash, "--", rel],
+        cwd=NOTES_DIR, capture_output=True, text=True
+    )
+    return r.stdout.splitlines()
+
+
+def open_vimdiff_at(path, commit_hash):
+    rel = os.path.relpath(path, NOTES_DIR)
+    r = subprocess.run(
+        ["git", "show", f"{commit_hash}:{rel}"],
+        cwd=NOTES_DIR, capture_output=True, text=True
+    )
+    if r.returncode != 0:
+        return
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
+        f.write(r.stdout)
+        tmp = f.name
+    try:
+        curses.endwin()
+        subprocess.call(["vimdiff", tmp, path])
+    finally:
+        os.unlink(tmp)
+
+
+def open_hist_last(n):
+    rel = os.path.relpath(n["path"], NOTES_DIR)
+    r = subprocess.run(
+        ["git", "log", "--follow", "-2", "--format=%H", "--", rel],
+        cwd=NOTES_DIR, capture_output=True, text=True
+    )
+    hashes = [h for h in r.stdout.strip().splitlines() if h]
+    if len(hashes) < 2:
+        return
+    open_vimdiff_at(n["path"], hashes[1])
+
+
+def hist_view(stdscr, n):
+    commits = get_note_commits(n["path"])
+    if not commits:
+        return
+
+    state = {"cur": 0, "off": 0, "d_scroll": 0, "diff": []}
+
+    def load_diff():
+        state["diff"] = get_diff_lines(n["path"], commits[state["cur"]]["hash"])
+        state["d_scroll"] = 0
+
+    load_diff()
+
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        page_h = h - 3
+        list_w = min(38, w // 3)
+        diff_w = w - list_w - 2
+
+        stdscr.addnstr(0, 0, f"history: {title(n)}", w - 1, curses.A_BOLD)
+
+        for i, c in enumerate(commits[state["off"]:state["off"] + page_h]):
+            ci = i + state["off"]
+            attr = curses.color_pair(1) | curses.A_BOLD
+            if ci == state["cur"]:
+                attr |= curses.A_REVERSE
+            date_str = datetime.fromtimestamp(c["ts"]).strftime("%m-%d %H:%M")
+            stdscr.addnstr(i + 1, 0, f"{date_str} {c['msg']}", list_w - 1, attr)
+
+        for y in range(1, h - 1):
+            stdscr.addch(y, list_w, curses.ACS_VLINE)
+
+        diff = state["diff"]
+        if diff:
+            for i, line in enumerate(diff[state["d_scroll"]:state["d_scroll"] + page_h]):
+                if line.startswith("+") and not line.startswith("+++"):
+                    attr = curses.color_pair(3)
+                elif line.startswith("-") and not line.startswith("---"):
+                    attr = curses.color_pair(2)
+                elif line.startswith("@@"):
+                    attr = curses.color_pair(4)
+                else:
+                    attr = curses.A_NORMAL
+                stdscr.addnstr(i + 1, list_w + 1, line.expandtabs(4)[:diff_w], diff_w, attr)
+        else:
+            stdscr.addnstr(1, list_w + 1, "(no changes vs current)", diff_w, curses.A_DIM)
+
+        stdscr.addnstr(h - 1, 0, "j/k select | PgDn/PgUp scroll diff | Enter vimdiff | q back", w - 1)
+        stdscr.refresh()
+
+        k = stdscr.getch()
+
+        if k in [ord("q"), 27]:
+            break
+        elif k in [ord("j"), curses.KEY_DOWN] and state["cur"] < len(commits) - 1:
+            state["cur"] += 1
+            if state["cur"] >= state["off"] + page_h:
+                state["off"] = state["cur"] - page_h + 1
+            load_diff()
+        elif k in [ord("k"), curses.KEY_UP] and state["cur"] > 0:
+            state["cur"] -= 1
+            if state["cur"] < state["off"]:
+                state["off"] = state["cur"]
+            load_diff()
+        elif k in [10, 13]:
+            open_vimdiff_at(n["path"], commits[state["cur"]]["hash"])
+            stdscr.refresh()
+        elif k == curses.KEY_NPAGE:
+            state["d_scroll"] = min(state["d_scroll"] + page_h, max(0, len(diff) - page_h))
+        elif k == curses.KEY_PPAGE:
+            state["d_scroll"] = max(0, state["d_scroll"] - page_h)
 
 
 # ----------------------------
@@ -950,7 +1085,7 @@ def draw(stdscr, notes, state):
 
     conflict_hint = " | c conflicts" if conflicts else ""
     footer = (
-        f"s sort | r reverse order | / search | ⮐ open | e edit | n new | d trash | u undo{conflict_hint} | q quit"
+        f"s sort | r reverse order | / search | ⮐ open | e edit | n new | d trash | u undo | h/H hist{conflict_hint} | q quit"
     )
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
@@ -1211,6 +1346,15 @@ def run(stdscr):
                 original, conflict = conflicts[0]
                 resolve_conflict(original, conflict)
                 refresh_notes()
+
+        # history
+        elif k == ord("h") and filtered:
+            open_hist_last(filtered[state["cur"]])
+            refresh_notes()
+
+        elif k == ord("H") and filtered:
+            hist_view(stdscr, filtered[state["cur"]])
+            refresh_notes()
 
 
 def load_notes_dir():
