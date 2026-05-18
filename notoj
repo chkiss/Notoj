@@ -908,11 +908,12 @@ def init_colors():
     curses.start_color()
     curses.use_default_colors()
 
-    curses.init_pair(1, curses.COLOR_YELLOW, -1)  # amber
+    amber = 214 if curses.COLORS >= 256 else curses.COLOR_YELLOW
+    curses.init_pair(1, amber, -1)                # amber (titles, recent dates)
     curses.init_pair(2, curses.COLOR_RED, -1)     # dates
     curses.init_pair(3, curses.COLOR_GREEN, -1)   # tags
     curses.init_pair(4, curses.COLOR_CYAN, -1)    # preview
-    curses.init_pair(5, curses.COLOR_GREEN, -1)   # search match (lime-green = bold green)
+    curses.init_pair(5, curses.COLOR_GREEN, -1)   # search match
 
 
 
@@ -1017,15 +1018,12 @@ def draw(stdscr, notes, state):
         y = i + 1
 
         attr_title = curses.color_pair(1) | curses.A_BOLD
-        attr_date = curses.color_pair(2)
+        attr_date = curses.color_pair(1) if is_recent(n) else curses.color_pair(2)
         attr_tag = curses.color_pair(3)
 
         selected = (i == state["cur"] - state["off"])
         if selected:
             attr_title |= curses.A_REVERSE
-
-        if is_recent(n):
-            attr_title |= curses.A_UNDERLINE
 
         t = title(n)
         tg = tags(n)
