@@ -523,7 +523,7 @@ def resolve_conflict(original, conflict):
 # ----------------------------
 
 def check_rename(n):
-    """After editing: if first content line changed, update frontmatter and rename file."""
+    """After editing: always update modified date; rename file if first line changed."""
     path = n["path"]
     if not os.path.exists(path):
         return
@@ -552,35 +552,35 @@ def check_rename(n):
             new_first_line = s[:TITLE_MAX]
             break
 
-    if not new_first_line or new_first_line == n.get("title", ""):
-        return
-
-    # Title changed — rewrite frontmatter
+    title_changed = bool(new_first_line) and new_first_line != n.get("title", "")
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     new_yaml_lines = []
     title_written = False
     for line in text[4:fm_end].splitlines():
-        if line.startswith("title:"):
+        if line.startswith("title:") and title_changed:
             new_yaml_lines.append(f"title: {yaml_scalar(new_first_line)}")
             title_written = True
         elif line.startswith("modified:"):
             new_yaml_lines.append(f"modified: {now_iso}")
         else:
             new_yaml_lines.append(line)
-            if line.startswith("id:") and not title_written:
+            if line.startswith("id:") and title_changed and not title_written:
                 new_yaml_lines.append(f"title: {yaml_scalar(new_first_line)}")
                 title_written = True
 
     new_text = "---\n" + "\n".join(new_yaml_lines) + text[fm_end:]
 
-    new_stem = slugify(new_first_line)
-    new_path = os.path.join(NOTES_DIR, new_stem + ".md")
-
-    if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(path):
-        i = 2
-        while os.path.exists(new_path):
-            new_path = os.path.join(NOTES_DIR, f"{new_stem} ({i}).md")
-            i += 1
+    if title_changed:
+        new_stem = slugify(new_first_line)
+        new_path = os.path.join(NOTES_DIR, new_stem + ".md")
+        if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(path):
+            i = 2
+            while os.path.exists(new_path):
+                new_path = os.path.join(NOTES_DIR, f"{new_stem} ({i}).md")
+                i += 1
+    else:
+        new_path = path
 
     atomic_write(path, new_text)
 
