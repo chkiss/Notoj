@@ -13,13 +13,33 @@ bash ~/Notoj/install.sh && source ~/.bashrc
 
 `install.sh` creates `~/.local/bin` if needed, symlinks the script, adds it to `$PATH`, and installs a shell function that auto-updates the repo on each launch. Safe to run multiple times — skips steps already done.
 
+## First launch
+
+Run `notoj` and it will walk you through setup:
+
+1. **Notes directory** — enter the path where your notes live (created if it doesn't exist)
+2. **Simplenote import** — if the directory is empty, you'll be offered the option to import from a Simplenote JSON export:
+
+```
+notoj: no notes directory configured.
+Notes directory [~/notes]: ~/my-notes
+
+Notes directory is empty. Import from a Simplenote export? [y/N] y
+Path to Simplenote export directory: ~/Downloads/simplenote-export
+  notes.json  →  my-first-note.md
+  ...
+42 note(s) converted
+
+[notoj launches]
+```
+
+The notes directory is saved to `~/.config/notoj/config`. Neither prompt appears again once notes exist.
+
 ## Usage
 
 ```
 notoj
 ```
-
-Launches the TUI. Notes are stored as markdown files in `~/Notoj/test_files/converted/`.
 
 ```
 notoj --help
