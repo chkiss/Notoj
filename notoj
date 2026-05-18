@@ -945,7 +945,7 @@ def draw(stdscr, notes, state):
 
     conflict_hint = " | c conflicts" if conflicts else ""
     footer = (
-        f"s sort | r reverse order | / search | Enter open | n new | d trash | u undo{conflict_hint} | q quit"
+        f"s sort | r reverse order | / search | ⮐ open | n new | d trash | u undo{conflict_hint} | q quit"
     )
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
@@ -1045,6 +1045,15 @@ def run(stdscr):
         # ----------------------------
         # Incremental search mode
         # ----------------------------
+
+        elif k == 27 and not state["search_mode"] and state["q"]:
+            cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
+            state["q"] = ""
+            state["cur"] = 0
+            state["off"] = 0
+            state["p_scroll"] = 0
+            if cur_path:
+                state["_restore_path"] = cur_path
 
         elif state["search_mode"]:
             if k == 27:  # ESC
