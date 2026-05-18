@@ -1170,10 +1170,10 @@ def run(stdscr):
         # ----------------------------
 
         elif k == ord("d") and filtered:
-            trash_note(filtered[state["cur"]])
+            cur = state["cur"]
+            trash_note(filtered[cur])
             refresh_notes()
-            state["cur"] = 0
-            state["off"] = 0
+            state["cur"] = cur
             state["p_scroll"] = 0
 
         # ----------------------------
