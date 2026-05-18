@@ -8,6 +8,27 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+try:
+    import readline
+
+    def _path_completer(text, state):
+        expanded = os.path.expanduser(text)
+        matches = sorted(glob.glob(expanded + "*"))
+        matches = [m + os.sep if os.path.isdir(m) else m for m in matches]
+        if text.startswith("~"):
+            home = os.path.expanduser("~")
+            matches = ["~" + m[len(home):] if m.startswith(home) else m for m in matches]
+        try:
+            return matches[state]
+        except IndexError:
+            return None
+
+    readline.set_completer(_path_completer)
+    readline.set_completer_delims(" \t\n")
+    readline.parse_and_bind("tab: complete")
+except ImportError:
+    pass
+
 HELP = """\
 notoj — keyboard-driven terminal notes
 
