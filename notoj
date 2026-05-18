@@ -52,6 +52,7 @@ STATE_FILE = ""
 TITLE_MAX = 72
 
 CONFIG_FILE = os.path.expanduser("~/.config/notoj/config")
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
 LRM = "\u200e"
 
@@ -1208,6 +1209,27 @@ def prompt_notes_dir(current=None):
             return path
 
 
+def offer_simplenote_import(notes_dir):
+    if glob.glob(os.path.join(notes_dir, "*.md")):
+        return
+
+    script = os.path.join(SCRIPT_DIR, "simplenote_convert_to_md.py")
+    if not os.path.exists(script):
+        return
+
+    print("Notes directory is empty. Import from a Simplenote export? [y/N] ", end="", flush=True)
+    if input().strip().lower() != "y":
+        return
+
+    print("Path to Simplenote export directory: ", end="", flush=True)
+    export_dir = os.path.expanduser(input().strip())
+    if not os.path.isdir(export_dir):
+        print(f"  '{export_dir}' not found, skipping import.")
+        return
+
+    subprocess.run([sys.executable, script, export_dir, notes_dir])
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print(HELP)
@@ -1222,5 +1244,7 @@ if __name__ == "__main__":
 
     TRASH_DIR = os.path.join(NOTES_DIR, ".trash")
     STATE_FILE = os.path.join(NOTES_DIR, ".notoj_state")
+
+    offer_simplenote_import(NOTES_DIR)
 
     curses.wrapper(run)
