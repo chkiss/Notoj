@@ -67,7 +67,8 @@ Print keybindings and exit.
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Open selected note in Vim |
+| `Enter` | Open note in Vim at top |
+| `e` | Open note in Vim at bottom (for appending) |
 | `n` | Create a new blank note |
 | `d` | Move note to trash |
 | `u` | Restore most recently trashed note |

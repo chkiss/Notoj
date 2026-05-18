@@ -46,7 +46,7 @@ Keybindings:
 
   Notes
     Enter       open note in Vim at top
-    e           open note in Vim at bottom
+    e           edit note in Vim (appends at bottom)
     n           create new blank note
     d           trash selected note
     u           restore most recently trashed note
@@ -947,7 +947,7 @@ def draw(stdscr, notes, state):
 
     conflict_hint = " | c conflicts" if conflicts else ""
     footer = (
-        f"s sort | r reverse order | / search | ⮐ top | e bottom | n new | d trash | u undo{conflict_hint} | q quit"
+        f"s sort | r reverse order | / search | ⮐ open | e edit | n new | d trash | u undo{conflict_hint} | q quit"
     )
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
