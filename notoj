@@ -1017,7 +1017,7 @@ def draw(stdscr, notes, state):
     for i, n in enumerate(visible):
         y = i + 1
 
-        attr_title = curses.color_pair(1) | curses.A_BOLD
+        attr_title = curses.color_pair(1)
         attr_date = curses.color_pair(1) if is_recent(n) else curses.color_pair(2)
         attr_tag = curses.color_pair(3)
 
@@ -1028,7 +1028,7 @@ def draw(stdscr, notes, state):
         t = title(n)
         tg = tags(n)
 
-        hi_title = curses.color_pair(5) | curses.A_BOLD | (curses.A_REVERSE if selected else 0)
+        hi_title = curses.color_pair(5) | (curses.A_REVERSE if selected else 0)
         title_w = min(28, list_w)
         t_clip = t[:title_w]
         draw_line_highlighted(stdscr, y, 0, t_clip, title_w, attr_title, hi_title, tokens)
