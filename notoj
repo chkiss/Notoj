@@ -1084,8 +1084,10 @@ def draw(stdscr, notes, state):
                 )
 
     conflict_hint = " | c conflicts" if conflicts else ""
+    hc = state.get("_hist_count", 0)
+    hist_hint = (" | h/H hist" if hc >= 2 else "")
     footer = (
-        f"s sort | r reverse order | / search | ⮐ open | e edit | n new | d trash | u undo | h/H hist{conflict_hint} | q quit"
+        f"s sort | r reverse order | / search | ⮐ open | e edit | n new | d trash | u undo{hist_hint}{conflict_hint} | q quit"
     )
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
@@ -1111,6 +1113,8 @@ def run(stdscr):
         "sort": "modified",
         "rev": True,
         "search_mode": False,
+        "_hist_path": None,
+        "_hist_count": 0,
     }
 
     notes = load()
@@ -1147,6 +1151,19 @@ def run(stdscr):
         h, _ = stdscr.getmaxyx()
         clamp_scroll(state, filtered, h)
 
+        cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
+        if cur_path != state["_hist_path"]:
+            state["_hist_path"] = cur_path
+            if cur_path:
+                rel = os.path.relpath(cur_path, NOTES_DIR)
+                r = subprocess.run(
+                    ["git", "log", "--follow", "-2", "--format=%H", "--", rel],
+                    cwd=NOTES_DIR, capture_output=True, text=True
+                )
+                state["_hist_count"] = sum(1 for x in r.stdout.strip().splitlines() if x)
+            else:
+                state["_hist_count"] = 0
+
         draw(stdscr, filtered, state)
 
         k = stdscr.getch()
@@ -1181,10 +1198,12 @@ def run(stdscr):
         elif k in [10, 13] and filtered:
             open_note(filtered[state["cur"]])
             refresh_notes()
+            state["_hist_path"] = None
 
         elif k == ord("e") and filtered:
             open_note(filtered[state["cur"]], end=True)
             refresh_notes()
+            state["_hist_path"] = None
 
         # ----------------------------
         # Incremental search mode
