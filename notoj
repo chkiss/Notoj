@@ -592,10 +592,13 @@ def check_rename(n):
 
 def open_note(n, end=False):
     curses.endwin()
-    cmd = ["vim", n["path"]] if not end else ["vim", "-c", "normal G", n["path"]]
+    path = n["path"]
+    mtime_before = os.path.getmtime(path) if os.path.exists(path) else None
+    cmd = ["vim", path] if not end else ["vim", "-c", "normal G", path]
     subprocess.call(cmd)
-    check_rename(n)
-    git_commit(f"edit: {title(n)}")
+    if os.path.exists(path) and os.path.getmtime(path) != mtime_before:
+        check_rename(n)
+        git_commit(f"edit: {title(n)}")
 
 
 
