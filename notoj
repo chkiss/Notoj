@@ -1090,6 +1090,16 @@ def draw(stdscr, notes, state):
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
 
+    if state["search_mode"]:
+        cursor_col = min(len("notes | filter:") + len(state["q"]), w - 1)
+        try:
+            curses.curs_set(2)
+        except curses.error:
+            curses.curs_set(1)
+        stdscr.move(0, cursor_col)
+    else:
+        curses.curs_set(0)
+
     stdscr.refresh()
 
 
@@ -1184,7 +1194,7 @@ def run(stdscr):
         # Quit
         # ----------------------------
 
-        elif k == ord("q"):
+        elif k == ord("q") and not state["search_mode"]:
             if 0 <= state["cur"] < len(filtered):
                 save_cursor(filtered[state["cur"]]["path"])
             break
@@ -1193,14 +1203,14 @@ def run(stdscr):
         # Open note
         # ----------------------------
 
-        elif k in [10, 13] and filtered:
+        elif k in [10, 13] and filtered and not state["search_mode"]:
             note = filtered[state["cur"]]
             open_note(note)
             refresh_notes()
             state["_hist_path"] = None
             state["_restore_path"] = note["path"]
 
-        elif k == ord("e") and filtered:
+        elif k == ord("e") and filtered and not state["search_mode"]:
             note = filtered[state["cur"]]
             open_note(note, end=True)
             refresh_notes()
@@ -1225,14 +1235,20 @@ def run(stdscr):
                 state["search_mode"] = False
 
             elif k in [10, 13]:
-                if state["q"].strip():
+                state["search_mode"] = False
+                if filtered:
+                    note = filtered[state["cur"]]
+                    open_note(note)
+                    refresh_notes()
+                    state["_hist_path"] = None
+                    state["_restore_path"] = note["path"]
+                elif state["q"].strip():
                     new_note_with_title(state["q"].strip())
                     refresh_notes()
                     state["q"] = ""
                     state["cur"] = 0
                     state["off"] = 0
                     state["p_scroll"] = 0
-                state["search_mode"] = False
 
             elif k == curses.KEY_DOWN:
                 state["cur"] += 1
