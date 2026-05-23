@@ -206,13 +206,20 @@ def load_md(path):
         if body.startswith("\n"):
             body = body[1:]
 
+        body_title = ""
+        for line in body.split("\n"):
+            s = line.strip()
+            if s:
+                body_title = s[:TITLE_MAX]
+                break
+
         return {
             "path": path,
             "content": body,
-            "title": meta.get("title") or "",
+            "title": body_title or meta.get("title") or "",
             "tags": meta.get("tags") or [],
             "system_tags": meta.get("system_tags") or [],
-            "modificationDate": iso_to_ts(meta.get("modified")),
+            "modificationDate": os.path.getmtime(path),
             "creationDate": iso_to_ts(meta.get("created")),
             "id": meta.get("id") or "",
             "version": meta.get("version"),
@@ -676,6 +683,7 @@ def check_rename(n):
     if fm_end == -1:
         return
 
+    meta = parse_frontmatter(text[4:fm_end])
     body = text[fm_end + 5:]
     if body.startswith("\n"):
         body = body[1:]
@@ -687,7 +695,7 @@ def check_rename(n):
             new_first_line = s[:TITLE_MAX]
             break
 
-    title_changed = bool(new_first_line) and new_first_line != n.get("title", "")
+    title_changed = bool(new_first_line) and new_first_line != (meta.get("title") or "")
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     new_yaml_lines = []
