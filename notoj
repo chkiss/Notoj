@@ -219,7 +219,7 @@ def load_md(path):
             "title": body_title or meta.get("title") or "",
             "tags": meta.get("tags") or [],
             "system_tags": meta.get("system_tags") or [],
-            "modificationDate": os.path.getmtime(path),
+            "modificationDate": iso_to_ts(meta.get("modified")),
             "creationDate": iso_to_ts(meta.get("created")),
             "id": meta.get("id") or "",
             "version": meta.get("version"),
@@ -347,15 +347,16 @@ def normalize_external_note(path):
             new_title = s[:TITLE_MAX]
             break
 
-    mtime_iso = datetime.fromtimestamp(
+    file_mtime_iso = datetime.fromtimestamp(
         os.path.getmtime(path), tz=timezone.utc
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     old_title = meta.get("title") or ""
     old_modified = meta.get("modified") or ""
 
     title_changed = bool(new_title) and new_title != old_title
-    modified_changed = mtime_iso != old_modified
+    modified_changed = file_mtime_iso != old_modified
 
     if not title_changed and not modified_changed:
         sync_hashtags(path)
@@ -368,7 +369,7 @@ def normalize_external_note(path):
             new_yaml_lines.append(f"title: {yaml_scalar(new_title)}")
             title_written = True
         elif line.startswith("modified:"):
-            new_yaml_lines.append(f"modified: {mtime_iso}")
+            new_yaml_lines.append(f"modified: {now_iso}")
         else:
             new_yaml_lines.append(line)
             if line.startswith("id:") and title_changed and not title_written:
