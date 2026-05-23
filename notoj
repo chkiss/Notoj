@@ -320,6 +320,65 @@ def file_snapshot(directory):
     return snap
 
 
+def normalize_external_note(path):
+    """Fix stale title: and modified: frontmatter after an external edit."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return
+
+    if not text.startswith("---\n"):
+        return
+
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        return
+
+    meta = parse_frontmatter(text[4:fm_end])
+    body = text[fm_end + 5:]
+    if body.startswith("\n"):
+        body = body[1:]
+
+    new_title = ""
+    for line in body.split("\n"):
+        s = line.strip()
+        if s:
+            new_title = s[:TITLE_MAX]
+            break
+
+    mtime_iso = datetime.fromtimestamp(
+        os.path.getmtime(path), tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    old_title = meta.get("title") or ""
+    old_modified = meta.get("modified") or ""
+
+    title_changed = bool(new_title) and new_title != old_title
+    modified_changed = mtime_iso != old_modified
+
+    if not title_changed and not modified_changed:
+        sync_hashtags(path)
+        return
+
+    new_yaml_lines = []
+    title_written = False
+    for line in text[4:fm_end].splitlines():
+        if line.startswith("title:") and title_changed:
+            new_yaml_lines.append(f"title: {yaml_scalar(new_title)}")
+            title_written = True
+        elif line.startswith("modified:"):
+            new_yaml_lines.append(f"modified: {mtime_iso}")
+        else:
+            new_yaml_lines.append(line)
+            if line.startswith("id:") and title_changed and not title_written:
+                new_yaml_lines.append(f"title: {yaml_scalar(new_title)}")
+                title_written = True
+
+    atomic_write(path, "---\n" + "\n".join(new_yaml_lines) + text[fm_end:])
+    sync_hashtags(path)
+
+
 def incremental_update(notes, snap_old, snap_new):
     added_or_modified = {
         p for p, m in snap_new.items()
@@ -332,7 +391,7 @@ def incremental_update(notes, snap_old, snap_new):
 
     result = [n for n in notes if n["path"] not in deleted and n["path"] not in added_or_modified]
     for path in added_or_modified:
-        sync_hashtags(path)
+        normalize_external_note(path)
         n = load_md(path)
         if n:
             result.append(n)
@@ -1192,7 +1251,7 @@ def run(stdscr):
             new_snap = file_snapshot(NOTES_DIR)
             notes, changed = incremental_update(notes, snap, new_snap)
             if changed:
-                snap = new_snap
+                snap = file_snapshot(NOTES_DIR)
                 searcher.update(notes)
                 cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
                 state["_restore_path"] = cur_path
