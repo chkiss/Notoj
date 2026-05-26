@@ -433,6 +433,12 @@ def rank_notes(notes, q):
     if not q:
         return notes
 
+    if q.startswith('"') and q.endswith('"') and len(q) > 2:
+        phrase = q[1:-1].lower()
+        if not phrase:
+            return notes
+        return [n for n in notes if phrase in title(n).lower() or phrase in content(n).lower()]
+
     tokens = q.lower().split()
     q_lower = q.lower()
     now = datetime.now().timestamp()
@@ -1114,7 +1120,11 @@ def draw(stdscr, notes, state):
     stdscr.addnstr(0, 0, header, w - 1)
 
     visible = notes[state["off"]:state["off"] + h - 3]
-    tokens = state["q"].lower().split() if state["q"].strip() else []
+    q_str = state["q"].strip()
+    if q_str.startswith('"') and q_str.endswith('"') and len(q_str) > 2:
+        tokens = [q_str[1:-1].lower()]
+    else:
+        tokens = q_str.lower().split() if q_str else []
 
     # ----------------------------
     # LEFT PANE
