@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import collections
 import curses
 import os
 import glob
@@ -133,7 +134,7 @@ def yaml_scalar(value):
 
 def slugify(title):
     safe = re.sub(r'[/\\:\0]', '-', title)
-    safe = re.sub(r'\s+', ' ', safe).strip().lstrip('.')
+    safe = re.sub(r'\s+', ' ', safe).strip().lstrip('.').rstrip('-')
     return safe or 'untitled'
 
 
@@ -360,7 +361,7 @@ def normalize_external_note(path):
 
     if not title_changed and not modified_changed:
         sync_hashtags(path)
-        return
+        return path
 
     new_yaml_lines = []
     title_written = False
@@ -377,7 +378,23 @@ def normalize_external_note(path):
                 title_written = True
 
     atomic_write(path, "---\n" + "\n".join(new_yaml_lines) + text[fm_end:])
-    sync_hashtags(path)
+
+    final_path = path
+    if title_changed and new_title:
+        new_stem = slugify(new_title)
+        current_stem = os.path.splitext(os.path.basename(path))[0]
+        if new_stem != current_stem:
+            new_path = os.path.join(NOTES_DIR, new_stem + ".md")
+            if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(path):
+                i = 2
+                while os.path.exists(new_path):
+                    new_path = os.path.join(NOTES_DIR, f"{new_stem} ({i}).md")
+                    i += 1
+            os.rename(path, new_path)
+            final_path = new_path
+
+    sync_hashtags(final_path)
+    return final_path
 
 
 def incremental_update(notes, snap_old, snap_new):
@@ -392,8 +409,8 @@ def incremental_update(notes, snap_old, snap_new):
 
     result = [n for n in notes if n["path"] not in deleted and n["path"] not in added_or_modified]
     for path in added_or_modified:
-        normalize_external_note(path)
-        n = load_md(path)
+        final_path = normalize_external_note(path) or path
+        n = load_md(final_path)
         if n:
             result.append(n)
 
@@ -519,6 +536,23 @@ def sync_hashtags(path):
         atomic_write(path, new_text)
     except Exception:
         pass
+
+
+# ----------------------------
+# Duplicate detection
+# ----------------------------
+
+def find_duplicates(notes):
+    groups = collections.defaultdict(list)
+    for n in notes:
+        key = title(n).lower().strip()
+        groups[key].append(n)
+    result = []
+    for key in sorted(groups):
+        group = groups[key]
+        if len(group) >= 2:
+            result.extend(sorted(group, key=lambda n: n.get("modificationDate") or 0, reverse=True))
+    return result
 
 
 # ----------------------------
@@ -1067,11 +1101,15 @@ def draw(stdscr, notes, state):
 
     conflicts = find_conflicts()
     conflict_badge = f" | [{len(conflicts)} conflict(s)]" if conflicts else ""
-    header = (
-        f"notes | filter:{state['q']} | "
-        f"sort:{state['sort']} {'🞃' if state['rev'] else '🞁'}"
-        f"{conflict_badge}"
-    )
+    dup_badge = f" | [{len(state['_dups'])} dup(s) — gd]" if state.get("_dups") else ""
+    if state.get("dup_mode") is not None:
+        header = f"duplicates ({len(state['dup_mode'])} notes){conflict_badge}"
+    else:
+        header = (
+            f"notes | filter:{state['q']} | "
+            f"sort:{state['sort']} {'🞃' if state['rev'] else '🞁'}"
+            f"{conflict_badge}{dup_badge}"
+        )
 
     stdscr.addnstr(0, 0, header, w - 1)
 
@@ -1152,9 +1190,12 @@ def draw(stdscr, notes, state):
     conflict_hint = " | c conflicts" if conflicts else ""
     hc = state.get("_hist_count", 0)
     hist_hint = (" | h/H hist" if hc >= 2 else "")
-    footer = (
-        f"s sort | r reverse order | / search | ⮐ open | e edit | n new | d trash | u undo{hist_hint}{conflict_hint} | q quit"
-    )
+    if state.get("dup_mode") is not None:
+        footer = "gd exit duplicates | ⮐ open | e edit | d trash | ESC exit | q quit"
+    else:
+        footer = (
+            f"s sort | r reverse order | / search | ⮐ open | e edit | n new | d trash | u undo{hist_hint}{conflict_hint} | q quit"
+        )
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
 
@@ -1189,6 +1230,8 @@ def run(stdscr):
         "sort": "modified",
         "rev": True,
         "search_mode": False,
+        "dup_mode": None,
+        "_dups": [],
         "_hist_path": None,
         "_hist_count": 0,
     }
@@ -1197,6 +1240,7 @@ def run(stdscr):
     snap = file_snapshot(NOTES_DIR)
     searcher = FullScanSearcher()
     searcher.update(notes)
+    state["_dups"] = find_duplicates(notes)
 
     saved = load_cursor()
     if saved:
@@ -1208,11 +1252,17 @@ def run(stdscr):
         notes, _ = incremental_update(notes, snap, new_snap)
         snap = new_snap
         searcher.update(notes)
+        state["_dups"] = find_duplicates(notes)
+        if state["dup_mode"] is not None:
+            state["dup_mode"] = state["_dups"]
 
     while True:
-        filtered = searcher.search(state["q"])
-        if not state["q"]:
-            filtered = sort_notes(filtered, state["sort"], state["rev"])
+        if state["dup_mode"] is not None:
+            filtered = state["dup_mode"]
+        else:
+            filtered = searcher.search(state["q"])
+            if not state["q"]:
+                filtered = sort_notes(filtered, state["sort"], state["rev"])
 
         # Restore cursor to a specific note after external reload
         restore_path = state.pop("_restore_path", None)
@@ -1254,6 +1304,9 @@ def run(stdscr):
             if changed:
                 snap = file_snapshot(NOTES_DIR)
                 searcher.update(notes)
+                state["_dups"] = find_duplicates(notes)
+                if state["dup_mode"] is not None:
+                    state["dup_mode"] = state["_dups"]
                 cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
                 state["_restore_path"] = cur_path
                 git_commit("sync: external changes")
@@ -1289,12 +1342,13 @@ def run(stdscr):
         # Incremental search mode
         # ----------------------------
 
-        elif k == 27 and not state["search_mode"] and state["q"]:
+        elif k == 27 and not state["search_mode"] and (state["q"] or state["dup_mode"] is not None):
             cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
             state["q"] = ""
             state["cur"] = 0
             state["off"] = 0
             state["p_scroll"] = 0
+            state["dup_mode"] = None
             if cur_path:
                 state["_restore_path"] = cur_path
 
@@ -1347,6 +1401,7 @@ def run(stdscr):
             state["q"] = ""
             state["cur"] = 0
             state["off"] = 0
+            state["dup_mode"] = None
 
         # ----------------------------
         # Navigation
@@ -1373,6 +1428,15 @@ def run(stdscr):
                 state["off"] = 0
                 state["p_scroll"] = 0
                 clamp_scroll(state, filtered, h)
+
+            elif nxt == ord("d"):
+                if state["dup_mode"] is not None:
+                    state["dup_mode"] = None
+                elif state["_dups"]:
+                    state["dup_mode"] = state["_dups"]
+                state["cur"] = 0
+                state["off"] = 0
+                state["p_scroll"] = 0
 
         # Ctrl-f
         elif k == 6:
