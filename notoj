@@ -895,6 +895,28 @@ def undo_trash():
         return False
 
 
+def load_trash():
+    notes = []
+    for f in glob.glob(os.path.join(TRASH_DIR, "*.md")):
+        n = load_md(f)
+        if n:
+            notes.append(n)
+    return notes
+
+
+def restore_note(n):
+    src = n["path"]
+    dst = os.path.join(NOTES_DIR, os.path.basename(src))
+    if os.path.exists(dst):
+        stem, ext = os.path.splitext(os.path.basename(src))
+        i = 2
+        while os.path.exists(dst):
+            dst = os.path.join(NOTES_DIR, f"{stem} ({i}){ext}")
+            i += 1
+    os.rename(src, dst)
+    git_commit(f"restore: {title(n)}")
+
+
 def finalize_new_note(tmp_path):
     try:
         with open(tmp_path, "r", encoding="utf-8") as f:
@@ -1108,7 +1130,9 @@ def draw(stdscr, notes, state):
     conflicts = find_conflicts()
     conflict_badge = f" | [{len(conflicts)} conflict(s)]" if conflicts else ""
     dup_badge = f" | [{len(state['_dups'])} dup(s) — gd]" if state.get("_dups") else ""
-    if state.get("dup_mode") is not None:
+    if state.get("trash_mode"):
+        header = f"trash ({len(notes)} notes){conflict_badge}"
+    elif state.get("dup_mode") is not None:
         header = f"duplicates ({len(state['dup_mode'])} notes){conflict_badge}"
     else:
         header = (
@@ -1200,7 +1224,9 @@ def draw(stdscr, notes, state):
     conflict_hint = " | c conflicts" if conflicts else ""
     hc = state.get("_hist_count", 0)
     hist_hint = (" | h/H hist" if hc >= 2 else "")
-    if state.get("dup_mode") is not None:
+    if state.get("trash_mode"):
+        footer = "gt exit trash | ⮐ open | e edit | u restore | ESC exit | q quit"
+    elif state.get("dup_mode") is not None:
         footer = "gd exit duplicates | ⮐ open | e edit | d trash | ESC exit | q quit"
     else:
         footer = (
@@ -1242,6 +1268,7 @@ def run(stdscr):
         "search_mode": False,
         "dup_mode": None,
         "_dups": [],
+        "trash_mode": False,
         "_hist_path": None,
         "_hist_count": 0,
     }
@@ -1267,7 +1294,9 @@ def run(stdscr):
             state["dup_mode"] = state["_dups"]
 
     while True:
-        if state["dup_mode"] is not None:
+        if state["trash_mode"]:
+            filtered = sort_notes(load_trash(), state["sort"], state["rev"])
+        elif state["dup_mode"] is not None:
             filtered = state["dup_mode"]
         else:
             filtered = searcher.search(state["q"])
@@ -1352,14 +1381,16 @@ def run(stdscr):
         # Incremental search mode
         # ----------------------------
 
-        elif k == 27 and not state["search_mode"] and (state["q"] or state["dup_mode"] is not None):
+        elif k == 27 and not state["search_mode"] and (state["q"] or state["dup_mode"] is not None or state["trash_mode"]):
+            was_trash = state["trash_mode"]
             cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
             state["q"] = ""
             state["cur"] = 0
             state["off"] = 0
             state["p_scroll"] = 0
             state["dup_mode"] = None
-            if cur_path:
+            state["trash_mode"] = False
+            if cur_path and not was_trash:
                 state["_restore_path"] = cur_path
 
         elif state["search_mode"]:
@@ -1412,6 +1443,7 @@ def run(stdscr):
             state["cur"] = 0
             state["off"] = 0
             state["dup_mode"] = None
+            state["trash_mode"] = False
 
         # ----------------------------
         # Navigation
@@ -1444,6 +1476,13 @@ def run(stdscr):
                     state["dup_mode"] = None
                 elif state["_dups"]:
                     state["dup_mode"] = state["_dups"]
+                state["cur"] = 0
+                state["off"] = 0
+                state["p_scroll"] = 0
+
+            elif nxt == ord("t"):
+                state["trash_mode"] = not state["trash_mode"]
+                state["dup_mode"] = None
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
@@ -1486,7 +1525,7 @@ def run(stdscr):
         # Trash note
         # ----------------------------
 
-        elif k == ord("d") and filtered:
+        elif k == ord("d") and filtered and not state["trash_mode"]:
             cur = state["cur"]
             trash_note(filtered[cur])
             refresh_notes()
@@ -1507,8 +1546,13 @@ def run(stdscr):
 
         # undo trash
         elif k == ord("u"):
-            if undo_trash():
+            if state["trash_mode"] and filtered and 0 <= state["cur"] < len(filtered):
+                restore_note(filtered[state["cur"]])
                 refresh_notes()
+                state["cur"] = max(0, state["cur"] - 1)
+            elif not state["trash_mode"]:
+                if undo_trash():
+                    refresh_notes()
 
         # new note
         elif k == ord("n"):
