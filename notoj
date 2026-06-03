@@ -229,11 +229,49 @@ def load_md(path):
         return None
 
 
+def ensure_frontmatter(path):
+    """Adopt an external .md file that has no frontmatter by prepending a
+    minimal block, so it shows up in notoj. Files that already start with a
+    frontmatter marker are left untouched."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return
+
+    if text.startswith("---\n"):
+        return
+
+    try:
+        ts_iso = datetime.fromtimestamp(
+            os.path.getmtime(path), tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except OSError:
+        ts_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    frontmatter = (
+        f"---\n"
+        f"id: {uuid.uuid4().hex}\n"
+        f"created: {ts_iso}\n"
+        f"modified: {ts_iso}\n"
+        f"version: 1\n"
+        f"tags: []\n"
+        f"---\n"
+    )
+    try:
+        atomic_write(path, frontmatter + "\n" + text)
+    except Exception:
+        pass
+
+
 def load():
     notes = []
 
     for f in glob.glob(os.path.join(NOTES_DIR, "*.md")):
         n = load_md(f)
+        if n is None:
+            ensure_frontmatter(f)
+            n = load_md(f)
         if n:
             notes.append(n)
 
@@ -409,6 +447,7 @@ def incremental_update(notes, snap_old, snap_new):
 
     result = [n for n in notes if n["path"] not in deleted and n["path"] not in added_or_modified]
     for path in added_or_modified:
+        ensure_frontmatter(path)
         final_path = normalize_external_note(path) or path
         n = load_md(final_path)
         if n:
