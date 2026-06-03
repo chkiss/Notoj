@@ -154,6 +154,35 @@ class TestSlugify(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# derive_title
+# ---------------------------------------------------------------------------
+
+class TestDeriveTitle(unittest.TestCase):
+    def test_plain_first_line(self):
+        self.assertEqual(notoj.derive_title("Hello world\nbody"), "Hello world")
+
+    def test_strips_h1_marker(self):
+        self.assertEqual(notoj.derive_title("# Hello world\n"), "Hello world")
+
+    def test_strips_deeper_heading(self):
+        self.assertEqual(notoj.derive_title("### Sub heading"), "Sub heading")
+
+    def test_skips_leading_blank_lines(self):
+        self.assertEqual(notoj.derive_title("\n\n# Title\n"), "Title")
+
+    def test_hash_without_space_kept(self):
+        # Not an ATX heading (no space) — leave it alone.
+        self.assertEqual(notoj.derive_title("#hashtag"), "#hashtag")
+
+    def test_empty_body(self):
+        self.assertEqual(notoj.derive_title(""), "")
+
+    def test_capped_at_title_max(self):
+        long = "# " + "x" * 200
+        self.assertEqual(len(notoj.derive_title(long)), notoj.TITLE_MAX)
+
+
+# ---------------------------------------------------------------------------
 # iso_to_ts
 # ---------------------------------------------------------------------------
 

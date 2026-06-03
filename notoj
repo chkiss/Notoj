@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import atexit
 import collections
 import curses
 import os
@@ -190,6 +191,17 @@ def parse_frontmatter(text):
     return result
 
 
+def derive_title(body):
+    """First non-empty line of the body, with a leading markdown heading
+    marker (#, ##, ...) stripped, capped at TITLE_MAX."""
+    for line in body.split("\n"):
+        s = line.strip()
+        if s:
+            s = re.sub(r"^#{1,6}\s+", "", s)
+            return s[:TITLE_MAX]
+    return ""
+
+
 def load_md(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -207,12 +219,7 @@ def load_md(path):
         if body.startswith("\n"):
             body = body[1:]
 
-        body_title = ""
-        for line in body.split("\n"):
-            s = line.strip()
-            if s:
-                body_title = s[:TITLE_MAX]
-                break
+        body_title = derive_title(body)
 
         return {
             "path": path,
@@ -379,12 +386,7 @@ def normalize_external_note(path):
     if body.startswith("\n"):
         body = body[1:]
 
-    new_title = ""
-    for line in body.split("\n"):
-        s = line.strip()
-        if s:
-            new_title = s[:TITLE_MAX]
-            break
+    new_title = derive_title(body)
 
     file_mtime_iso = datetime.fromtimestamp(
         os.path.getmtime(path), tz=timezone.utc
@@ -827,12 +829,7 @@ def check_rename(n):
     if body.startswith("\n"):
         body = body[1:]
 
-    new_first_line = ""
-    for line in body.split("\n"):
-        s = line.strip()
-        if s:
-            new_first_line = s[:TITLE_MAX]
-            break
+    new_first_line = derive_title(body)
 
     title_changed = bool(new_first_line) and new_first_line != (meta.get("title") or "")
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -872,11 +869,109 @@ def check_rename(n):
     sync_hashtags(new_path)
 
 
+# Vimscript sourced into the Vim sessions notoj spawns. In markdown buffers it
+# makes gf follow [[wikilinks]] and [text](target) links to other notes in
+# $NOTOJ_NOTES_DIR, falling back to built-in gf otherwise. Embedded here (rather
+# than shipped as a sibling file) so notoj stays a single self-contained program.
+NOTOJ_VIM_SCRIPT = r"""
+function! s:NotojEdit(name) abort
+  let l:dir = $NOTOJ_NOTES_DIR
+  if empty(l:dir)
+    return 0
+  endif
+  let l:name = substitute(a:name, '^\s*\(.\{-}\)\s*$', '\1', '')
+  let l:name = substitute(l:name, '^<\(.*\)>$', '\1', '')
+  if empty(l:name)
+    return 0
+  endif
+  if l:name !~? '\.md$'
+    let l:name .= '.md'
+  endif
+  execute 'edit' fnameescape(l:dir . '/' . l:name)
+  return 1
+endfunction
+
+function! s:NotojSpan(line, cur, pat) abort
+  let l:start = 0
+  while l:start <= len(a:line)
+    let l:m = matchstrpos(a:line, a:pat, l:start)
+    if l:m[1] < 0
+      return []
+    endif
+    if a:cur >= l:m[1] && a:cur < l:m[2]
+      return l:m
+    endif
+    let l:start = l:m[2] > l:m[1] ? l:m[2] : l:m[1] + 1
+  endwhile
+  return []
+endfunction
+
+function! NotojFollow() abort
+  let l:line = getline('.')
+  let l:cur = col('.') - 1
+
+  let l:m = s:NotojSpan(l:line, l:cur, '\[\[[^][]*\]\]')
+  if !empty(l:m)
+    let l:name = substitute(l:m[0], '^\[\[\(.*\)\]\]$', '\1', '')
+    if s:NotojEdit(l:name)
+      return
+    endif
+  endif
+
+  let l:m = s:NotojSpan(l:line, l:cur, '\[[^][]*\]([^()]*)')
+  if !empty(l:m)
+    let l:name = substitute(l:m[0], '^\[[^][]*\](\(.*\))$', '\1', '')
+    if s:NotojEdit(l:name)
+      return
+    endif
+  endif
+
+  silent! normal! gf
+endfunction
+
+function! s:NotojSetup() abort
+  if !empty($NOTOJ_NOTES_DIR)
+    let &l:path = $NOTOJ_NOTES_DIR
+  endif
+  nnoremap <buffer> <silent> gf :call NotojFollow()<CR>
+endfunction
+
+augroup notoj_follow
+  autocmd!
+  autocmd FileType markdown call s:NotojSetup()
+augroup END
+
+if &filetype ==# 'markdown'
+  call s:NotojSetup()
+endif
+"""
+
+_vim_helper_path = None
+
+
+def vim_source_args():
+    """Materialize the embedded notoj vimscript to a temp file (once per run)
+    and return the -c args that source it, giving spawned Vim sessions
+    note-link gf support."""
+    global _vim_helper_path
+    if _vim_helper_path is None:
+        fd, path = tempfile.mkstemp(prefix="notoj-", suffix=".vim")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(NOTOJ_VIM_SCRIPT)
+        _vim_helper_path = path
+        atexit.register(lambda p=path: os.path.exists(p) and os.remove(p))
+    esc = _vim_helper_path.replace("\\", "\\\\").replace(" ", "\\ ")
+    return ["-c", "source " + esc]
+
+
 def open_note(n, end=False):
     curses.endwin()
     path = n["path"]
     mtime_before = os.path.getmtime(path) if os.path.exists(path) else None
-    cmd = ["vim", path] if not end else ["vim", "-c", "normal G", path]
+    cmd = ["vim"] + vim_source_args()
+    if end:
+        cmd += ["-c", "normal G"]
+    cmd.append(path)
     subprocess.call(cmd)
     if os.path.exists(path) and os.path.getmtime(path) != mtime_before:
         check_rename(n)
@@ -976,12 +1071,7 @@ def finalize_new_note(tmp_path):
     if body.startswith("\n"):
         body = body[1:]
 
-    first_line = ""
-    for line in body.split("\n"):
-        s = line.strip()
-        if s:
-            first_line = s[:TITLE_MAX]
-            break
+    first_line = derive_title(body)
 
     if not first_line:
         os.unlink(tmp_path)
@@ -1033,7 +1123,7 @@ def new_note():
         f.write(frontmatter + "\n")
 
     curses.endwin()
-    subprocess.call(["vim", "-c", "normal G", "-c", "startinsert", tmp_path])
+    subprocess.call(["vim"] + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
     return finalize_new_note(tmp_path)
 
 
@@ -1054,7 +1144,7 @@ def new_note_with_title(title_text):
         f.write(frontmatter + "\n" + title_text + "\n\n")
 
     curses.endwin()
-    subprocess.call(["vim", "-c", "normal G", "-c", "startinsert", tmp_path])
+    subprocess.call(["vim"] + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
     return finalize_new_note(tmp_path)
 
 
@@ -1689,6 +1779,7 @@ if __name__ == "__main__":
 
     TRASH_DIR = os.path.join(NOTES_DIR, ".trash")
     STATE_FILE = os.path.join(NOTES_DIR, ".notoj_state")
+    os.environ["NOTOJ_NOTES_DIR"] = NOTES_DIR
 
     offer_simplenote_import(NOTES_DIR)
 
