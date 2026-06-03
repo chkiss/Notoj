@@ -869,10 +869,13 @@ def check_rename(n):
     sync_hashtags(new_path)
 
 
-# Vimscript sourced into the Vim sessions notoj spawns. In markdown buffers it
-# makes gf follow [[wikilinks]] and [text](target) links to other notes in
-# $NOTOJ_NOTES_DIR, falling back to built-in gf otherwise. Embedded here (rather
-# than shipped as a sibling file) so notoj stays a single self-contained program.
+# Vimscript sourced into the Vim sessions notoj spawns. In markdown buffers it:
+#   - makes gf follow [[wikilinks]] and [text](target) links to other notes in
+#     $NOTOJ_NOTES_DIR, falling back to built-in gf otherwise;
+#   - highlights [[wikilinks]] (notojWikiLink, linked to Underlined);
+#   - exposes NotojOpenAtTitle() to open a note at its title line.
+# Embedded here (rather than shipped as a sibling file) so notoj stays a single
+# self-contained program.
 NOTOJ_VIM_SCRIPT = r"""
 function! s:NotojEdit(name) abort
   let l:dir = $NOTOJ_NOTES_DIR
@@ -929,16 +932,58 @@ function! NotojFollow() abort
   silent! normal! gf
 endfunction
 
+" Line number of the title: first non-blank line after the frontmatter block.
+function! s:NotojTitleLine() abort
+  let l:last = line('$')
+  let l:start = 1
+  if getline(1) ==# '---'
+    let l:i = 2
+    while l:i <= l:last
+      if getline(l:i) ==# '---'
+        let l:start = l:i + 1
+        break
+      endif
+      let l:i += 1
+    endwhile
+  endif
+  let l:i = l:start
+  while l:i <= l:last
+    if getline(l:i) !~# '^\s*$'
+      return l:i
+    endif
+    let l:i += 1
+  endwhile
+  return l:start
+endfunction
+
+" Put the cursor on the title line, and if the body fills the window, pin that
+" line to the top so the frontmatter scrolls off screen.
+function! NotojOpenAtTitle() abort
+  let l:tl = s:NotojTitleLine()
+  call cursor(l:tl, 1)
+  if line('$') - l:tl + 1 >= winheight(0)
+    let l:v = winsaveview()
+    let l:v.topline = l:tl
+    call winrestview(l:v)
+  endif
+endfunction
+
 function! s:NotojSetup() abort
   if !empty($NOTOJ_NOTES_DIR)
     let &l:path = $NOTOJ_NOTES_DIR
   endif
   nnoremap <buffer> <silent> gf :call NotojFollow()<CR>
+  if !exists('w:notoj_wikilink_match')
+    let w:notoj_wikilink_match = matchadd('notojWikiLink', '\[\[[^][]*\]\]')
+  endif
 endfunction
+
+highlight default link notojWikiLink Underlined
 
 augroup notoj_follow
   autocmd!
   autocmd FileType markdown call s:NotojSetup()
+  autocmd ColorScheme * highlight default link notojWikiLink Underlined
 augroup END
 
 if &filetype ==# 'markdown'
@@ -968,9 +1013,12 @@ def open_note(n, end=False):
     curses.endwin()
     path = n["path"]
     mtime_before = os.path.getmtime(path) if os.path.exists(path) else None
-    cmd = ["vim"] + vim_source_args()
+    src = vim_source_args()
+    cmd = ["vim"] + src
     if end:
         cmd += ["-c", "normal G"]
+    elif src:
+        cmd += ["-c", "call NotojOpenAtTitle()"]
     cmd.append(path)
     subprocess.call(cmd)
     if os.path.exists(path) and os.path.getmtime(path) != mtime_before:
