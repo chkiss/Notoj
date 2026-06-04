@@ -556,7 +556,30 @@ def rank_notes(notes, q):
 # ----------------------------
 
 def extract_hashtags(text):
-    raw = re.findall(r'(?<![/\w])#([a-zA-Z][a-zA-Z0-9_-]*)', text)
+    """Extract inline #hashtags, ignoring ASCII-art rows and fenced code blocks.
+
+    A line is treated as art (and skipped) if it contains a "stray" '#': one not
+    immediately followed by a letter or digit. Box-drawing / map rows such as
+    "#w...gw...#", "#c#", "############" or "#g...#.#g.#" all have border '#'
+    before spaces, dots, another '#' or end-of-line, so they are skipped. Clean
+    lines keep working, including score/year tags like "#Worldle #144 1/6" or
+    "#nye #2019 #bhangra" where the '#' is followed by a digit. Fenced ``` / ~~~
+    code blocks are skipped entirely.
+    """
+    raw = []
+    in_fence = False
+    pat = re.compile(r'(?<![/\w])#([a-zA-Z][a-zA-Z0-9_-]*)')
+    stray = re.compile(r'#(?![A-Za-z0-9])')
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if stray.search(line):
+            continue
+        raw.extend(pat.findall(line))
     return list(dict.fromkeys(raw))
 
 

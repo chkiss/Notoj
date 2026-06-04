@@ -688,6 +688,31 @@ class TestExtractHashtags(unittest.TestCase):
         # "# comment" has space after #, so no match
         self.assertEqual(result, [])
 
+    def test_ascii_art_wall_not_captured(self):
+        # Solid walls / box rows contain stray border '#' and must be ignored.
+        self.assertEqual(notoj.extract_hashtags("############"), [])
+        self.assertEqual(notoj.extract_hashtags("#      #c#"), [])
+        self.assertEqual(notoj.extract_hashtags("########D###"), [])
+
+    def test_bordered_map_row_not_captured(self):
+        # Bordered rows like "#w...gw...#" have a trailing border '#' (stray).
+        self.assertEqual(notoj.extract_hashtags("#w...gw.....gw...#"), [])
+        self.assertEqual(notoj.extract_hashtags("   1 #w...gw...#"), [])
+        # Trailing margin annotation after the closing border.
+        self.assertEqual(notoj.extract_hashtags("#g...#.#g.#...gw...#  ╮"), [])
+
+    def test_score_and_year_tags_kept(self):
+        # '#' followed by a digit (score/year) is not stray and must not drop
+        # the real word-tags on the same line.
+        self.assertEqual(
+            notoj.extract_hashtags("#Worldle #144 1/6 (100%)"), ["Worldle"])
+        self.assertEqual(
+            notoj.extract_hashtags("#nye #2019 #bhangra"), ["nye", "bhangra"])
+
+    def test_fenced_code_block_skipped(self):
+        text = "real #tag\n```\n#define FOO 1\n#include <x>\n```\n#after"
+        self.assertEqual(notoj.extract_hashtags(text), ["tag", "after"])
+
 
 # ---------------------------------------------------------------------------
 # find_duplicates
