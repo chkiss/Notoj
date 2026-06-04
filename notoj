@@ -356,6 +356,31 @@ def load_cursor():
         return ""
 
 
+def set_cursor_style(code):
+    """Emit a DECSCUSR cursor-style escape (e.g. 1 = blinking block, 0 = reset).
+
+    curses' curs_set(2) only requests "very visible", which is no-op-ish under
+    tmux and renders steady under mosh. DECSCUSR sends an explicit blink request
+    that tmux forwards and mosh honors, so the blink survives a mosh session.
+    """
+    try:
+        sys.stdout.write("\033[%d q" % code)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def suspend_curses():
+    """Leave curses to shell out (e.g. to $EDITOR).
+
+    Resets the DECSCUSR cursor style before endwin() so the external program
+    starts from a neutral cursor — curses' endwin() doesn't track the style we
+    set in search mode, so without this a blinking block could leak into vim.
+    """
+    set_cursor_style(0)
+    curses.endwin()
+
+
 def file_snapshot(directory):
     snap = {}
     for f in glob.glob(os.path.join(directory, "*.md")):
@@ -676,7 +701,7 @@ def open_vimdiff_at(path, commit_hash):
         f.write(r.stdout)
         tmp = f.name
     try:
-        curses.endwin()
+        suspend_curses()
         subprocess.call(["vimdiff", tmp, path])
     finally:
         os.unlink(tmp)
@@ -787,7 +812,7 @@ def find_conflicts():
 
 
 def resolve_conflict(original, conflict):
-    curses.endwin()
+    suspend_curses()
     if os.path.exists(original):
         subprocess.call(["vimdiff", original, conflict])
     else:
@@ -1010,7 +1035,7 @@ def vim_source_args():
 
 
 def open_note(n, end=False):
-    curses.endwin()
+    suspend_curses()
     path = n["path"]
     mtime_before = os.path.getmtime(path) if os.path.exists(path) else None
     src = vim_source_args()
@@ -1170,7 +1195,7 @@ def new_note():
     with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(frontmatter + "\n")
 
-    curses.endwin()
+    suspend_curses()
     subprocess.call(["vim"] + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
     return finalize_new_note(tmp_path)
 
@@ -1191,7 +1216,7 @@ def new_note_with_title(title_text):
     with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(frontmatter + "\n" + title_text + "\n\n")
 
-    curses.endwin()
+    suspend_curses()
     subprocess.call(["vim"] + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
     return finalize_new_note(tmp_path)
 
@@ -1415,14 +1440,16 @@ def draw(stdscr, notes, state):
     if state["search_mode"]:
         cursor_col = min(len("notes | filter:") + len(state["q"]), w - 1)
         try:
-            curses.curs_set(2)
-        except curses.error:
             curses.curs_set(1)
+        except curses.error:
+            pass
         stdscr.move(0, cursor_col)
+        stdscr.refresh()
+        set_cursor_style(1)  # blinking block (DECSCUSR)
     else:
         curses.curs_set(0)
-
-    stdscr.refresh()
+        set_cursor_style(0)  # restore terminal default
+        stdscr.refresh()
 
 
 # ----------------------------
@@ -1831,4 +1858,7 @@ if __name__ == "__main__":
 
     offer_simplenote_import(NOTES_DIR)
 
-    curses.wrapper(run)
+    try:
+        curses.wrapper(run)
+    finally:
+        set_cursor_style(0)  # don't leave a blinking block in the shell
