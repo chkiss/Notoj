@@ -234,6 +234,30 @@ class TestParseFrontmatter(unittest.TestCase):
         result = self._parse(fm)
         self.assertEqual(result["tags"], ["foo", "bar"])
 
+    def test_inline_flow_list_single(self):
+        result = self._parse("tags: [travel]\n")
+        self.assertEqual(result["tags"], ["travel"])
+
+    def test_inline_flow_list_multiple(self):
+        result = self._parse("tags: [travel, work, urgent]\n")
+        self.assertEqual(result["tags"], ["travel", "work", "urgent"])
+
+    def test_inline_flow_list_extra_spaces(self):
+        result = self._parse("tags: [ a ,  b ]\n")
+        self.assertEqual(result["tags"], ["a", "b"])
+
+    def test_inline_flow_list_trailing_comma(self):
+        result = self._parse("tags: [foo, ]\n")
+        self.assertEqual(result["tags"], ["foo"])
+
+    def test_inline_flow_list_quoted_comma(self):
+        result = self._parse('tags: ["a, b", c]\n')
+        self.assertEqual(result["tags"], ["a, b", "c"])
+
+    def test_inline_flow_list_empty(self):
+        result = self._parse("tags: [ ]\n")
+        self.assertEqual(result["tags"], [])
+
     def test_quoted_value(self):
         fm = 'title: "10-1, 4-10"\n'
         result = self._parse(fm)
