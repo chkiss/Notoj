@@ -633,6 +633,70 @@ def sync_hashtags(path):
         pass
 
 
+def parse_tag_input(s):
+    """Split a space-separated tag string into clean tag names.
+
+    Tolerates a leading '#' on each token so "#work urgent" and
+    "work urgent" behave the same."""
+    return [t.lstrip("#") for t in s.split() if t.strip("#").strip()]
+
+
+def add_tags(path, new_tags):
+    """Merge the given tag names into the note's YAML tags field.
+
+    Returns the list of tags actually added (those not already present)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return []
+
+    if not text.startswith("---\n"):
+        return []
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        return []
+
+    meta = parse_frontmatter(text[4:fm_end])
+    existing = meta.get("tags") or []
+    if isinstance(existing, str):
+        existing = [existing] if existing else []
+
+    added = [t for t in new_tags if t and t not in existing]
+    if not added:
+        return []
+
+    all_tags = existing + added
+    has_tags_field = False
+    new_fm_lines = []
+    skip_items = False
+    for line in text[4:fm_end].splitlines():
+        if line.startswith("tags:"):
+            has_tags_field = True
+            new_fm_lines.append("tags:")
+            for t in all_tags:
+                new_fm_lines.append(f"  - {yaml_scalar(t)}")
+            skip_items = True
+            continue
+        if skip_items:
+            if line.startswith("  - "):
+                continue
+            skip_items = False
+        new_fm_lines.append(line)
+
+    if not has_tags_field:
+        new_fm_lines.append("tags:")
+        for t in all_tags:
+            new_fm_lines.append(f"  - {yaml_scalar(t)}")
+
+    new_text = "---\n" + "\n".join(new_fm_lines) + text[fm_end:]
+    try:
+        atomic_write(path, new_text)
+    except Exception:
+        return []
+    return added
+
+
 # ----------------------------
 # Duplicate detection
 # ----------------------------
@@ -1257,6 +1321,8 @@ SHOW_DATE_MIN = 38   # min list_w to show modification date truncated to 8 chars
 SHOW_AGO_MIN  = 56   # min list_w to show relative date      (col 50 + 6)
 SHOW_TAGS_MIN = 63   # min list_w to show tags               (col 62 + 1)
 
+TAG_PROMPT = "add tags (space-separated): "
+
 
 
 def init_colors():
@@ -1355,7 +1421,9 @@ def draw(stdscr, notes, state):
     conflicts = find_conflicts()
     conflict_badge = f" | [{len(conflicts)} conflict(s)]" if conflicts else ""
     dup_badge = f" | [{len(state['_dups'])} dup(s) — gd]" if state.get("_dups") else ""
-    if state.get("trash_mode"):
+    if state.get("tag_mode"):
+        header = f"{TAG_PROMPT}{state['tag_input']}"
+    elif state.get("trash_mode"):
         header = f"trash ({len(notes)} notes){conflict_badge}"
     elif state.get("dup_mode") is not None:
         header = f"duplicates ({len(state['dup_mode'])} notes){conflict_badge}"
@@ -1454,14 +1522,18 @@ def draw(stdscr, notes, state):
     elif state.get("dup_mode") is not None:
         footer = "gd exit duplicates | ⮐ open | e edit | d trash | ESC exit | q quit"
     else:
+        retag_hint = " | . retag" if state.get("_last_tags") else ""
         footer = (
-            f"s sort | r reverse order | / search | ⮐ open | e edit | n new | d trash | u undo{hist_hint}{conflict_hint} | q quit"
+            f"s sort | r reverse order | / search | ⮐ open | e edit | n new | # tag{retag_hint} | d trash | u undo{hist_hint}{conflict_hint} | q quit"
         )
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
 
-    if state["search_mode"]:
-        cursor_col = min(len("notes | filter:") + len(state["q"]), w - 1)
+    if state["search_mode"] or state.get("tag_mode"):
+        if state.get("tag_mode"):
+            cursor_col = min(len(TAG_PROMPT) + len(state["tag_input"]), w - 1)
+        else:
+            cursor_col = min(len("notes | filter:") + len(state["q"]), w - 1)
         try:
             curses.curs_set(1)
         except curses.error:
@@ -1493,6 +1565,9 @@ def run(stdscr):
         "sort": "modified",
         "rev": True,
         "search_mode": False,
+        "tag_mode": False,
+        "tag_input": "",
+        "_last_tags": "",
         "dup_mode": None,
         "_dups": [],
         "trash_mode": False,
@@ -1576,6 +1651,34 @@ def run(stdscr):
                 cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
                 state["_restore_path"] = cur_path
                 git_commit("sync: external changes")
+
+        # ----------------------------
+        # Tag prompt mode (intercepts all keys while active)
+        # ----------------------------
+
+        elif state["tag_mode"]:
+            if k == 27:  # ESC — cancel
+                state["tag_mode"] = False
+                state["tag_input"] = ""
+
+            elif k in [10, 13]:  # Enter — apply
+                if filtered and 0 <= state["cur"] < len(filtered):
+                    note = filtered[state["cur"]]
+                    new_tags = parse_tag_input(state["tag_input"])
+                    if new_tags and add_tags(note["path"], new_tags):
+                        state["_last_tags"] = state["tag_input"].strip()
+                        refresh_notes()
+                        state["_restore_path"] = note["path"]
+                state["tag_mode"] = False
+                state["tag_input"] = ""
+
+            elif k in [curses.KEY_BACKSPACE, 127, 8]:
+                state["tag_input"] = state["tag_input"][:-1]
+
+            elif 32 <= k <= 126:
+                state["tag_input"] += chr(k)
+
+            continue
 
         # ----------------------------
         # Quit
@@ -1758,6 +1861,22 @@ def run(stdscr):
             refresh_notes()
             state["cur"] = cur
             state["p_scroll"] = 0
+
+        # ----------------------------
+        # Tag note ( # to enter tags, . to repeat last addition )
+        # ----------------------------
+
+        elif k == ord("#") and filtered and not state["trash_mode"]:
+            state["tag_mode"] = True
+            state["tag_input"] = ""
+
+        elif k == ord(".") and filtered and state["_last_tags"] and not state["trash_mode"]:
+            note = filtered[state["cur"]]
+            new_tags = parse_tag_input(state["_last_tags"])
+            if new_tags and add_tags(note["path"], new_tags):
+                refresh_notes()
+                state["_restore_path"] = note["path"]
+                state["p_scroll"] = 0
 
         # ----------------------------
         # Sort mode

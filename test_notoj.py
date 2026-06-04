@@ -922,6 +922,131 @@ class TestSyncHashtags(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# parse_tag_input
+# ---------------------------------------------------------------------------
+
+class TestParseTagInput(unittest.TestCase):
+    def test_space_separated(self):
+        self.assertEqual(notoj.parse_tag_input("work urgent"), ["work", "urgent"])
+
+    def test_strips_leading_hash(self):
+        self.assertEqual(notoj.parse_tag_input("#work #urgent"), ["work", "urgent"])
+
+    def test_mixed_hash_and_plain(self):
+        self.assertEqual(notoj.parse_tag_input("#work urgent"), ["work", "urgent"])
+
+    def test_collapses_extra_whitespace(self):
+        self.assertEqual(notoj.parse_tag_input("  a   b  "), ["a", "b"])
+
+    def test_empty_string(self):
+        self.assertEqual(notoj.parse_tag_input(""), [])
+
+    def test_whitespace_only(self):
+        self.assertEqual(notoj.parse_tag_input("   "), [])
+
+    def test_bare_hashes_dropped(self):
+        self.assertEqual(notoj.parse_tag_input("# ## a"), ["a"])
+
+    def test_multiple_leading_hashes_stripped(self):
+        self.assertEqual(notoj.parse_tag_input("##tag"), ["tag"])
+
+
+# ---------------------------------------------------------------------------
+# add_tags
+# ---------------------------------------------------------------------------
+
+class TestAddTags(unittest.TestCase):
+    def _write(self, path, text):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def _note(self, tags_block="tags: []\n", body="Body text\n"):
+        return (
+            "---\n"
+            "id: abc\n"
+            "created: 2013-10-08T13:08:43Z\n"
+            "modified: 2013-10-08T13:08:43Z\n"
+            "version: 1\n"
+            f"{tags_block}"
+            "---\n"
+            "\n"
+            f"{body}"
+        )
+
+    def test_adds_to_empty_tags(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, self._note())
+            added = notoj.add_tags(path, ["work", "urgent"])
+            self.assertEqual(added, ["work", "urgent"])
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("  - work", text)
+            self.assertIn("  - urgent", text)
+
+    def test_merges_with_existing(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, self._note(tags_block="tags:\n  - existing\n"))
+            added = notoj.add_tags(path, ["new"])
+            self.assertEqual(added, ["new"])
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("  - existing", text)
+            self.assertIn("  - new", text)
+
+    def test_skips_duplicates(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, self._note(tags_block="tags:\n  - work\n"))
+            added = notoj.add_tags(path, ["work"])
+            self.assertEqual(added, [])
+            # File unchanged: tag appears exactly once.
+            text = open(path, encoding="utf-8").read()
+            self.assertEqual(text.count("  - work"), 1)
+
+    def test_partial_duplicate_adds_only_new(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, self._note(tags_block="tags:\n  - work\n"))
+            added = notoj.add_tags(path, ["work", "fresh"])
+            self.assertEqual(added, ["fresh"])
+
+    def test_body_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, self._note(body="Important body.\nSecond line.\n"))
+            notoj.add_tags(path, ["x"])
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("Important body.\nSecond line.", text)
+
+    def test_creates_tags_field_when_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, self._note(tags_block=""))
+            added = notoj.add_tags(path, ["x"])
+            self.assertEqual(added, ["x"])
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("tags:", text)
+            self.assertIn("  - x", text)
+
+    def test_no_frontmatter_returns_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, "just plain text\n")
+            self.assertEqual(notoj.add_tags(path, ["x"]), [])
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(notoj.add_tags("/no/such/file.md", ["x"]), [])
+
+    def test_empty_tag_list_no_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            content = self._note()
+            self._write(path, content)
+            self.assertEqual(notoj.add_tags(path, []), [])
+            self.assertEqual(open(path, encoding="utf-8").read(), content)
+
+
+# ---------------------------------------------------------------------------
 # file_snapshot + incremental_update
 # ---------------------------------------------------------------------------
 
