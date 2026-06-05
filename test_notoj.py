@@ -1729,5 +1729,76 @@ class TestUndoRedoActions(unittest.TestCase):
                 self._restore()
 
 
+class TestVersionIncrement(unittest.TestCase):
+    """version is an edit counter: bumped on local content save (check_rename),
+    preserved on adopting an external/synced edit (normalize_external_note)."""
+
+    def _note(self, version="5", title="Foo", body="Foo\nbody\n", modified="2020-01-01T00:00:00Z"):
+        return (
+            "---\nid: abc\n"
+            f"title: {title}\n"
+            "created: 2013-10-08T13:08:43Z\n"
+            f"modified: {modified}\n"
+            f"version: {version}\n"
+            "tags: []\n---\n\n" + body
+        )
+
+    def test_check_rename_increments(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                p = os.path.join(d, "Foo.md")
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(self._note(version="5"))
+                notoj.check_rename({"path": p})
+                self.assertEqual(notoj.load_md(p)["version"], "6")
+            finally:
+                notoj.NOTES_DIR = old
+
+    def test_check_rename_increments_successively(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                p = os.path.join(d, "Foo.md")
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(self._note(version="5"))
+                notoj.check_rename({"path": p})
+                notoj.check_rename({"path": p})
+                self.assertEqual(notoj.load_md(p)["version"], "7")
+            finally:
+                notoj.NOTES_DIR = old
+
+    def test_check_rename_non_numeric_resets_to_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                p = os.path.join(d, "Foo.md")
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(self._note(version="abc"))
+                notoj.check_rename({"path": p})
+                self.assertEqual(notoj.load_md(p)["version"], "1")
+            finally:
+                notoj.NOTES_DIR = old
+
+    def test_normalize_preserves_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                p = os.path.join(d, "Foo.md")
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(self._note(version="5", modified="2000-01-01T00:00:00Z"))
+                os.utime(p, None)  # bump mtime so normalize sees a change to adopt
+                notoj.normalize_external_note(p)
+                text = open(p, encoding="utf-8").read()
+                self.assertIn("version: 5", text)
+                self.assertNotIn("2000-01-01", text)  # modified did update
+            finally:
+                notoj.NOTES_DIR = old
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

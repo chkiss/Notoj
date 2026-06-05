@@ -489,6 +489,9 @@ def normalize_external_note(path):
             title_written = True
         elif line.startswith("modified:"):
             new_yaml_lines.append(f"modified: {now_iso}")
+        # NB: version is deliberately left untouched here — the editing device
+        # already incremented it (see check_rename); preserving it on adoption
+        # keeps the edit count from being double-bumped on sync.
         else:
             new_yaml_lines.append(line)
             if line.startswith("id:") and title_changed and not title_written:
@@ -1161,7 +1164,13 @@ def resolve_conflict(original, conflict):
 # ----------------------------
 
 def check_rename(n):
-    """After editing: always update modified date; rename file if first line changed."""
+    """After a content edit through notoj: bump the modified date, increment the
+    version (edit counter), and rename the file if the first line changed.
+
+    Version is incremented only here — on a local content save — so it stays a
+    coherent edit count across devices: normalize_external_note preserves an
+    incoming version (the editing device already bumped it), avoiding double
+    counts when Syncthing delivers a change."""
     path = n["path"]
     if not os.path.exists(path):
         return
@@ -1197,6 +1206,12 @@ def check_rename(n):
             title_written = True
         elif line.startswith("modified:"):
             new_yaml_lines.append(f"modified: {now_iso}")
+        elif line.startswith("version:"):
+            try:
+                v = int(line.split(":", 1)[1].strip()) + 1
+            except ValueError:
+                v = 1
+            new_yaml_lines.append(f"version: {v}")
         else:
             new_yaml_lines.append(line)
             if line.startswith("id:") and title_changed and not title_written:
