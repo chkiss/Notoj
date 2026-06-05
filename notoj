@@ -1661,7 +1661,7 @@ SHOW_AGO_MIN  = 56   # min list_w to show relative date      (col 50 + 6)
 SHOW_TAGS_MIN = 63   # min list_w to show tags               (col 62 + 1)
 
 TAG_PROMPT = "add tags (space-separated): "
-SCHED_PROMPT = "resurface when (e.g. +2w, 3mo, 1y, 2026-12-01, someday): "
+SCHED_PROMPT = "resurface when (e.g. 2w, 3mo, 1y, 2026-12-01, someday): "
 
 
 
