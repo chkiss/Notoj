@@ -1134,14 +1134,21 @@ CONFLICT_RE = re.compile(r'^(.+)\.sync-conflict-[\d]+-[\d]+-[A-Z0-9]+(\.[^.]+)$'
 
 
 def find_conflicts():
-    """Return list of (original_path, conflict_path) pairs for Syncthing conflicts, oldest first."""
+    """Return list of (original_path, conflict_path) pairs for Syncthing conflicts, oldest first.
+    Scans NOTES_DIR recursively (including .trash) so conflicts in subdirectories aren't missed;
+    skips .git and .stversions internals. The cron conflict sentinel covers other synced folders."""
     results = []
-    for p in sorted(glob.glob(os.path.join(NOTES_DIR, "*.sync-conflict-*.md"))):
-        m = CONFLICT_RE.match(os.path.basename(p))
-        if m:
-            original = os.path.join(NOTES_DIR, m.group(1) + m.group(2))
-            results.append((original, p))
-    return results
+    for dirpath, dirnames, filenames in os.walk(NOTES_DIR):
+        dirnames[:] = [d for d in dirnames if d not in (".git", ".stversions")]
+        for fn in filenames:
+            if not fn.endswith(".md"):
+                continue
+            m = CONFLICT_RE.match(fn)
+            if m:
+                conflict = os.path.join(dirpath, fn)
+                original = os.path.join(dirpath, m.group(1) + m.group(2))
+                results.append((original, conflict))
+    return sorted(results, key=lambda t: t[1])
 
 
 def resolve_conflict(original, conflict):
