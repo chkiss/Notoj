@@ -328,6 +328,8 @@ def load():
     notes = []
 
     for f in glob.glob(os.path.join(NOTES_DIR, "*.md")):
+        if CONFLICT_RE.match(os.path.basename(f)):
+            continue  # Syncthing conflict copy — handled by find_conflicts()/`c`, never adopted as a note
         n = load_md(f)
         if n is None:
             ensure_frontmatter(f)
@@ -437,6 +439,8 @@ def suspend_curses():
 def file_snapshot(directory):
     snap = {}
     for f in glob.glob(os.path.join(directory, "*.md")):
+        if CONFLICT_RE.match(os.path.basename(f)):
+            continue  # conflict copies must not enter the reload snapshot, or normalize_external_note would rename them
         try:
             snap[f] = os.path.getmtime(f)
         except OSError:
