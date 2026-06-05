@@ -13,6 +13,12 @@ the table is treated as NEW:
 Idempotent: the table is rewritten between <!-- ratings:start --> / <!-- end -->
 markers, so re-running is safe.
 
+Bullet comments: text after a space-then-# is ignored, e.g.
+  - The Dark Knight   # rewatched, great
+A line is skipped entirely if its comment is an ignore directive:
+  - Ramin Bahrani (director)   # ignore   (also: # skip / # hide / # x)
+(Use '# ' with a space so notoj doesn't sync the comment as a hashtag.)
+
 Usage:
   OMDB_API_KEY=xxxx python3 update_ratings.py            # all three notes
   python3 update_ratings.py --dry-run                    # show changes only
@@ -88,15 +94,36 @@ def parse_existing(block):
     return rated, none
 
 
-def section_bullets(body, block_span):
-    """All `- ` bullet texts under `## ` sections, excluding the ratings block."""
+IGNORE_WORDS = ("ignore", "skip", "hide", "no", "x")
+
+
+def parse_bullet(text):
+    """Split a bullet into (title, comment). A comment starts at the first
+    whitespace-then-# and is dropped from the title. Using '# ' (hash-space)
+    also keeps notoj from syncing it as a tag."""
+    m = re.search(r'\s#', text)
+    if not m:
+        return text.strip(), ""
+    title = text[:m.start()].strip()
+    comment = text[m.start():].strip().lstrip("#").strip().lower()
+    return title, comment
+
+
+def section_titles(body, block_span):
+    """Rateable titles from `- ` bullets under `## ` sections. Excludes the
+    ratings block and any line whose comment is an ignore directive
+    (`# ignore` / `# skip` / `# x` …); strips other trailing `# comments`."""
     if block_span:
         body = body[:block_span[0]] + body[block_span[1]:]
     out = []
     for line in body.splitlines():
         m = re.match(r'\s*-\s+(.*\S)', line)
-        if m:
-            out.append(m.group(1).strip())
+        if not m:
+            continue
+        title, comment = parse_bullet(m.group(1).strip())
+        if not title or any(comment.startswith(w) for w in IGNORE_WORDS):
+            continue
+        out.append(title)
     return out
 
 
@@ -207,13 +234,13 @@ def process(path, dry, no_new=False):
     known = list(rated) + none
     new = []
     if not no_new:
-        for b in section_bullets(body, span):
-            if ";" in b or "http" in b.lower():   # legacy grouping / link lines
+        for title in section_titles(body, span):
+            if ";" in title or "http" in title.lower():   # legacy grouping / link lines
                 continue
-            if already_known(b, known):
+            if already_known(title, known):
                 continue
-            if b not in new:
-                new.append(b)
+            if title not in new:
+                new.append(title)
 
     kind = CONFIG.get(os.path.basename(path), ("Rating", "movie"))[1]
     added = []
