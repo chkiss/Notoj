@@ -4,6 +4,7 @@ import collections
 import curses
 import os
 import glob
+import json
 import re
 import subprocess
 import sys
@@ -52,7 +53,8 @@ Keybindings:
     e           edit note in Vim (appends at bottom)
     n           create new blank note
     d           trash selected note
-    u           restore most recently trashed note
+    u           undo last trash, loop-close (x), or note edit (most recent first)
+    Ctrl-r      redo last undone action
 
   Search
     /           enter search mode
@@ -63,6 +65,12 @@ Keybindings:
   Sorting
     s           cycle sort: modified → title → created
     r           reverse sort order
+
+  Resurface (open loops)
+    g r         toggle resurface view (notes tagged #loop, most stale first)
+    z           snooze loop a week (quick "not now")
+    S           schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…)
+    x           mark loop done (removes #loop tag)
 
   Other
     h           diff vs previous version (vimdiff)
@@ -76,7 +84,15 @@ Notes are stored as Markdown files in ~/Notoj/test_files/converted/
 NOTES_DIR = ""
 TRASH_DIR = ""
 STATE_FILE = ""
+REVIEW_FILE = ""
 TITLE_MAX = 72
+
+# Open loops: notes tagged with this are surfaced in resurface mode (gr).
+LOOP_TAG = "loop"
+# Quick-snooze horizon, in days: "not this review, show me again soon." Unlike a
+# spaced-repetition ladder this does NOT grow — an open loop's natural cadence is
+# something only you know, so explicit scheduling (S) sets longer horizons.
+SNOOZE_DAYS = 7
 
 CONFIG_FILE = os.path.expanduser("~/.config/notoj/config")
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -734,6 +750,75 @@ def add_tags(path, new_tags):
     return added
 
 
+def remove_tag(path, tag):
+    """Remove a tag from a note: drop it from the YAML tags field and strip any
+    matching inline #hashtag from the body (so sync_hashtags won't re-add it).
+
+    Returns True if the file changed."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return False
+
+    if not text.startswith("---\n"):
+        return False
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        return False
+
+    meta = parse_frontmatter(text[4:fm_end])
+    existing = meta.get("tags") or []
+    if isinstance(existing, str):
+        existing = [existing] if existing else []
+
+    body = text[fm_end + 5:]
+    body_stripped = re.sub(r'(?<![/\w])#' + re.escape(tag) + r'(?![\w-])', '', body)
+
+    new_tags = [t for t in existing if t != tag]
+    if new_tags == existing and body_stripped == body:
+        return False
+
+    new_fm_lines = []
+    skip_items = False
+    for line in text[4:fm_end].splitlines():
+        if line.startswith("tags:"):
+            if new_tags:
+                new_fm_lines.append("tags:")
+                for t in new_tags:
+                    new_fm_lines.append(f"  - {yaml_scalar(t)}")
+            else:
+                new_fm_lines.append("tags: []")
+            skip_items = True
+            continue
+        if skip_items:
+            if line.startswith("  - "):
+                continue
+            skip_items = False
+        new_fm_lines.append(line)
+
+    new_text = "---\n" + "\n".join(new_fm_lines) + "\n---\n" + body_stripped
+    try:
+        atomic_write(path, new_text)
+    except Exception:
+        return False
+    return True
+
+
+def reopen_loop(path, mod_ts=None):
+    """Undo a loop-close: re-add the #loop tag, keeping the original modified
+    date (and file mtime) so the staleness clock is not reset."""
+    if not os.path.exists(path):
+        return False
+    added = add_tags(path, [LOOP_TAG])
+    if mod_ts:
+        try:
+            os.utime(path, (mod_ts, mod_ts))
+        except OSError:
+            pass
+    return bool(added)
+
+
 # ----------------------------
 # Duplicate detection
 # ----------------------------
@@ -752,6 +837,105 @@ def find_duplicates(notes):
 
 
 # ----------------------------
+# Resurface (open-loop review)
+# ----------------------------
+
+def load_review():
+    """Snooze state for open loops, keyed by note id: {id: {"due": ts, "idx": n}}.
+    Stored outside the notes (invisible persistence), gitignored."""
+    try:
+        with open(REVIEW_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_review(review):
+    try:
+        atomic_write(REVIEW_FILE, json.dumps(review, indent=0, sort_keys=True))
+    except Exception:
+        pass
+
+
+def find_loops(notes, review, now=None):
+    """Notes tagged #loop that are currently due (not snoozed into the future),
+    most stale first so the longest-neglected loop surfaces at the top."""
+    if now is None:
+        now = datetime.now().timestamp()
+    loops = []
+    for n in notes:
+        if LOOP_TAG not in (n.get("tags") or []):
+            continue
+        r = review.get(n.get("id"))
+        if r and r.get("due", 0) > now:
+            continue
+        loops.append(n)
+    loops.sort(key=lambda n: n.get("modificationDate") or 0)
+    return loops
+
+
+def snooze_loop(review, note_id, now=None):
+    """Quick defer: push a loop out of view for a fixed short horizon. Mutates
+    the review dict and returns the number of days snoozed."""
+    if now is None:
+        now = datetime.now().timestamp()
+    review[note_id] = {"due": now + SNOOZE_DAYS * 86400}
+    return SNOOZE_DAYS
+
+
+def parse_when(s, now=None):
+    """Parse a human horizon into a due timestamp, or None if unparseable.
+
+    Accepts relative offsets (+10d, +2w, +3mo, +1y), bare day counts ("14"),
+    absolute ISO dates ("2026-12-01"), and a few keywords (today, tomorrow,
+    next week/month/year, someday)."""
+    if now is None:
+        now = datetime.now().timestamp()
+    s = s.strip().lower()
+    if not s:
+        return None
+
+    keywords = {
+        "today": 0, "tomorrow": 1,
+        "week": 7, "next week": 7,
+        "month": 30, "next month": 30,
+        "quarter": 90,
+        "year": 365, "next year": 365,
+        "someday": 365,
+    }
+    if s in keywords:
+        return now + keywords[s] * 86400
+
+    m = re.fullmatch(r'\+?(\d+)\s*(d|day|days|w|wk|week|weeks|mo|mon|month|months|y|yr|year|years)?', s)
+    if m:
+        n = int(m.group(1))
+        unit = (m.group(2) or "d")[0:2]
+        if unit.startswith("w"):
+            days = n * 7
+        elif unit == "mo" or unit.startswith("mon"):
+            days = n * 30
+        elif unit.startswith("y"):
+            days = n * 365
+        else:
+            days = n
+        return now + days * 86400
+
+    for fmt_str in ("%Y-%m-%d", "%Y/%m/%d", "%m-%d-%Y", "%m/%d/%Y"):
+        try:
+            dt = datetime.strptime(s, fmt_str).replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def schedule_loop(review, note_id, due_ts):
+    """Set an explicit resurface date for a loop (mutates the review dict)."""
+    review[note_id] = {"due": due_ts}
+
+
+# ----------------------------
 # Atomic write helper
 # ----------------------------
 
@@ -766,18 +950,40 @@ def atomic_write(path, text):
 # Git snapshot helpers
 # ----------------------------
 
+GITIGNORE_ENTRIES = [".trash/", ".notoj_state", ".new_*.md", ".notoj_review.json"]
+
+
+def ensure_gitignore():
+    """Make sure notoj's private files stay out of the snapshot history, even
+    for note repos that were initialized before a given entry existed."""
+    gitignore = os.path.join(NOTES_DIR, ".gitignore")
+    try:
+        existing = []
+        if os.path.exists(gitignore):
+            with open(gitignore, "r", encoding="utf-8") as f:
+                existing = f.read().splitlines()
+        missing = [e for e in GITIGNORE_ENTRIES if e not in existing]
+        if not missing:
+            return
+        sep = "" if (not existing or existing[-1] == "") else "\n"
+        with open(gitignore, "a", encoding="utf-8") as f:
+            f.write(sep + "\n".join(missing) + "\n")
+    except Exception:
+        pass
+
+
 def git_init():
     git_dir = os.path.join(NOTES_DIR, ".git")
-    gitignore = os.path.join(NOTES_DIR, ".gitignore")
     if not os.path.exists(git_dir):
         subprocess.run(["git", "init"], cwd=NOTES_DIR, capture_output=True)
-        with open(gitignore, "w", encoding="utf-8") as f:
-            f.write(".trash/\n.notoj_state\n.new_*.md\n")
+        ensure_gitignore()
         subprocess.run(["git", "add", "-A"], cwd=NOTES_DIR, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "init: notoj snapshot history"],
             cwd=NOTES_DIR, capture_output=True,
         )
+    else:
+        ensure_gitignore()
 
 
 def git_commit(msg):
@@ -1016,6 +1222,7 @@ def check_rename(n):
         os.rename(path, new_path)
 
     sync_hashtags(new_path)
+    return new_path
 
 
 # Vimscript sourced into the Vim sessions notoj spawns. In markdown buffers it:
@@ -1161,7 +1368,15 @@ def vim_source_args():
 def open_note(n, end=False):
     suspend_curses()
     path = n["path"]
-    mtime_before = os.path.getmtime(path) if os.path.exists(path) else None
+    before = None
+    mtime_before = None
+    if os.path.exists(path):
+        mtime_before = os.path.getmtime(path)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                before = f.read()
+        except Exception:
+            before = None
     src = vim_source_args()
     cmd = ["vim"] + src
     if end:
@@ -1171,26 +1386,98 @@ def open_note(n, end=False):
     cmd.append(path)
     subprocess.call(cmd)
     if os.path.exists(path) and os.path.getmtime(path) != mtime_before:
-        check_rename(n)
+        final = check_rename(n) or path
         git_commit(f"edit: {title(n)}")
+        if before is not None and os.path.exists(final):
+            try:
+                with open(final, "r", encoding="utf-8") as f:
+                    after = f.read()
+            except Exception:
+                after = None
+            if after is not None and after != before:
+                return {"kind": "edit", "path": final, "before": before, "after": after}
+    return None
 
 
 
-def trash_note(n):
+def _stem(path):
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def do_trash(path):
+    """Move a note file into the trash, returning its trash path."""
     os.makedirs(TRASH_DIR, exist_ok=True)
-
-    base = os.path.basename(n["path"])
+    base = os.path.basename(path)
     dest = os.path.join(TRASH_DIR, base)
-
     if os.path.exists(dest):
         stem, ext = os.path.splitext(base)
         i = 2
         while os.path.exists(dest):
             dest = os.path.join(TRASH_DIR, f"{stem} ({i}){ext}")
             i += 1
+    os.rename(path, dest)
+    git_commit(f"trash: {_stem(path)}")
+    return dest
 
-    os.rename(n["path"], dest)
-    git_commit(f"trash: {title(n)}")
+
+def do_restore(trash_path, orig_path):
+    """Move a trashed file back, preferring its original path, returning the
+    path it landed at."""
+    if not os.path.exists(trash_path):
+        return None
+    dest = orig_path
+    if os.path.exists(dest):
+        d = os.path.dirname(orig_path) or NOTES_DIR
+        stem, ext = os.path.splitext(os.path.basename(orig_path))
+        i = 2
+        while os.path.exists(dest):
+            dest = os.path.join(d, f"{stem} ({i}){ext}")
+            i += 1
+    os.rename(trash_path, dest)
+    git_commit(f"restore: {_stem(dest)}")
+    return dest
+
+
+def trash_note(n):
+    return do_trash(n["path"])
+
+
+def undo_action(act):
+    """Reverse a recorded destructive action (mutating act with live paths so a
+    later redo stays consistent). Returns the path to focus afterward, if any."""
+    kind = act["kind"]
+    if kind == "trash":
+        restored = do_restore(act["trash"], act["orig"])
+        if restored:
+            act["orig"] = restored
+        return restored
+    if kind == "loop":
+        if reopen_loop(act["path"], act.get("mod")):
+            git_commit(f"reopen loop: {_stem(act['path'])}")
+        return act["path"]
+    if kind == "edit":
+        atomic_write(act["path"], act["before"])
+        git_commit(f"undo edit: {_stem(act['path'])}")
+        return act["path"]
+    return None
+
+
+def redo_action(act):
+    """Re-apply a previously undone action. Returns the path to focus, or None
+    when the action hides the note (a re-trash)."""
+    kind = act["kind"]
+    if kind == "trash":
+        act["trash"] = do_trash(act["orig"])
+        return None
+    if kind == "loop":
+        if remove_tag(act["path"], LOOP_TAG):
+            git_commit(f"close loop: {_stem(act['path'])}")
+        return act["path"]
+    if kind == "edit":
+        atomic_write(act["path"], act["after"])
+        git_commit(f"redo edit: {_stem(act['path'])}")
+        return act["path"]
+    return None
 
 
 def undo_trash():
@@ -1359,6 +1646,7 @@ SHOW_AGO_MIN  = 56   # min list_w to show relative date      (col 50 + 6)
 SHOW_TAGS_MIN = 63   # min list_w to show tags               (col 62 + 1)
 
 TAG_PROMPT = "add tags (space-separated): "
+SCHED_PROMPT = "resurface when (e.g. +2w, 3mo, 1y, 2026-12-01, someday): "
 
 
 
@@ -1458,17 +1746,22 @@ def draw(stdscr, notes, state):
     conflicts = find_conflicts()
     conflict_badge = f" | [{len(conflicts)} conflict(s)]" if conflicts else ""
     dup_badge = f" | [{len(state['_dups'])} dup(s) — gd]" if state.get("_dups") else ""
+    loop_badge = f" | [{state['_loops_due']} loop(s) due — gr]" if state.get("_loops_due") else ""
     if state.get("tag_mode"):
         header = f"{TAG_PROMPT}{state['tag_input']}"
+    elif state.get("sched_mode"):
+        header = f"{SCHED_PROMPT}{state['sched_input']}"
     elif state.get("trash_mode"):
         header = f"trash ({len(notes)} notes){conflict_badge}"
     elif state.get("dup_mode") is not None:
         header = f"duplicates ({len(state['dup_mode'])} notes){conflict_badge}"
+    elif state.get("review_mode"):
+        header = f"resurface ({len(notes)} loop(s) due) — most stale first{conflict_badge}"
     else:
         header = (
             f"notes | filter:{state['q']} | "
             f"sort:{state['sort']} {'🞃' if state['rev'] else '🞁'}"
-            f"{conflict_badge}{dup_badge}"
+            f"{conflict_badge}{dup_badge}{loop_badge}"
         )
 
     stdscr.addnstr(0, 0, header, w - 1)
@@ -1558,17 +1851,21 @@ def draw(stdscr, notes, state):
         footer = "gt exit trash | ⮐ open | e edit | u restore | ESC exit | q quit"
     elif state.get("dup_mode") is not None:
         footer = "gd exit duplicates | ⮐ open | e edit | d trash | ESC exit | q quit"
+    elif state.get("review_mode"):
+        footer = "gr exit | ⮐ open | z snooze | S schedule | x done | d trash | u/^R undo/redo | q quit"
     else:
         retag_hint = " | . retag" if state.get("_last_tags") else ""
         footer = (
-            f"s sort | r reverse order | / search | ⮐ open | e edit | n new | # tag{retag_hint} | d trash | u undo{hist_hint}{conflict_hint} | q quit"
+            f"s sort | r reverse order | / search | ⮐ open | e edit | n new | # tag{retag_hint} | d trash | u/^R undo/redo{hist_hint}{conflict_hint} | q quit"
         )
 
     stdscr.addnstr(h - 1, 0, footer, w - 1)
 
-    if state["search_mode"] or state.get("tag_mode"):
+    if state["search_mode"] or state.get("tag_mode") or state.get("sched_mode"):
         if state.get("tag_mode"):
             cursor_col = min(len(TAG_PROMPT) + len(state["tag_input"]), w - 1)
+        elif state.get("sched_mode"):
+            cursor_col = min(len(SCHED_PROMPT) + len(state["sched_input"]), w - 1)
         else:
             cursor_col = min(len("notes | filter:") + len(state["q"]), w - 1)
         try:
@@ -1608,6 +1905,13 @@ def run(stdscr):
         "dup_mode": None,
         "_dups": [],
         "trash_mode": False,
+        "review_mode": False,
+        "sched_mode": False,
+        "sched_input": "",
+        "_review": load_review(),
+        "_loops_due": 0,
+        "_undo": [],
+        "_redo": [],
         "_hist_path": None,
         "_hist_count": 0,
     }
@@ -1617,6 +1921,7 @@ def run(stdscr):
     searcher = FullScanSearcher()
     searcher.update(notes)
     state["_dups"] = find_duplicates(notes)
+    state["_loops_due"] = len(find_loops(notes, state["_review"]))
 
     saved = load_cursor()
     if saved:
@@ -1629,14 +1934,24 @@ def run(stdscr):
         snap = new_snap
         searcher.update(notes)
         state["_dups"] = find_duplicates(notes)
+        state["_loops_due"] = len(find_loops(notes, state["_review"]))
         if state["dup_mode"] is not None:
             state["dup_mode"] = state["_dups"]
+
+    def record(act):
+        """Push a fresh destructive action onto the undo stack; a new action
+        invalidates the redo stack (standard undo/redo semantics)."""
+        if act:
+            state["_undo"].append(act)
+            state["_redo"] = []
 
     while True:
         if state["trash_mode"]:
             filtered = sort_notes(load_trash(), state["sort"], state["rev"])
         elif state["dup_mode"] is not None:
             filtered = state["dup_mode"]
+        elif state["review_mode"]:
+            filtered = find_loops(notes, state["_review"])
         else:
             filtered = searcher.search(state["q"])
             if not state["q"]:
@@ -1718,6 +2033,34 @@ def run(stdscr):
             continue
 
         # ----------------------------
+        # Schedule prompt mode (intercepts all keys while active)
+        # ----------------------------
+
+        elif state["sched_mode"]:
+            if k == 27:  # ESC — cancel
+                state["sched_mode"] = False
+                state["sched_input"] = ""
+
+            elif k in [10, 13]:  # Enter — apply
+                if filtered and 0 <= state["cur"] < len(filtered):
+                    note = filtered[state["cur"]]
+                    due = parse_when(state["sched_input"])
+                    if due is not None:
+                        schedule_loop(state["_review"], note["id"], due)
+                        save_review(state["_review"])
+                        refresh_notes()
+                state["sched_mode"] = False
+                state["sched_input"] = ""
+
+            elif k in [curses.KEY_BACKSPACE, 127, 8]:
+                state["sched_input"] = state["sched_input"][:-1]
+
+            elif 32 <= k <= 126:
+                state["sched_input"] += chr(k)
+
+            continue
+
+        # ----------------------------
         # Quit
         # ----------------------------
 
@@ -1732,14 +2075,14 @@ def run(stdscr):
 
         elif k in [10, 13] and filtered and not state["search_mode"]:
             note = filtered[state["cur"]]
-            open_note(note)
+            record(open_note(note))
             refresh_notes()
             state["_hist_path"] = None
             state["_restore_path"] = note["path"]
 
         elif k == ord("e") and filtered and not state["search_mode"]:
             note = filtered[state["cur"]]
-            open_note(note, end=True)
+            record(open_note(note, end=True))
             refresh_notes()
             state["_hist_path"] = None
             state["_restore_path"] = note["path"]
@@ -1768,7 +2111,7 @@ def run(stdscr):
                 state["search_mode"] = False
                 if filtered:
                     note = filtered[state["cur"]]
-                    open_note(note)
+                    record(open_note(note))
                     refresh_notes()
                     state["_hist_path"] = None
                     state["_restore_path"] = note["path"]
@@ -1850,6 +2193,15 @@ def run(stdscr):
             elif nxt == ord("t"):
                 state["trash_mode"] = not state["trash_mode"]
                 state["dup_mode"] = None
+                state["review_mode"] = False
+                state["cur"] = 0
+                state["off"] = 0
+                state["p_scroll"] = 0
+
+            elif nxt == ord("r"):
+                state["review_mode"] = not state["review_mode"]
+                state["dup_mode"] = None
+                state["trash_mode"] = False
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
@@ -1894,9 +2246,36 @@ def run(stdscr):
 
         elif k == ord("d") and filtered and not state["trash_mode"]:
             cur = state["cur"]
-            trash_note(filtered[cur])
+            note = filtered[cur]
+            orig = note["path"]
+            dest = trash_note(note)
+            record({"kind": "trash", "orig": orig, "trash": dest})
             refresh_notes()
             state["cur"] = cur
+            state["p_scroll"] = 0
+
+        # ----------------------------
+        # Resurface actions: snooze / mark done
+        # ----------------------------
+
+        elif k == ord("z") and state["review_mode"] and filtered:
+            note = filtered[state["cur"]]
+            snooze_loop(state["_review"], note["id"])
+            save_review(state["_review"])
+            refresh_notes()
+            state["p_scroll"] = 0
+
+        elif k == ord("S") and state["review_mode"] and filtered:
+            state["sched_mode"] = True
+            state["sched_input"] = ""
+
+        elif k == ord("x") and state["review_mode"] and filtered:
+            note = filtered[state["cur"]]
+            mod_ts = note.get("modificationDate")
+            if remove_tag(note["path"], LOOP_TAG):
+                git_commit(f"close loop: {title(note)}")
+                record({"kind": "loop", "path": note["path"], "mod": mod_ts})
+                refresh_notes()
             state["p_scroll"] = 0
 
         # ----------------------------
@@ -1927,15 +2306,33 @@ def run(stdscr):
         elif k == ord("r"):
             state["rev"] = not state["rev"]
 
-        # undo trash
+        # undo: reverse most-recent destructive action (trash, loop-close, or edit)
         elif k == ord("u"):
             if state["trash_mode"] and filtered and 0 <= state["cur"] < len(filtered):
                 restore_note(filtered[state["cur"]])
                 refresh_notes()
                 state["cur"] = max(0, state["cur"] - 1)
-            elif not state["trash_mode"]:
-                if undo_trash():
-                    refresh_notes()
+            elif state["_undo"]:
+                act = state["_undo"].pop()
+                focus = undo_action(act)
+                state["_redo"].append(act)
+                refresh_notes()
+                if focus:
+                    state["_restore_path"] = focus
+                state["p_scroll"] = 0
+            elif undo_trash():  # legacy fallback for notes trashed before this session
+                refresh_notes()
+
+        # redo: re-apply most-recently-undone action (Ctrl-R)
+        elif k == 18:
+            if state["_redo"]:
+                act = state["_redo"].pop()
+                focus = redo_action(act)
+                state["_undo"].append(act)
+                refresh_notes()
+                if focus:
+                    state["_restore_path"] = focus
+                state["p_scroll"] = 0
 
         # new note
         elif k == ord("n"):
@@ -2033,6 +2430,7 @@ if __name__ == "__main__":
 
     TRASH_DIR = os.path.join(NOTES_DIR, ".trash")
     STATE_FILE = os.path.join(NOTES_DIR, ".notoj_state")
+    REVIEW_FILE = os.path.join(NOTES_DIR, ".notoj_review.json")
     os.environ["NOTOJ_NOTES_DIR"] = NOTES_DIR
 
     offer_simplenote_import(NOTES_DIR)

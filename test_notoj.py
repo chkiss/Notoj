@@ -1446,5 +1446,288 @@ class TestNoteHelpers(unittest.TestCase):
         self.assertFalse(notoj.is_recent(n))
 
 
+# ---------------------------------------------------------------------------
+# Resurface: find_loops / snooze / schedule / parse_when / remove_tag
+# ---------------------------------------------------------------------------
+
+class TestFindLoops(unittest.TestCase):
+    def _loop(self, nid, modified, tags=("loop",)):
+        return make_note(title=nid, tags=list(tags), modified=modified, path=f"/tmp/{nid}.md")
+
+    def test_only_loop_tagged_surface(self):
+        now = 1_000_000.0
+        looped = make_note(title="a", tags=["loop"], modified=now - 100, path="/tmp/a.md")
+        other = make_note(title="b", tags=["inventory"], modified=now, path="/tmp/b.md")
+        looped["id"], other["id"] = "a", "b"
+        loops = notoj.find_loops([looped, other], {}, now=now)
+        self.assertEqual([n["id"] for n in loops], ["a"])
+
+    def test_most_stale_first(self):
+        now = 1_000_000.0
+        n_old = make_note(title="old", tags=["loop"], modified=now - 9999, path="/tmp/old.md")
+        n_new = make_note(title="new", tags=["loop"], modified=now - 10, path="/tmp/new.md")
+        n_old["id"], n_new["id"] = "old", "new"
+        loops = notoj.find_loops([n_new, n_old], {}, now=now)
+        self.assertEqual([n["id"] for n in loops], ["old", "new"])
+
+    def test_snoozed_into_future_excluded(self):
+        now = 1_000_000.0
+        n = make_note(title="x", tags=["loop"], modified=now - 50, path="/tmp/x.md")
+        n["id"] = "x"
+        review = {"x": {"due": now + 86400}}
+        self.assertEqual(notoj.find_loops([n], review, now=now), [])
+
+    def test_due_in_past_included(self):
+        now = 1_000_000.0
+        n = make_note(title="x", tags=["loop"], modified=now - 50, path="/tmp/x.md")
+        n["id"] = "x"
+        review = {"x": {"due": now - 10}}
+        self.assertEqual(len(notoj.find_loops([n], review, now=now)), 1)
+
+
+class TestSnoozeLoop(unittest.TestCase):
+    def test_fixed_horizon_does_not_grow(self):
+        now = 1_000_000.0
+        review = {}
+        d1 = notoj.snooze_loop(review, "x", now=now)
+        # snooze again from the new "now" — still the same fixed horizon
+        d2 = notoj.snooze_loop(review, "x", now=now + 1)
+        self.assertEqual(d1, notoj.SNOOZE_DAYS)
+        self.assertEqual(d2, notoj.SNOOZE_DAYS)
+
+    def test_sets_due(self):
+        now = 1_000_000.0
+        review = {}
+        notoj.snooze_loop(review, "x", now=now)
+        self.assertEqual(review["x"]["due"], now + notoj.SNOOZE_DAYS * 86400)
+
+
+class TestParseWhen(unittest.TestCase):
+    def setUp(self):
+        self.now = 1_000_000.0
+
+    def test_relative_days(self):
+        self.assertEqual(notoj.parse_when("+10d", self.now), self.now + 10 * 86400)
+
+    def test_bare_number_is_days(self):
+        self.assertEqual(notoj.parse_when("14", self.now), self.now + 14 * 86400)
+
+    def test_weeks(self):
+        self.assertEqual(notoj.parse_when("2w", self.now), self.now + 14 * 86400)
+
+    def test_months(self):
+        self.assertEqual(notoj.parse_when("3mo", self.now), self.now + 90 * 86400)
+
+    def test_years(self):
+        self.assertEqual(notoj.parse_when("1y", self.now), self.now + 365 * 86400)
+
+    def test_keyword_tomorrow(self):
+        self.assertEqual(notoj.parse_when("tomorrow", self.now), self.now + 86400)
+
+    def test_keyword_someday(self):
+        self.assertEqual(notoj.parse_when("someday", self.now), self.now + 365 * 86400)
+
+    def test_iso_date(self):
+        ts = notoj.parse_when("2026-12-01", self.now)
+        self.assertEqual(
+            datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d"), "2026-12-01"
+        )
+
+    def test_garbage_returns_none(self):
+        self.assertIsNone(notoj.parse_when("whenever-ish", self.now))
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(notoj.parse_when("", self.now))
+
+
+class TestScheduleLoop(unittest.TestCase):
+    def test_sets_explicit_due(self):
+        review = {}
+        notoj.schedule_loop(review, "x", 123456.0)
+        self.assertEqual(review["x"]["due"], 123456.0)
+
+
+class TestReviewRoundTrip(unittest.TestCase):
+    def test_save_and_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = notoj.REVIEW_FILE
+            notoj.REVIEW_FILE = os.path.join(d, ".notoj_review.json")
+            try:
+                notoj.save_review({"x": {"due": 5.0}})
+                self.assertEqual(notoj.load_review(), {"x": {"due": 5.0}})
+            finally:
+                notoj.REVIEW_FILE = old
+
+    def test_load_missing_returns_empty(self):
+        old = notoj.REVIEW_FILE
+        notoj.REVIEW_FILE = "/no/such/review.json"
+        try:
+            self.assertEqual(notoj.load_review(), {})
+        finally:
+            notoj.REVIEW_FILE = old
+
+
+class TestRemoveTag(unittest.TestCase):
+    def _note(self, tags_block="tags:\n  - loop\n", body="Find a tax CPA #loop\n"):
+        return (
+            "---\n"
+            "id: abc\n"
+            "created: 2013-10-08T13:08:43Z\n"
+            "modified: 2013-10-08T13:08:43Z\n"
+            "version: 1\n"
+            f"{tags_block}"
+            "---\n"
+            "\n"
+            f"{body}"
+        )
+
+    def test_removes_frontmatter_and_inline(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._note())
+            self.assertTrue(notoj.remove_tag(path, "loop"))
+            text = open(path, encoding="utf-8").read()
+            self.assertNotIn("- loop", text)
+            self.assertNotIn("#loop", text)
+            self.assertIn("Find a tax CPA", text)
+
+    def test_keeps_other_tags(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._note(tags_block="tags:\n  - loop\n  - debt\n"))
+            notoj.remove_tag(path, "loop")
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("  - debt", text)
+            self.assertNotIn("  - loop", text)
+
+    def test_absent_tag_no_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            content = self._note(tags_block="tags:\n  - debt\n", body="No loop here.\n")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            self.assertFalse(notoj.remove_tag(path, "loop"))
+            self.assertEqual(open(path, encoding="utf-8").read(), content)
+
+    def test_does_not_strip_loophole(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._note(body="Mind the #loophole and #loop\n"))
+            notoj.remove_tag(path, "loop")
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("#loophole", text)
+            self.assertNotIn("and #loop\n", text)
+
+    def test_close_then_reopen_round_trip(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._note(tags_block="tags:\n  - loop\n", body="Renew passport\n"))
+            self.assertTrue(notoj.remove_tag(path, "loop"))
+            self.assertNotIn("- loop", open(path, encoding="utf-8").read())
+            self.assertTrue(notoj.reopen_loop(path))
+            self.assertIn("  - loop", open(path, encoding="utf-8").read())
+
+    def test_reopen_preserves_mtime(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._note(tags_block="tags: []\n", body="Body\n"))
+            notoj.reopen_loop(path, mod_ts=1_000_000.0)
+            self.assertEqual(int(os.path.getmtime(path)), 1_000_000)
+
+    def test_reopen_missing_file(self):
+        self.assertFalse(notoj.reopen_loop("/no/such/file.md"))
+
+
+class TestUndoRedoActions(unittest.TestCase):
+    """undo_action / redo_action over the three tracked action kinds."""
+
+    def _setdirs(self, d):
+        self._old = (notoj.NOTES_DIR, notoj.TRASH_DIR)
+        notoj.NOTES_DIR = d
+        notoj.TRASH_DIR = os.path.join(d, ".trash")
+
+    def _restore(self):
+        notoj.NOTES_DIR, notoj.TRASH_DIR = self._old
+
+    def _loopnote(self, path, body="Renew passport #loop\n"):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                "---\nid: abc\ncreated: 2020-01-01T00:00:00Z\n"
+                "modified: 2020-01-01T00:00:00Z\nversion: 1\ntags:\n  - loop\n---\n\n"
+                + body
+            )
+
+    def test_edit_undo_redo(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._setdirs(d)
+            try:
+                p = os.path.join(d, "note.md")
+                A = "---\nid: a\n---\n\nbefore\n"
+                B = "---\nid: a\n---\n\nafter\n"
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(B)
+                act = {"kind": "edit", "path": p, "before": A, "after": B}
+                self.assertEqual(notoj.undo_action(act), p)
+                self.assertEqual(open(p, encoding="utf-8").read(), A)
+                self.assertEqual(notoj.redo_action(act), p)
+                self.assertEqual(open(p, encoding="utf-8").read(), B)
+            finally:
+                self._restore()
+
+    def test_loop_undo_redo(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._setdirs(d)
+            try:
+                p = os.path.join(d, "note.md")
+                self._loopnote(p)
+                notoj.remove_tag(p, "loop")  # simulate the x that produced the record
+                act = {"kind": "loop", "path": p, "mod": 1_000_000.0}
+                notoj.undo_action(act)
+                self.assertIn("  - loop", open(p, encoding="utf-8").read())
+                notoj.redo_action(act)
+                self.assertNotIn("  - loop", open(p, encoding="utf-8").read())
+            finally:
+                self._restore()
+
+    def test_trash_undo_redo(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._setdirs(d)
+            try:
+                p = os.path.join(d, "note.md")
+                self._loopnote(p)
+                dest = notoj.do_trash(p)
+                self.assertFalse(os.path.exists(p))
+                self.assertTrue(os.path.exists(dest))
+                act = {"kind": "trash", "orig": p, "trash": dest}
+                focus = notoj.undo_action(act)  # restore
+                self.assertEqual(focus, p)
+                self.assertTrue(os.path.exists(p))
+                self.assertIsNone(notoj.redo_action(act))  # re-trash hides note
+                self.assertFalse(os.path.exists(p))
+                self.assertTrue(os.path.exists(act["trash"]))
+            finally:
+                self._restore()
+
+    def test_do_restore_dedupes_when_original_taken(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._setdirs(d)
+            try:
+                p = os.path.join(d, "note.md")
+                self._loopnote(p)
+                dest = notoj.do_trash(p)
+                self._loopnote(p)  # a new note now occupies the original name
+                restored = notoj.do_restore(dest, p)
+                self.assertNotEqual(restored, p)
+                self.assertTrue(os.path.exists(restored))
+                self.assertTrue(os.path.exists(p))
+            finally:
+                self._restore()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
