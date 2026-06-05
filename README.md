@@ -124,6 +124,15 @@ notoj works well with Syncthing. External edits are detected and reloaded automa
 
 A local git repository is maintained in the notes directory for snapshot history. Every edit, create, trash, restore, and conflict resolution is committed automatically.
 
+**Do not sync the notes' `.git` directory.** notoj commits independently on each machine, so syncing `.git` produces constant index/object conflicts and can corrupt the repo. If you use Syncthing, add the notes' `.git` to `.stignore` — and place it *above* any rule that includes the notes folder, since Syncthing is first-match-wins:
+
+```
+/path/to/notes/.git
+!/path/to/notes/
+```
+
+The `.md` files (and the frontmatter version counter) still sync; only git internals stay machine-local.
+
 ## Philosophy
 
 - Retrieval over organization — search replaces folders
