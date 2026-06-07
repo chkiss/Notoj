@@ -543,17 +543,6 @@ def incremental_update(notes, snap_old, snap_new):
     return result, True
 
 
-class FullScanSearcher:
-    def __init__(self):
-        self._notes = []
-
-    def update(self, notes):
-        self._notes = notes
-
-    def search(self, q):
-        return rank_notes(self._notes, q)
-
-
 def rank_notes(notes, q):
     q = q.strip()
     if not q:
@@ -609,6 +598,19 @@ def rank_notes(notes, q):
 
     results.sort(key=lambda x: (-x[0], -(x[1].get("modificationDate") or 0)))
     return [n for _, n in results]
+
+
+def search_subset(notes, q, *, preserve_order):
+    """Notes matching `q`. With preserve_order, keep the input order (just
+    filter — for views with a meaningful order like loops/dups); otherwise
+    return rank_notes' relevance order. Empty query -> the list unchanged."""
+    if not q.strip():
+        return notes
+    ranked = rank_notes(notes, q)
+    if not preserve_order:
+        return ranked
+    keep = {id(n) for n in ranked}
+    return [n for n in notes if id(n) in keep]
 
 
 # ----------------------------
@@ -1924,6 +1926,7 @@ def run(stdscr):
         "q": "",
         "sort": "modified",
         "rev": True,
+        "sort_explicit": False,
         "search_mode": False,
         "tag_mode": False,
         "tag_input": "",
@@ -1944,8 +1947,6 @@ def run(stdscr):
 
     notes = load()
     snap = file_snapshot(NOTES_DIR)
-    searcher = FullScanSearcher()
-    searcher.update(notes)
     state["_dups"] = find_duplicates(notes)
     state["_loops_due"] = len(find_loops(notes, state["_review"]))
 
@@ -1958,7 +1959,6 @@ def run(stdscr):
         new_snap = file_snapshot(NOTES_DIR)
         notes, _ = incremental_update(notes, snap, new_snap)
         snap = new_snap
-        searcher.update(notes)
         state["_dups"] = find_duplicates(notes)
         state["_loops_due"] = len(find_loops(notes, state["_review"]))
         if state["dup_mode"] is not None:
@@ -1972,16 +1972,28 @@ def run(stdscr):
             state["_redo"] = []
 
     while True:
+        # Visible list = base(mode) -> filter by query -> order. Every mode
+        # flows through the same pipeline so search and sort always compose.
+        # Each mode has a *natural* order ("keep" = preserve the base order:
+        # staleness for loops, grouping for dups; relevance for a fresh search;
+        # the chosen sort otherwise). An explicit sort (s / r) overrides it.
+        q = state["q"]
         if state["trash_mode"]:
-            filtered = sort_notes(load_trash(), state["sort"], state["rev"])
+            base, natural = load_trash(), None
         elif state["dup_mode"] is not None:
-            filtered = state["dup_mode"]
+            base, natural = state["dup_mode"], "keep"
         elif state["review_mode"]:
-            filtered = find_loops(notes, state["_review"])
+            base, natural = find_loops(notes, state["_review"]), "keep"
         else:
-            filtered = searcher.search(state["q"])
-            if not state["q"]:
-                filtered = sort_notes(filtered, state["sort"], state["rev"])
+            base, natural = notes, None
+
+        if state["sort_explicit"] or (natural is None and not q.strip()):
+            filtered = sort_notes(search_subset(base, q, preserve_order=False),
+                                  state["sort"], state["rev"])
+        elif q.strip():
+            filtered = search_subset(base, q, preserve_order=(natural == "keep"))
+        else:
+            filtered = base
 
         # Restore cursor to a specific note after external reload
         restore_path = state.pop("_restore_path", None)
@@ -2022,7 +2034,6 @@ def run(stdscr):
             notes, changed = incremental_update(notes, snap, new_snap)
             if changed:
                 snap = file_snapshot(NOTES_DIR)
-                searcher.update(notes)
                 state["_dups"] = find_duplicates(notes)
                 if state["dup_mode"] is not None:
                     state["dup_mode"] = state["_dups"]
@@ -2124,6 +2135,7 @@ def run(stdscr):
             state["cur"] = 0
             state["off"] = 0
             state["p_scroll"] = 0
+            state["sort_explicit"] = False
             state["dup_mode"] = None
             state["trash_mode"] = False
             if cur_path and not was_trash:
@@ -2141,7 +2153,12 @@ def run(stdscr):
                     refresh_notes()
                     state["_hist_path"] = None
                     state["_restore_path"] = note["path"]
-                elif state["q"].strip():
+                elif state["q"].strip() and not (
+                        state["review_mode"] or state["dup_mode"] is not None
+                        or state["trash_mode"]):
+                    # "no match -> create a note from the query" only makes
+                    # sense in the plain notes view, not while filtering a
+                    # loops / duplicates / trash subset.
                     new_note_with_title(state["q"].strip())
                     refresh_notes()
                     state["q"] = ""
@@ -2178,6 +2195,7 @@ def run(stdscr):
             state["q"] = ""
             state["cur"] = 0
             state["off"] = 0
+            state["sort_explicit"] = False
             state["dup_mode"] = None
             state["trash_mode"] = False
 
@@ -2215,6 +2233,7 @@ def run(stdscr):
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
+                state["sort_explicit"] = False
 
             elif nxt == ord("t"):
                 state["trash_mode"] = not state["trash_mode"]
@@ -2223,6 +2242,7 @@ def run(stdscr):
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
+                state["sort_explicit"] = False
 
             elif nxt == ord("r"):
                 state["review_mode"] = not state["review_mode"]
@@ -2231,6 +2251,7 @@ def run(stdscr):
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
+                state["sort_explicit"] = False
 
         # Ctrl-f
         elif k == 6:
@@ -2327,10 +2348,12 @@ def run(stdscr):
         elif k == ord("s"):
             idx = SORTS.index(state["sort"])
             state["sort"] = SORTS[(idx + 1) % len(SORTS)]
+            state["sort_explicit"] = True
 
         # reverse sort
         elif k == ord("r"):
             state["rev"] = not state["rev"]
+            state["sort_explicit"] = True
 
         # undo: reverse most-recent destructive action (trash, loop-close, or edit)
         elif k == ord("u"):

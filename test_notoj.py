@@ -659,6 +659,46 @@ class TestRankNotes(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# search_subset — filter that composes with any view's ordering
+# ---------------------------------------------------------------------------
+
+class TestSearchSubset(unittest.TestCase):
+    def setUp(self):
+        # A deliberately non-relevance order (e.g. loops "most stale first").
+        self.notes = [
+            make_note(title="zeta report", path="/z.md"),
+            make_note(title="alpha report", path="/a.md"),
+            make_note(title="gamma notes", path="/g.md"),
+        ]
+
+    def test_empty_query_returns_list_unchanged(self):
+        self.assertIs(notoj.search_subset(self.notes, "", preserve_order=True),
+                      self.notes)
+        self.assertIs(notoj.search_subset(self.notes, "  ", preserve_order=False),
+                      self.notes)
+
+    def test_filters_to_matches(self):
+        out = notoj.search_subset(self.notes, "report", preserve_order=True)
+        self.assertEqual([n["title"] for n in out],
+                         ["zeta report", "alpha report"])
+
+    def test_preserve_order_keeps_input_order(self):
+        # "report" matches zeta and alpha; input order (zeta before alpha) is
+        # kept rather than reordered by relevance.
+        out = notoj.search_subset(self.notes, "report", preserve_order=True)
+        self.assertEqual([n["path"] for n in out], ["/z.md", "/a.md"])
+
+    def test_relevance_order_when_not_preserving(self):
+        # "alpha report" is an exact title match -> ranks ahead of "zeta report".
+        out = notoj.search_subset(self.notes, "alpha report", preserve_order=False)
+        self.assertEqual(out[0]["title"], "alpha report")
+
+    def test_no_match_is_empty(self):
+        self.assertEqual(
+            notoj.search_subset(self.notes, "xyzzy", preserve_order=True), [])
+
+
+# ---------------------------------------------------------------------------
 # extract_hashtags
 # ---------------------------------------------------------------------------
 
