@@ -1775,23 +1775,23 @@ def draw(stdscr, notes, state):
     conflict_badge = f" | [{len(conflicts)} conflict(s)]" if conflicts else ""
     dup_badge = f" | [{len(state['_dups'])} dup(s) — gd]" if state.get("_dups") else ""
     loop_badge = f" | [{state['_loops_due']} loop(s) due — gr]" if state.get("_loops_due") else ""
+    # The "filter:" field only shows while you're actually searching — same in
+    # every view (notes / trash / duplicates / loops).
+    filt = f" | filter:{state['q']}" if (state["q"] or state.get("search_mode")) else ""
     if state.get("tag_mode"):
         header = f"{TAG_PROMPT}{state['tag_input']}"
     elif state.get("sched_mode"):
         header = f"{SCHED_PROMPT}{state['sched_input']}"
     elif state.get("trash_mode"):
-        filt = f" | filter:{state['q']}" if state["q"] else ""
         header = f"trash ({len(notes)} notes){filt}{conflict_badge}"
     elif state.get("dup_mode") is not None:
-        filt = f" | filter:{state['q']}" if state["q"] else ""
         header = f"duplicates ({len(notes)} notes){filt}{conflict_badge}"
     elif state.get("review_mode"):
         order = f"sort:{state['sort']}" if state.get("sort_explicit") else "most stale first"
-        filt = f" | filter:{state['q']}" if state["q"] else ""
         header = f"resurface ({len(notes)} loop(s) due) — {order}{filt}{conflict_badge}"
     else:
         header = (
-            f"notes | filter:{state['q']} | "
+            f"notes{filt} | "
             f"sort:{state['sort']} {'🞃' if state['rev'] else '🞁'}"
             f"{conflict_badge}{dup_badge}{loop_badge}"
         )
@@ -1899,7 +1899,11 @@ def draw(stdscr, notes, state):
         elif state.get("sched_mode"):
             cursor_col = min(len(SCHED_PROMPT) + len(state["sched_input"]), w - 1)
         else:
-            cursor_col = min(len("notes | filter:") + len(state["q"]), w - 1)
+            # Place the cursor right after the query in the live "filter:" field,
+            # wherever it sits in this view's header (notes / trash / dup / loops).
+            anchor = header.find("filter:")
+            base_col = anchor + len("filter:") if anchor >= 0 else 0
+            cursor_col = min(base_col + len(state["q"]), w - 1)
         try:
             curses.curs_set(1)
         except curses.error:
