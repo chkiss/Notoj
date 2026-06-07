@@ -699,6 +699,74 @@ class TestSearchSubset(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# order_notes / sort_label — the unified per-view ordering
+# ---------------------------------------------------------------------------
+
+class TestOrderNotes(unittest.TestCase):
+    def setUp(self):
+        # Base in a deliberate non-modified order (e.g. loops most-stale-first).
+        self.base = [
+            make_note(title="beta", modified=300, created=1, path="/b.md"),
+            make_note(title="alpha", modified=100, created=3, path="/a.md"),
+            make_note(title="gamma", modified=200, created=2, path="/g.md"),
+        ]
+
+    def _titles(self, lst):
+        return [n["title"] for n in lst]
+
+    def test_relevance_no_query_keep_preserves_base_order(self):
+        # loops/dups (keep=True): "relevance" at rest leaves the base order.
+        out = notoj.order_notes(self.base, "relevance", True, "", keep=True)
+        self.assertEqual(self._titles(out), ["beta", "alpha", "gamma"])
+
+    def test_relevance_no_query_nonkeep_is_modified_desc(self):
+        # notes/trash (keep=False): "relevance" at rest = modified, newest first.
+        out = notoj.order_notes(self.base, "relevance", True, "", keep=False)
+        self.assertEqual(self._titles(out), ["beta", "gamma", "alpha"])
+
+    def test_relevance_with_query_filters(self):
+        out = notoj.order_notes(self.base, "relevance", True, "alpha", keep=False)
+        self.assertEqual(self._titles(out), ["alpha"])
+
+    def test_relevance_query_keep_preserves_order(self):
+        # keep=True keeps the base order among matches (no relevance reshuffle).
+        out = notoj.order_notes(self.base, "relevance", True, "a", keep=True)
+        # "beta"/"alpha"/"gamma" all contain "a"; base order is retained.
+        self.assertEqual(self._titles(out), ["beta", "alpha", "gamma"])
+
+    def test_field_sort_applies_in_any_view(self):
+        out = notoj.order_notes(self.base, "title", False, "", keep=True)
+        self.assertEqual(self._titles(out), ["alpha", "beta", "gamma"])
+
+    def test_field_sort_filters_then_sorts(self):
+        out = notoj.order_notes(self.base, "created", False, "a", keep=False)
+        # matches all three; sorted by created ascending: beta(1),gamma(2),alpha(3)
+        self.assertEqual(self._titles(out), ["beta", "gamma", "alpha"])
+
+
+class TestSortLabel(unittest.TestCase):
+    def test_relevance_at_rest_shows_natural(self):
+        self.assertEqual(
+            notoj.sort_label("relevance", True, "", "most stale first", False),
+            "most stale first")
+
+    def test_relevance_while_searching_plain_view(self):
+        self.assertEqual(
+            notoj.sort_label("relevance", True, "budget", "modified 🞃", False),
+            "relevance")
+
+    def test_relevance_while_searching_keep_view_stays_natural(self):
+        # loops/dups filter rather than rerank, so the label stays natural.
+        self.assertEqual(
+            notoj.sort_label("relevance", True, "budget", "most stale first", True),
+            "most stale first")
+
+    def test_field_sort_shows_arrow(self):
+        self.assertEqual(notoj.sort_label("title", False, "", "x", False), "title 🞁")
+        self.assertEqual(notoj.sort_label("modified", True, "", "x", True), "modified 🞃")
+
+
+# ---------------------------------------------------------------------------
 # extract_hashtags
 # ---------------------------------------------------------------------------
 

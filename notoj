@@ -62,8 +62,8 @@ Keybindings:
     Enter       open match, or create new note titled with query
     ESC         exit search mode
 
-  Sorting
-    s           cycle sort: modified → title → created
+  Sorting (applies in every view; shown in the header)
+    s           cycle sort: relevance (default) → title → created → modified
     r           reverse sort order
 
   Resurface (open loops)
@@ -611,6 +611,31 @@ def search_subset(notes, q, *, preserve_order):
         return ranked
     keep = {id(n) for n in ranked}
     return [n for n in notes if id(n) in keep]
+
+
+def order_notes(base, sort, rev, q, keep):
+    """Order one view's list: filter by `q`, then apply the chosen `sort`.
+
+    `sort == "relevance"` is the smart default — best matches first while
+    searching, otherwise the view's own order (`keep`: the base order as-is,
+    for loops/dups; else modified-newest-first for the plain notes/trash).
+    The field sorts (title/created/modified) always apply, in every view."""
+    if sort == "relevance":
+        if q.strip():
+            return search_subset(base, q, preserve_order=keep)
+        return base if keep else sort_notes(base, "modified", True)
+    matches = search_subset(base, q, preserve_order=True) if q.strip() else base
+    return sort_notes(matches, sort, rev)
+
+
+def sort_label(sort, rev, q, natural, keep):
+    """Human label for the active sort, shown in every view's header. `natural`
+    is what "relevance" means at rest for this view. Only the plain views rank
+    by relevance while searching; keep-views (loops/dups) just filter and so
+    retain their natural order, which the label reflects."""
+    if sort == "relevance":
+        return "relevance" if (q.strip() and not keep) else natural
+    return f"{sort} {'🞃' if rev else '🞁'}"
 
 
 # ----------------------------
@@ -1664,6 +1689,9 @@ def new_note_with_title(title_text):
 # UI helpers
 # ----------------------------
 
+# Explicit field sorts cycled by `s`. The default sort, "relevance", is the
+# smart contextual order (best matches while searching, else each view's
+# natural order); `s` steps out of it into these fields.
 SORTS = ["title", "created", "modified"]
 
 MIN_W_ERROR   = 20   # below this: show error, refuse to draw
@@ -1783,18 +1811,17 @@ def draw(stdscr, notes, state):
     elif state.get("sched_mode"):
         header = f"{SCHED_PROMPT}{state['sched_input']}"
     elif state.get("trash_mode"):
-        header = f"trash ({len(notes)} notes){filt}{conflict_badge}"
+        sort = sort_label(state["sort"], state["rev"], state["q"], "modified 🞃", False)
+        header = f"trash ({len(notes)} notes){filt} | sort:{sort}{conflict_badge}"
     elif state.get("dup_mode") is not None:
-        header = f"duplicates ({len(notes)} notes){filt}{conflict_badge}"
+        sort = sort_label(state["sort"], state["rev"], state["q"], "grouped", True)
+        header = f"duplicates ({len(notes)} notes){filt} | sort:{sort}{conflict_badge}"
     elif state.get("review_mode"):
-        order = f"sort:{state['sort']}" if state.get("sort_explicit") else "most stale first"
-        header = f"resurface ({len(notes)} loop(s) due) — {order}{filt}{conflict_badge}"
+        sort = sort_label(state["sort"], state["rev"], state["q"], "most stale first", True)
+        header = f"resurface ({len(notes)} loop(s) due){filt} | sort:{sort}{conflict_badge}"
     else:
-        header = (
-            f"notes{filt} | "
-            f"sort:{state['sort']} {'🞃' if state['rev'] else '🞁'}"
-            f"{conflict_badge}{dup_badge}{loop_badge}"
-        )
+        sort = sort_label(state["sort"], state["rev"], state["q"], "modified 🞃", False)
+        header = f"notes{filt} | sort:{sort}{conflict_badge}{dup_badge}{loop_badge}"
 
     stdscr.addnstr(0, 0, header, w - 1)
 
@@ -1932,9 +1959,8 @@ def run(stdscr):
         "off": 0,
         "p_scroll": 0,
         "q": "",
-        "sort": "modified",
+        "sort": "relevance",
         "rev": True,
-        "sort_explicit": False,
         "search_mode": False,
         "tag_mode": False,
         "tag_input": "",
@@ -1980,28 +2006,22 @@ def run(stdscr):
             state["_redo"] = []
 
     while True:
-        # Visible list = base(mode) -> filter by query -> order. Every mode
-        # flows through the same pipeline so search and sort always compose.
-        # Each mode has a *natural* order ("keep" = preserve the base order:
-        # staleness for loops, grouping for dups; relevance for a fresh search;
-        # the chosen sort otherwise). An explicit sort (s / r) overrides it.
+        # Visible list = base(mode) -> filter by query -> order. Every view
+        # flows through the same order_notes() so search and sort compose the
+        # same way everywhere. `keep` = the view has its own order that the
+        # "relevance" sort should preserve (loops staleness, dup grouping);
+        # `natural` is how that order is labelled in the header.
         q = state["q"]
         if state["trash_mode"]:
-            base, natural = load_trash(), None
+            base, keep, natural = load_trash(), False, "modified 🞃"
         elif state["dup_mode"] is not None:
-            base, natural = state["dup_mode"], "keep"
+            base, keep, natural = state["dup_mode"], True, "grouped"
         elif state["review_mode"]:
-            base, natural = find_loops(notes, state["_review"]), "keep"
+            base, keep, natural = find_loops(notes, state["_review"]), True, "most stale first"
         else:
-            base, natural = notes, None
+            base, keep, natural = notes, False, "modified 🞃"
 
-        if state["sort_explicit"] or (natural is None and not q.strip()):
-            filtered = sort_notes(search_subset(base, q, preserve_order=False),
-                                  state["sort"], state["rev"])
-        elif q.strip():
-            filtered = search_subset(base, q, preserve_order=(natural == "keep"))
-        else:
-            filtered = base
+        filtered = order_notes(base, state["sort"], state["rev"], q, keep)
 
         # Restore cursor to a specific note after external reload
         restore_path = state.pop("_restore_path", None)
@@ -2139,9 +2159,10 @@ def run(stdscr):
         elif k == 27 and not state["search_mode"] and (state["q"] or state["dup_mode"] is not None or state["trash_mode"] or state["review_mode"]):
             cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
             if state["q"]:
-                # First ESC: clear the search filter, stay in the current view.
+                # First ESC: clear the search filter, stay in the current view
+                # and fall back to its natural order (relevance with no query).
                 state["q"] = ""
-                state["sort_explicit"] = False
+                state["sort"] = "relevance"
                 if cur_path:
                     state["_restore_path"] = cur_path
             else:
@@ -2152,6 +2173,7 @@ def run(stdscr):
                 state["dup_mode"] = None
                 state["trash_mode"] = False
                 state["review_mode"] = False
+                state["sort"] = "relevance"
                 if cur_path and not was_trash:
                     state["_restore_path"] = cur_path
             state["cur"] = 0
@@ -2209,12 +2231,13 @@ def run(stdscr):
 
         elif k == ord("/"):
             # `/` filters the current view (notes, trash, duplicates, or loops);
-            # it no longer drops you out of the special views.
+            # it no longer drops you out of the special views. Searching selects
+            # the relevance sort (best matches first) until you pick another.
             state["search_mode"] = True
             state["q"] = ""
             state["cur"] = 0
             state["off"] = 0
-            state["sort_explicit"] = False
+            state["sort"] = "relevance"
 
         # ----------------------------
         # Navigation
@@ -2250,7 +2273,7 @@ def run(stdscr):
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
-                state["sort_explicit"] = False
+                state["sort"] = "relevance"
 
             elif nxt == ord("t"):
                 state["trash_mode"] = not state["trash_mode"]
@@ -2259,7 +2282,7 @@ def run(stdscr):
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
-                state["sort_explicit"] = False
+                state["sort"] = "relevance"
 
             elif nxt == ord("r"):
                 state["review_mode"] = not state["review_mode"]
@@ -2268,7 +2291,7 @@ def run(stdscr):
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
-                state["sort_explicit"] = False
+                state["sort"] = "relevance"
 
         # Ctrl-f
         elif k == 6:
@@ -2363,14 +2386,15 @@ def run(stdscr):
         # ----------------------------
 
         elif k == ord("s"):
-            idx = SORTS.index(state["sort"])
-            state["sort"] = SORTS[(idx + 1) % len(SORTS)]
-            state["sort_explicit"] = True
+            if state["sort"] in SORTS:
+                idx = SORTS.index(state["sort"])
+                state["sort"] = SORTS[(idx + 1) % len(SORTS)]
+            else:  # leaving the default "relevance" sort
+                state["sort"] = SORTS[0]
 
         # reverse sort
         elif k == ord("r"):
             state["rev"] = not state["rev"]
-            state["sort_explicit"] = True
 
         # undo: reverse most-recent destructive action (trash, loop-close, or edit)
         elif k == ord("u"):
