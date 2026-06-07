@@ -1884,7 +1884,7 @@ def draw(stdscr, notes, state):
     elif state.get("dup_mode") is not None:
         footer = "gd exit duplicates | / search | ⮐ open | e edit | d trash | ESC clear/exit | q quit"
     elif state.get("review_mode"):
-        footer = "gr exit | / search | ⮐ open | z snooze | S schedule | x done | d trash | u/^R undo/redo | q quit"
+        footer = "ESC clear/exit | / search | ⮐ open | z snooze | S schedule | x done | d trash | u/^R undo/redo | q quit"
     else:
         retag_hint = " | . retag" if state.get("_last_tags") else ""
         footer = (
@@ -2132,7 +2132,7 @@ def run(stdscr):
         # Incremental search mode
         # ----------------------------
 
-        elif k == 27 and not state["search_mode"] and (state["q"] or state["dup_mode"] is not None or state["trash_mode"]):
+        elif k == 27 and not state["search_mode"] and (state["q"] or state["dup_mode"] is not None or state["trash_mode"] or state["review_mode"]):
             cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
             if state["q"]:
                 # First ESC: clear the search filter, stay in the current view.
@@ -2141,12 +2141,13 @@ def run(stdscr):
                 if cur_path:
                     state["_restore_path"] = cur_path
             else:
-                # Second ESC: leave the duplicates / trash view for the notes
-                # list. (Trash paths don't exist there, so don't try to keep
-                # the cursor on one.)
+                # Second ESC: leave the duplicates / trash / resurface view for
+                # the notes list. (Trash paths don't exist there, so don't try
+                # to keep the cursor on one.)
                 was_trash = state["trash_mode"]
                 state["dup_mode"] = None
                 state["trash_mode"] = False
+                state["review_mode"] = False
                 if cur_path and not was_trash:
                     state["_restore_path"] = cur_path
             state["cur"] = 0
