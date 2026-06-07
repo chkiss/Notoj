@@ -1793,7 +1793,9 @@ def draw(stdscr, notes, state):
         natural_list_w = w // 2 - 2
         list_w = min(natural_list_w, LIST_MAX_W)
         mid = list_w + 2
-        preview_w = w - mid - 5
+        # Preview runs from mid+1 to the last column (w-1): no right margin,
+        # mirroring the list starting flush at column 0 on the left.
+        preview_w = w - (mid + 1)
     else:
         mid = None
         list_w = w - 1
@@ -1908,14 +1910,19 @@ def draw(stdscr, notes, state):
                 if i >= h - 3:
                     break
 
-                safe = line.expandtabs(4).replace("\n", "")[:preview_w - 1]
+                safe = line.expandtabs(4).replace("\n", "")[:preview_w]
 
-                draw_line_highlighted(
-                    stdscr, i + 1, mid + 1, safe, preview_w - 1,
-                    curses.color_pair(4),
-                    curses.color_pair(5) | curses.A_BOLD,
-                    tokens,
-                )
+                # Content now runs to the last column; guard against a wide
+                # glyph landing on the edge (addnstr would raise on the wrap).
+                try:
+                    draw_line_highlighted(
+                        stdscr, i + 1, mid + 1, safe, preview_w,
+                        curses.color_pair(4),
+                        curses.color_pair(5) | curses.A_BOLD,
+                        tokens,
+                    )
+                except curses.error:
+                    pass
 
     conflict_hint = " | c conflicts" if conflicts else ""
     hc = state.get("_hist_count", 0)
