@@ -71,7 +71,8 @@ Print keybindings and exit.
 | `e` | Open note in Vim at bottom (for appending) |
 | `n` | Create a new blank note |
 | `d` | Move note to trash |
-| `u` | Restore most recently trashed note |
+| `u` | Undo last trash, loop-close (`x`), or note edit — most recent first |
+| `Ctrl-r` | Redo last undone action |
 
 ### Search
 
@@ -89,10 +90,21 @@ Print keybindings and exit.
 | `s` | Cycle sort: modified → title → created |
 | `r` | Reverse sort order |
 
+### Resurface (open loops)
+
+| Key | Action |
+|-----|--------|
+| `g r` | Toggle resurface view (notes tagged `#loop`, most stale first) |
+| `z` | Snooze loop a week (quick "not now") |
+| `S` | Schedule loop — set when it next resurfaces (`+2w`, `3mo`, `1y`, `2026-12-01`…) |
+| `x` | Mark loop done (removes the `#loop` tag) |
+
 ### Other
 
 | Key | Action |
 |-----|--------|
+| `h` | Diff selected note against its previous version (vimdiff) |
+| `H` | Browse full version history with diff preview |
 | `c` | Resolve next Syncthing conflict in vimdiff |
 | `q` | Quit |
 
@@ -117,6 +129,40 @@ synced to the frontmatter tags field.
 ```
 
 The filename is derived from the first line of the body. Renaming a note (editing its first line) renames the file automatically.
+
+## Open loops (resurfacing)
+
+Tag any note `#loop` to turn it into an open loop — something you want to be nudged about again later. Press `g r` to enter the **resurface view**, which lists only `#loop` notes, most stale first (longest since you last touched them). From there:
+
+- `z` snoozes the note for a week — a quick "not now".
+- `S` schedules exactly when it should next resurface: relative (`+2w`, `3mo`, `1y`) or an absolute date (`2026-12-01`).
+- `x` closes the loop, removing the `#loop` tag. Closing is undoable with `u` (and redoable with `Ctrl-r`), alongside trashes and note edits.
+
+This is a **tickler**, not spaced repetition: notes surface when they're due (or overdue), so capture turns into follow-through instead of a pile you never revisit.
+
+## Rating tables (`update_ratings.py`)
+
+`update_ratings.py` keeps a `## Ratings` summary table at the top of your media notes, built from the `- ` bullets you list in them. Keep a running list of films, books, or shows as plain bullets and it turns them into a sorted, rated table.
+
+It works on notes named `Books.md`, `Movies.md`, and `TV shows.md` (in your notes directory) — the filename is how it knows to rate each title as a book, film, or show. A default run updates those three; you can also pass a single note's path. Inside the note, it reads `- ` bullets under any `## ` heading as the titles to rate.
+
+The note is the source of truth: existing ratings are read back from the table and preserved. Any title that appears in a `##` section but isn't yet in the table is treated as new:
+
+- **Movies / TV shows** are looked up via the [OMDb API](https://www.omdbapi.com/apikey.aspx). Movies show Rotten Tomatoes %% (falling back to IMDb /10 where there's no RT page); TV shows show IMDb /10.
+- **Books** are inserted as `?` for you to fill in by hand (no free Goodreads API).
+
+The table is rewritten between `<!-- ratings:start -->` / `<!-- ratings:end -->` markers, so re-running is idempotent. Rows are sorted by rating.
+
+```bash
+python3 update_ratings.py              # refresh all three notes
+python3 update_ratings.py --dry-run    # show changes without writing
+python3 update_ratings.py "/path/to/Movies.md"   # one note
+python3 update_ratings.py --no-new     # re-sort/migrate only; don't add titles
+```
+
+The OMDb key is read from `OMDB_API_KEY` or `~/.config/notoj/omdb_key`; without it, new films/shows also get `?`. The notes directory defaults to `~/Documents/dokumentoj/notes` (override with `NOTOJ_NOTES_DIR`).
+
+In a bullet, text after a space-then-`#` is a comment that's stripped from the title (e.g. `- The Dark Knight   # rewatched`). If the comment is an ignore directive (`# ignore`, `# skip`, `# hide`, `# x`), the whole line is skipped. Use `# ` with a space so notoj doesn't sync the comment as a hashtag.
 
 ## Sync and conflicts
 
