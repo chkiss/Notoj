@@ -164,6 +164,8 @@ The OMDb key is read from `OMDB_API_KEY` or `~/.config/notoj/omdb_key`; without 
 
 In a bullet, text after a space-then-`#` is a comment that's stripped from the title (e.g. `- The Dark Knight   # rewatched`). If the comment is an ignore directive (`# ignore`, `# skip`, `# hide`, `# x`), the whole line is skipped. Use `# ` with a space so notoj doesn't sync the comment as a hashtag.
 
+You can list several films on one bullet separated by `;` (e.g. `- Bollywood from Neel: Lagaan; Queen; Bandit Queen`). On the next run each becomes its own bullet so it gets rated individually, and a leading `Label:` is dropped. The `;` is only treated as a separator when the whole bullet isn't itself a real title on OMDb, so the rare film with a semicolon in its name is left intact.
+
 ## Sync and conflicts
 
 notoj works well with Syncthing. External edits are detected and reloaded automatically. Syncthing sync-conflict files are detected and surfaced in the header; press `c` to resolve them in vimdiff.

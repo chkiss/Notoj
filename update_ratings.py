@@ -127,6 +127,46 @@ def section_titles(body, block_span):
     return out
 
 
+# ---- grouped-bullet expansion --------------------------------------------
+
+def split_groups(body, block_span):
+    """Rewrite `;`-grouped wishlist bullets into one bullet per film.
+
+    A bullet's `;` is treated as a grouping separator unless the whole bullet is
+    itself a valid film on OMDb (rare — almost no title contains a semicolon).
+    A leading `Label: ` on the first segment (e.g. "Bollywood from Neel: Lagaan;
+    …") is dropped so the film looks up cleanly. The ratings block, commented
+    bullets and link lines are left untouched."""
+    if block_span:
+        s, e = block_span
+        chunks = [(body[:s], True), (body[s:e], False), (body[e:], True)]
+    else:
+        chunks = [(body, True)]
+    out = []
+    for text, expand in chunks:
+        if not expand:
+            out.append(text)
+            continue
+        lines = []
+        for line in text.split("\n"):
+            m = re.match(r'(\s*)-\s+(.*\S)\s*$', line)
+            raw = m.group(2) if m else ""
+            if (not m or ";" not in raw or re.search(r'\s#', raw)
+                    or "http" in raw.lower()):
+                lines.append(line)
+                continue
+            if omdb_lookup(raw, "movie"):          # whole bullet is a real title
+                lines.append(line)
+                continue
+            indent = m.group(1)
+            segs = [s.strip() for s in raw.split(";") if s.strip()]
+            if ":" in segs[0]:                     # drop a leading "Label:"
+                segs[0] = segs[0].split(":", 1)[1].strip()
+            lines += [f"{indent}- {s}" for s in segs if s]
+        out.append("\n".join(lines))
+    return "".join(out)
+
+
 # ---- matching ------------------------------------------------------------
 
 STOP = {"the", "and", "for", "with", "from", "her", "his", "into", "una", "los",
@@ -134,6 +174,10 @@ STOP = {"the", "and", "for", "with", "from", "her", "his", "into", "una", "los",
 
 
 def words(s):
+    # Drop parenthetical/bracketed qualifiers (year, language, remake note) so a
+    # title and its variant reduce to the same core: "Oldboy (2003)" and
+    # "Oldboy (Korean)" both -> {oldboy}, letting the subset check merge them.
+    s = re.sub(r'[\(\[].*?[\)\]]', ' ', s)
     s = unicodedata.normalize("NFKD", s.lower())
     s = "".join(c for c in s if not unicodedata.combining(c))
     return set(w for w in re.findall(r'[a-z0-9]+', s)
@@ -159,7 +203,11 @@ def already_known(bullet, known_titles):
         if tw <= bw or bw <= tw:
             return True
         inter = bw & tw
-        if inter and len(inter) / min(len(bw), len(tw)) >= 0.5:
+        # Require >=2 shared words for the fuzzy branch: a single common word
+        # ("last", "beauty", "american") is too weak and wrongly suppressed
+        # distinct films (e.g. "Last Night" vs "The Last Waltz"). Genuine
+        # one-word dupes are still caught by the substring / subset checks above.
+        if len(inter) >= 2 and len(inter) / min(len(bw), len(tw)) >= 0.5:
             return True
     return False
 
@@ -228,6 +276,8 @@ def render_block(col, kind, rated, none):
 def process(path, dry, no_new=False):
     text = open(path, encoding="utf-8").read()
     fm, body = split_frontmatter(text)
+    if not no_new:
+        body = split_groups(body, find_block(body))
     span = find_block(body)
     rated, none = parse_existing(body[span[0]:span[1]]) if span else ({}, [])
 
@@ -235,7 +285,7 @@ def process(path, dry, no_new=False):
     new = []
     if not no_new:
         for title in section_titles(body, span):
-            if ";" in title or "http" in title.lower():   # legacy grouping / link lines
+            if "http" in title.lower():   # link lines (grouping handled upstream)
                 continue
             if already_known(title, known):
                 continue

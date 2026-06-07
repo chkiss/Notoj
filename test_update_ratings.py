@@ -69,6 +69,58 @@ class TestAlreadyKnown(unittest.TestCase):
     def test_subset_match(self):
         self.assertTrue(ur.already_known("Dune Part Two", ["Dune"]))
 
+    def test_single_common_word_is_not_enough(self):
+        # "Last Night" shares only the common word "last" with "The Last Waltz";
+        # a one-word overlap must not suppress a distinct film.
+        self.assertFalse(ur.already_known("Last Night", ["The Last Waltz"]))
+
+    def test_qualifier_variant_still_matches(self):
+        # Parenthetical year/language qualifiers are stripped, so the shared
+        # core word makes these the same title.
+        self.assertTrue(ur.already_known("Oldboy (Korean)", ["Oldboy (2003)"]))
+        self.assertTrue(
+            ur.already_known("Tragedy of Mayerling", ["Mayerling (1968)"]))
+
+
+# ---------------------------------------------------------------------------
+# split_groups
+# ---------------------------------------------------------------------------
+
+class TestSplitGroups(unittest.TestCase):
+    def _split(self, body):
+        # OMDb is only consulted to spare a genuine `;`-bearing title; in these
+        # tests no bullet is a real film, so every lookup returns None -> split.
+        with mock.patch.object(ur, "omdb_lookup", return_value=None):
+            return ur.split_groups(body, ur.find_block(body))
+
+    def test_splits_and_drops_label(self):
+        body = "## Misc\n- Bollywood from Neel: Lagaan; Earth/Water/Fire; Queen\n"
+        out = self._split(body)
+        self.assertIn("- Lagaan", out)
+        self.assertIn("- Earth/Water/Fire", out)
+        self.assertIn("- Queen", out)
+        self.assertNotIn(";", out)
+        self.assertNotIn("Bollywood from Neel", out)
+
+    def test_leaves_plain_and_commented_bullets(self):
+        body = "## Misc\n- Inception\n- A; B   # ignore\n"
+        out = self._split(body)
+        self.assertEqual(out, body)   # no ';' to expand outside a comment
+
+    def test_does_not_touch_ratings_block(self):
+        block = ur.START + "\n| Film | Rating |\n| A; B | 99% |\n" + ur.END
+        body = "## Misc\n- X; Y\n\n" + block + "\n"
+        out = self._split(body)
+        self.assertIn("| A; B | 99% |", out)   # block row untouched
+        self.assertIn("- X", out)
+        self.assertIn("- Y", out)
+
+    def test_keeps_genuine_semicolon_title(self):
+        body = "## Misc\n- Goodbye; Hello\n"
+        with mock.patch.object(ur, "omdb_lookup", return_value="80%"):
+            out = ur.split_groups(body, ur.find_block(body))
+        self.assertIn("- Goodbye; Hello", out)   # valid film -> left whole
+
 
 # ---------------------------------------------------------------------------
 # sort_key
