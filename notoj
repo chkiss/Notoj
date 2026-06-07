@@ -1697,9 +1697,13 @@ SORTS = ["title", "created", "modified"]
 MIN_W_ERROR   = 20   # below this: show error, refuse to draw
 MIN_PREVIEW_W = 20   # collapse preview when it would be narrower than this
 LIST_MAX_W    = 80   # cap list panel here; extra space goes to preview
-SHOW_DATE_MIN = 38   # min list_w to show modification date truncated to 8 chars (col 30 + 8)
-SHOW_AGO_MIN  = 56   # min list_w to show relative date      (col 50 + 6)
-SHOW_TAGS_MIN = 63   # min list_w to show tags               (col 62 + 1)
+# List columns: title (0, 28w) | 2sp | date (30, 16w) | 1sp | ago (47) | 2sp | tags
+COL_DATE = 30
+COL_AGO  = 47
+SHOW_DATE_MIN = 38   # min list_w to start showing the modification date (col 30 + ~8)
+SHOW_AGO_MIN  = 53   # min list_w to start showing the relative date     (col 47 + ~6)
+# Tags have no fixed threshold: they appear as soon as one column fits past the
+# (aligned) date+relative-date block — see draw().
 
 TAG_PROMPT = "add tags (space-separated): "
 SCHED_PROMPT = "resurface when (e.g. 2w, 3mo, 1y, 2026-12-01, someday): "
@@ -1797,7 +1801,6 @@ def draw(stdscr, notes, state):
 
     show_date = list_w >= SHOW_DATE_MIN
     show_ago  = list_w >= SHOW_AGO_MIN
-    show_tags = list_w >= SHOW_TAGS_MIN
 
     conflicts = find_conflicts()
     conflict_badge = f" | [{len(conflicts)} conflict(s)]" if conflicts else ""
@@ -1832,6 +1835,16 @@ def draw(stdscr, notes, state):
     else:
         tokens = q_str.lower().split() if q_str else []
 
+    # Tags align in one column, 2 spaces past the widest date+relative-date
+    # among the rows on screen (not the whole list), and appear as soon as a
+    # single column of them fits.
+    ago_strs = [f"({ago(n.get('modificationDate'))})" for n in visible]
+    if show_ago:
+        block_end = COL_AGO + max((len(a) for a in ago_strs), default=0)
+    else:
+        block_end = COL_DATE + 16   # date only (16-char timestamp)
+    tag_col = block_end + 2
+
     # ----------------------------
     # LEFT PANE
     # ----------------------------
@@ -1863,14 +1876,15 @@ def draw(stdscr, notes, state):
 
         if show_date:
             m = fmt(n.get("modificationDate"))
-            stdscr.addnstr(y, 30, LRM + m, min(16, list_w - 30), attr_date)
+            # +1 budget so the zero-width LRM doesn't clip the last char.
+            stdscr.addnstr(y, COL_DATE, LRM + m, min(1 + len(m), list_w - COL_DATE), attr_date)
 
         if show_ago:
-            a = ago(n.get("modificationDate"))
-            stdscr.addnstr(y, 50, LRM + f"({a})", min(10, list_w - 50), attr_date)
+            ago_str = ago_strs[i]
+            stdscr.addnstr(y, COL_AGO, LRM + ago_str, min(1 + len(ago_str), list_w - COL_AGO), attr_date)
 
-        if show_tags:
-            stdscr.addnstr(y, 62, tg, list_w - 62, attr_tag)
+        if show_date and tg and tag_col < list_w:
+            stdscr.addnstr(y, tag_col, tg, list_w - tag_col, attr_tag)
 
     # ----------------------------
     # RIGHT PANE (preview)
@@ -2006,6 +2020,17 @@ def run(stdscr):
             state["_redo"] = []
 
     while True:
+        # Pick up terminal resizes live: ncurses won't refresh getmaxyx() on
+        # its own between key presses, so poll the real size and resize when it
+        # changes. This makes the list reflow (more/fewer columns) immediately.
+        try:
+            ts = os.get_terminal_size()
+            if (ts.lines, ts.columns) != stdscr.getmaxyx():
+                curses.resizeterm(ts.lines, ts.columns)
+                stdscr.clear()  # force a full repaint (avoid stale cells on grow)
+        except (curses.error, OSError):
+            pass
+
         # Visible list = base(mode) -> filter by query -> order. Every view
         # flows through the same order_notes() so search and sort compose the
         # same way everywhere. `keep` = the view has its own order that the
