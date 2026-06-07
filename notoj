@@ -1780,11 +1780,15 @@ def draw(stdscr, notes, state):
     elif state.get("sched_mode"):
         header = f"{SCHED_PROMPT}{state['sched_input']}"
     elif state.get("trash_mode"):
-        header = f"trash ({len(notes)} notes){conflict_badge}"
+        filt = f" | filter:{state['q']}" if state["q"] else ""
+        header = f"trash ({len(notes)} notes){filt}{conflict_badge}"
     elif state.get("dup_mode") is not None:
-        header = f"duplicates ({len(state['dup_mode'])} notes){conflict_badge}"
+        filt = f" | filter:{state['q']}" if state["q"] else ""
+        header = f"duplicates ({len(notes)} notes){filt}{conflict_badge}"
     elif state.get("review_mode"):
-        header = f"resurface ({len(notes)} loop(s) due) — most stale first{conflict_badge}"
+        order = f"sort:{state['sort']}" if state.get("sort_explicit") else "most stale first"
+        filt = f" | filter:{state['q']}" if state["q"] else ""
+        header = f"resurface ({len(notes)} loop(s) due) — {order}{filt}{conflict_badge}"
     else:
         header = (
             f"notes | filter:{state['q']} | "
@@ -1876,11 +1880,11 @@ def draw(stdscr, notes, state):
     hc = state.get("_hist_count", 0)
     hist_hint = (" | h/H hist" if hc >= 2 else "")
     if state.get("trash_mode"):
-        footer = "gt exit trash | ⮐ open | e edit | u restore | ESC exit | q quit"
+        footer = "gt exit trash | / search | ⮐ open | e edit | u restore | ESC clear/exit | q quit"
     elif state.get("dup_mode") is not None:
-        footer = "gd exit duplicates | ⮐ open | e edit | d trash | ESC exit | q quit"
+        footer = "gd exit duplicates | / search | ⮐ open | e edit | d trash | ESC clear/exit | q quit"
     elif state.get("review_mode"):
-        footer = "gr exit | ⮐ open | z snooze | S schedule | x done | d trash | u/^R undo/redo | q quit"
+        footer = "gr exit | / search | ⮐ open | z snooze | S schedule | x done | d trash | u/^R undo/redo | q quit"
     else:
         retag_hint = " | . retag" if state.get("_last_tags") else ""
         footer = (
@@ -2129,17 +2133,25 @@ def run(stdscr):
         # ----------------------------
 
         elif k == 27 and not state["search_mode"] and (state["q"] or state["dup_mode"] is not None or state["trash_mode"]):
-            was_trash = state["trash_mode"]
             cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
-            state["q"] = ""
+            if state["q"]:
+                # First ESC: clear the search filter, stay in the current view.
+                state["q"] = ""
+                state["sort_explicit"] = False
+                if cur_path:
+                    state["_restore_path"] = cur_path
+            else:
+                # Second ESC: leave the duplicates / trash view for the notes
+                # list. (Trash paths don't exist there, so don't try to keep
+                # the cursor on one.)
+                was_trash = state["trash_mode"]
+                state["dup_mode"] = None
+                state["trash_mode"] = False
+                if cur_path and not was_trash:
+                    state["_restore_path"] = cur_path
             state["cur"] = 0
             state["off"] = 0
             state["p_scroll"] = 0
-            state["sort_explicit"] = False
-            state["dup_mode"] = None
-            state["trash_mode"] = False
-            if cur_path and not was_trash:
-                state["_restore_path"] = cur_path
 
         elif state["search_mode"]:
             if k == 27:  # ESC
@@ -2191,13 +2203,13 @@ def run(stdscr):
         # ----------------------------
 
         elif k == ord("/"):
+            # `/` filters the current view (notes, trash, duplicates, or loops);
+            # it no longer drops you out of the special views.
             state["search_mode"] = True
             state["q"] = ""
             state["cur"] = 0
             state["off"] = 0
             state["sort_explicit"] = False
-            state["dup_mode"] = None
-            state["trash_mode"] = False
 
         # ----------------------------
         # Navigation
