@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -1096,6 +1097,8 @@ def hist_view(stdscr, n):
 
     load_diff()
 
+    stdscr.timeout(-1)   # block for input here; the main loop resets on return
+
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -1804,7 +1807,7 @@ def draw(stdscr, notes, state):
     show_date = list_w >= SHOW_DATE_MIN
     show_ago  = list_w >= SHOW_AGO_MIN
 
-    conflicts = find_conflicts()
+    conflicts = state.get("_conflicts", [])   # scanned on the idle tick, not per frame
     conflict_badge = f" | [{len(conflicts)} conflict(s)]" if conflicts else ""
     dup_badge = f" | [{len(state['_dups'])} dup(s) — gd]" if state.get("_dups") else ""
     loop_badge = f" | [{state['_loops_due']} loop(s) due — gr]" if state.get("_loops_due") else ""
@@ -1998,12 +2001,16 @@ def run(stdscr):
         "_redo": [],
         "_hist_path": None,
         "_hist_count": 0,
+        "_hist_dirty": False,
+        "_hist_cache": {},      # path -> commit count (lazy; cleared on change)
+        "_conflicts": [],
     }
 
     notes = load()
     snap = file_snapshot(NOTES_DIR)
     state["_dups"] = find_duplicates(notes)
     state["_loops_due"] = len(find_loops(notes, state["_review"]))
+    state["_conflicts"] = find_conflicts()
 
     saved = load_cursor()
     if saved:
@@ -2016,6 +2023,8 @@ def run(stdscr):
         snap = new_snap
         state["_dups"] = find_duplicates(notes)
         state["_loops_due"] = len(find_loops(notes, state["_review"]))
+        state["_conflicts"] = find_conflicts()
+        state["_hist_cache"].clear()   # commit counts may have changed
         if state["dup_mode"] is not None:
             state["dup_mode"] = state["_dups"]
 
@@ -2025,6 +2034,9 @@ def run(stdscr):
         if act:
             state["_undo"].append(act)
             state["_redo"] = []
+
+    last_scan = time.monotonic()   # throttles the external-change / conflict scan
+    SCAN_EVERY = 2.0
 
     while True:
         # Pick up terminal resizes live: ncurses won't refresh getmaxyx() on
@@ -2068,21 +2080,25 @@ def run(stdscr):
         h, _ = stdscr.getmaxyx()
         clamp_scroll(state, filtered, h)
 
+        # History (the "h/H hist" hint) is a ~100ms `git log --follow`, so don't
+        # run it while moving — it would stall j/k. Use the cached count if we
+        # have it; otherwise show no hint yet and compute it once we settle (an
+        # idle tick below).
         cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
         if cur_path != state["_hist_path"]:
             state["_hist_path"] = cur_path
-            if cur_path:
-                rel = os.path.relpath(cur_path, NOTES_DIR)
-                r = subprocess.run(
-                    ["git", "log", "--follow", "-2", "--format=%H", "--", rel],
-                    cwd=NOTES_DIR, capture_output=True, text=True
-                )
-                state["_hist_count"] = sum(1 for x in r.stdout.strip().splitlines() if x)
+            if cur_path in state["_hist_cache"]:
+                state["_hist_count"] = state["_hist_cache"][cur_path]
+                state["_hist_dirty"] = False
             else:
                 state["_hist_count"] = 0
+                state["_hist_dirty"] = cur_path is not None
 
         draw(stdscr, filtered, state)
 
+        # Poll quickly only while a history lookup is pending (so the hint
+        # appears soon after you stop); otherwise idle at the slow scan cadence.
+        stdscr.timeout(120 if state["_hist_dirty"] else 2000)
         k = stdscr.getch()
 
         # ----------------------------
@@ -2090,16 +2106,37 @@ def run(stdscr):
         # ----------------------------
 
         if k == -1:
-            new_snap = file_snapshot(NOTES_DIR)
-            notes, changed = incremental_update(notes, snap, new_snap)
-            if changed:
-                snap = file_snapshot(NOTES_DIR)
-                state["_dups"] = find_duplicates(notes)
-                if state["dup_mode"] is not None:
-                    state["dup_mode"] = state["_dups"]
-                cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
-                state["_restore_path"] = cur_path
-                git_commit("sync: external changes")
+            # Settled on a note: now safe to compute its history count (cached).
+            if state["_hist_dirty"]:
+                state["_hist_dirty"] = False
+                cp = state["_hist_path"]
+                if cp:
+                    rel = os.path.relpath(cp, NOTES_DIR)
+                    r = subprocess.run(
+                        ["git", "log", "--follow", "-2", "--format=%H", "--", rel],
+                        cwd=NOTES_DIR, capture_output=True, text=True
+                    )
+                    cnt = sum(1 for x in r.stdout.strip().splitlines() if x)
+                    state["_hist_cache"][cp] = cnt
+                    if cp == state["_hist_path"]:
+                        state["_hist_count"] = cnt
+
+            # Scan for external changes / Syncthing conflicts at most every 2s
+            # (the adaptive timeout can fire this branch as often as 120ms).
+            if time.monotonic() - last_scan >= SCAN_EVERY:
+                last_scan = time.monotonic()
+                new_snap = file_snapshot(NOTES_DIR)
+                notes, changed = incremental_update(notes, snap, new_snap)
+                state["_conflicts"] = find_conflicts()
+                if changed:
+                    snap = file_snapshot(NOTES_DIR)
+                    state["_dups"] = find_duplicates(notes)
+                    state["_hist_cache"].clear()
+                    if state["dup_mode"] is not None:
+                        state["dup_mode"] = state["_dups"]
+                    cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
+                    state["_restore_path"] = cur_path
+                    git_commit("sync: external changes")
 
         # ----------------------------
         # Tag prompt mode (intercepts all keys while active)
@@ -2289,7 +2326,8 @@ def run(stdscr):
             clamp_scroll(state, filtered, h)
 
         elif k == ord("g"):
-            nxt = stdscr.getch()
+            stdscr.timeout(1000)   # fixed window for the chord's second key
+            nxt = stdscr.getch()   # (the loop resets the timeout next iteration)
 
             if nxt == ord("g"):
                 state["cur"] = 0
