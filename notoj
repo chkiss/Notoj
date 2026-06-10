@@ -67,11 +67,21 @@ Keybindings:
     s           cycle sort: relevance (default) → title → created → modified
     r           reverse sort order
 
+  Tags
+    #           add tags to the selected note (space-separated)
+    .           repeat the last tag addition on the selected note
+    t           filter to notes sharing the selected note's tags;
+                Tab cycles the filter: all of them → each single tag
+    T           browse all tags, most recently used first (Enter filters by
+                the chosen tag; s cycles sort: recent → count → name)
+
   Resurface (open loops)
     g r         toggle resurface view (notes tagged #loop, most stale first)
     z           snooze loop a week (quick "not now")
     S           schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…)
     x           mark loop done (removes #loop tag)
+    #loop 2w    typed anywhere in a note's text schedules it as a loop;
+                relative horizons are pinned to a date on save (#loop 2026-06-23)
 
   Other
     h           diff vs previous version (vimdiff)
@@ -1027,6 +1037,69 @@ def reopen_loop(path, mod_ts=None):
 
 
 # ----------------------------
+# Tag filtering (t / T views)
+# ----------------------------
+
+def tag_stats(notes):
+    """Per-tag usage across `notes`: {tag: (count, last_ts)}, where last_ts is
+    the newest modified date among the notes carrying the tag."""
+    stats = {}
+    for n in notes:
+        ts = n.get("modificationDate") or 0
+        for t in n.get("tags") or []:
+            c, last = stats.get(t, (0, 0))
+            stats[t] = (c + 1, max(last, ts))
+    return stats
+
+
+# Sort modes for the tags view (s cycles). "recent" is the default: tag
+# counts rank your history, but the newest modified date among a tag's notes
+# ranks what you're actually working on now.
+TAG_SORTS = ["recent", "count", "name"]
+
+
+def sort_tag_stats(stats, mode):
+    """[(tag, count, last_ts)] in the chosen order, with deterministic
+    tie-breaks (recent -> count -> name)."""
+    items = [(t, c, last) for t, (c, last) in stats.items()]
+    if mode == "count":
+        items.sort(key=lambda x: (-x[1], x[0]))
+    elif mode == "name":
+        items.sort(key=lambda x: x[0])
+    else:  # recent
+        items.sort(key=lambda x: (-x[2], -x[1], x[0]))
+    return items
+
+
+def filter_by_tags(notes, active):
+    """Notes carrying every tag in `active`, input order preserved.
+    An empty `active` matches everything (no constraint)."""
+    need = set(active)
+    if not need:
+        return list(notes)
+    return [n for n in notes if need <= set(n.get("tags") or [])]
+
+
+def tagf_active(tagf):
+    """The tags a tag-filter state actually filters on: all of them while
+    idx is -1, otherwise just the cycled-to tag."""
+    if tagf["idx"] < 0:
+        return list(tagf["tags"])
+    return [tagf["tags"][tagf["idx"]]]
+
+
+def tagf_label(tagf):
+    """Header label for the tag filter: active tags plain, inactive in
+    parens — '(#a) #b (#c)' when cycled to #b, '#a #b #c' for all."""
+    if tagf["idx"] < 0:
+        return " ".join("#" + t for t in tagf["tags"])
+    return " ".join(
+        "#" + t if i == tagf["idx"] else "(#" + t + ")"
+        for i, t in enumerate(tagf["tags"])
+    )
+
+
+# ----------------------------
 # Duplicate detection
 # ----------------------------
 
@@ -1449,6 +1522,124 @@ def hist_view(stdscr, n):
             state["d_scroll"] = min(state["d_scroll"] + page_h, max(0, len(diff) - page_h))
         elif k == curses.KEY_PPAGE:
             state["d_scroll"] = max(0, state["d_scroll"] - page_h)
+
+
+# Sentinel: the user pressed q inside the tags view — quit the whole app,
+# like q everywhere else (ESC is the "back" key there).
+TAGS_VIEW_QUIT = object()
+
+
+def tags_view(stdscr, notes, focus=None, ui=None):
+    """Full-screen browser of every tag (T): count, name, and how recently a
+    note carrying it was touched. s cycles the sort (recent → count → name);
+    recent is the default, and `ui` (a dict) persists the chosen mode across
+    visits. `focus` preselects a tag (used when ESC from a tag filter jumps
+    back here). Enter returns the chosen tag name (the caller filters the
+    notes list on it); ESC returns None (back); q returns TAGS_VIEW_QUIT."""
+    stats = tag_stats(notes)
+    if not stats:
+        return None
+    mode_i = (ui or {}).get("mode_i", 0)
+    items = sort_tag_stats(stats, TAG_SORTS[mode_i])
+
+    state = {"cur": 0, "off": 0}
+    if focus is not None:
+        for i, it in enumerate(items):
+            if it[0] == focus:
+                state["cur"] = i
+                break
+    stdscr.timeout(-1)   # block for input here; the main loop resets on return
+
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        if h < 5 or w < MIN_W_ERROR:
+            try:
+                stdscr.addnstr(0, 0, "window too narrow", max(1, w - 1))
+            except curses.error:
+                pass
+            stdscr.refresh()
+            kk = stdscr.getch()
+            if kk == 27:
+                return None
+            if kk == ord("q"):
+                return TAGS_VIEW_QUIT
+            continue
+
+        page_h = h - 2   # rows 1..h-2 hold content; the footer bar sits at h-1
+        list_w = min(38, w // 3)
+        prev_w = w - list_w - 2
+
+        # Keep the cursor in view every frame: covers the `focus` preselect,
+        # paging jumps, and terminal resizes in one place.
+        clamp_list(state, len(items), page_h)
+
+        try:
+            stdscr.hline(0, 0, ord(" ") | curses.A_UNDERLINE, w)
+        except curses.error:
+            pass
+        stdscr.addnstr(0, 0, f"tags ({len(items)})  sort:{TAG_SORTS[mode_i]}",
+                       w - 1, curses.A_BOLD | curses.A_UNDERLINE)
+
+        count_w = max(len(str(c)) for _, c, _ in items)
+        for i, (tag, count, last) in enumerate(items[state["off"]:state["off"] + page_h]):
+            ti = i + state["off"]
+            attr = curses.color_pair(3)
+            if ti == state["cur"]:
+                attr |= curses.A_REVERSE
+            stdscr.addnstr(i + 1, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
+                           list_w - 1, attr)
+
+        for y in range(1, h - 1):
+            stdscr.addch(y, list_w, curses.ACS_VLINE)
+
+        sel_tag = items[state["cur"]][0]
+        tagged = sort_notes(filter_by_tags(notes, [sel_tag]), "modified", True)
+        for i, n in enumerate(tagged[:page_h]):
+            line = f"{title(n)}  ({ago(n.get('modificationDate'))})"
+            try:
+                stdscr.addnstr(i + 1, list_w + 1, line[:prev_w], prev_w, curses.color_pair(4))
+            except curses.error:
+                pass   # wide glyph landing on the right edge
+
+        try:
+            stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
+        except curses.error:
+            pass
+        stdscr.addnstr(h - 1, 0, "j/k select  s sort  ⮐ filter notes by tag  ESC back  q quit", w - 1, footer_attr())
+        stdscr.refresh()
+
+        k = stdscr.getch()
+
+        if k == 27:
+            return None
+        elif k == ord("q"):
+            return TAGS_VIEW_QUIT
+        elif k in NAV_KEYS:
+            d = nav_delta(k, page_h)
+            if d == NAV_BOTTOM:
+                state["cur"] = len(items) - 1
+            else:
+                state["cur"] += d
+            clamp_list(state, len(items), page_h)
+        elif k == ord("g"):
+            if stdscr.getch() == ord("g"):
+                state["cur"] = 0
+        elif k == ord("s"):
+            sel = items[state["cur"]][0]
+            mode_i = (mode_i + 1) % len(TAG_SORTS)
+            if ui is not None:
+                ui["mode_i"] = mode_i
+            items = sort_tag_stats(stats, TAG_SORTS[mode_i])
+            # Keep the selection on the same tag across the re-sort; the
+            # per-frame clamp re-centers the scroll window.
+            for i, it in enumerate(items):
+                if it[0] == sel:
+                    state["cur"] = i
+                    break
+        elif k in [10, 13]:
+            return items[state["cur"]][0]
 
 
 # ----------------------------
@@ -2268,13 +2459,23 @@ def draw(stdscr, notes, state):
     elif state.get("review_mode"):
         sort = sort_label(state["sort"], state["rev"], state["q"], "most stale first", True)
         header = f"resurface ({len(notes)} loop(s) due){filt} | sort:{sort}{conflict_badge}"
+    elif state.get("tagf") is not None:
+        sort = sort_label(state["sort"], state["rev"], state["q"], "modified 🞃", False)
+        header = f"tagged {tagf_label(state['tagf'])} ({len(notes)} notes){filt} | sort:{sort}{conflict_badge}"
     else:
         sort = sort_label(state["sort"], state["rev"], state["q"], "modified 🞃", False)
         header = f"notes{filt} | sort:{sort}{conflict_badge}{dup_badge}{loop_badge}"
 
-    stdscr.addnstr(0, 0, header, w - 1)
+    # Header rule: underline the top row edge to edge. Unlike the content rows
+    # (whose mixed colors made a row-wide underline look patchy), everything
+    # here is the default color, so the underline reads as one continuous line.
+    try:
+        stdscr.hline(0, 0, ord(" ") | curses.A_UNDERLINE, w)
+    except curses.error:
+        pass
+    stdscr.addnstr(0, 0, header, w - 1, curses.A_UNDERLINE)
 
-    visible = notes[state["off"]:state["off"] + h - 3]
+    visible = notes[state["off"]:state["off"] + h - 2]
     q_str = state["q"].strip()
     if q_str.startswith('"') and q_str.endswith('"') and len(q_str) > 2:
         tokens = [q_str[1:-1].lower()]
@@ -2742,16 +2943,32 @@ def run(stdscr):
                 if cur_path:
                     state["_restore_path"] = cur_path
             else:
-                # Second ESC: leave the duplicates / trash / resurface view for
-                # the notes list. (Trash paths don't exist there, so don't try
-                # to keep the cursor on one.)
+                # Second ESC: leave the duplicates / trash / resurface /
+                # tag-filter view for the notes list. (Trash paths don't exist
+                # there, so don't try to keep the cursor on one.) A tag filter
+                # entered from the tags view goes back there instead, with the
+                # cursor on the tag it came from.
                 was_trash = state["trash_mode"]
+                reopen_focus = None
+                if state["tagf"] is not None and state["tagf"].get("from_T"):
+                    reopen_focus = state["tagf"]["tags"][0]
                 state["dup_mode"] = None
                 state["trash_mode"] = False
                 state["review_mode"] = False
+                state["tagf"] = None
                 state["sort"] = "relevance"
                 if cur_path and not was_trash:
                     state["_restore_path"] = cur_path
+                if reopen_focus is not None:
+                    sel = tags_view(stdscr, notes, focus=reopen_focus,
+                                    ui=state["_tags_ui"])
+                    if sel is TAGS_VIEW_QUIT:
+                        if cur_path:
+                            save_cursor(cur_path)
+                        break
+                    if sel:
+                        state["tagf"] = {"tags": [sel], "idx": -1, "from_T": True}
+                        state.pop("_restore_path", None)
             state["cur"] = 0
             state["off"] = 0
             state["p_scroll"] = 0
@@ -2841,6 +3058,7 @@ def run(stdscr):
                     state["dup_mode"] = None
                 elif state["_dups"]:
                     state["dup_mode"] = state["_dups"]
+                state["tagf"] = None
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0

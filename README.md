@@ -90,6 +90,15 @@ Print keybindings and exit.
 | `s` | Cycle sort: modified → title → created |
 | `r` | Reverse sort order |
 
+### Tags
+
+| Key | Action |
+|-----|--------|
+| `#` | Add tags to the selected note (space-separated) — keeps the note's modified date |
+| `.` | Repeat the last tag addition on the selected note — keeps the note's modified date |
+| `t` | Filter to notes sharing the selected note's tags; `Tab` cycles the filter from all of them through each single tag |
+| `T` | Browse all tags, most recently used first; `s` cycles sort (recent → count → name), `Enter` filters the notes list by the chosen tag, `ESC` backs out. From a filter opened this way, `ESC` returns to the tags view with the cursor on that tag |
+
 ### Resurface (open loops)
 
 | Key | Action |

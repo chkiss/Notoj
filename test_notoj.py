@@ -2524,5 +2524,102 @@ class TestFitHints(unittest.TestCase):
                          "a b  c d")
 
 
+# ---------------------------------------------------------------------------
+# tag_counts / filter_by_tags / tagf helpers (t and T views)
+# ---------------------------------------------------------------------------
+
+class TestTagStats(unittest.TestCase):
+    def test_empty(self):
+        self.assertEqual(notoj.tag_stats([]), {})
+
+    def test_no_tags(self):
+        self.assertEqual(notoj.tag_stats([make_note("a"), make_note("b")]), {})
+
+    def test_counts_and_latest_modified(self):
+        notes = [
+            make_note("a", tags=["work", "idea"], modified=100),
+            make_note("b", tags=["work"], modified=300),
+            make_note("c", tags=["idea", "work"], modified=200),
+        ]
+        self.assertEqual(notoj.tag_stats(notes),
+                         {"work": (3, 300), "idea": (2, 200)})
+
+    def test_missing_tags_field(self):
+        n = make_note("a")
+        n["tags"] = None
+        self.assertEqual(notoj.tag_stats([n]), {})
+
+
+class TestSortTagStats(unittest.TestCase):
+    STATS = {"old-heavy": (10, 100), "fresh": (2, 900), "mid": (2, 500)}
+
+    def test_recent_default_newest_first(self):
+        items = notoj.sort_tag_stats(self.STATS, "recent")
+        self.assertEqual([t for t, _, _ in items], ["fresh", "mid", "old-heavy"])
+
+    def test_count_most_used_first(self):
+        items = notoj.sort_tag_stats(self.STATS, "count")
+        self.assertEqual([t for t, _, _ in items], ["old-heavy", "fresh", "mid"])
+
+    def test_name_alphabetical(self):
+        items = notoj.sort_tag_stats(self.STATS, "name")
+        self.assertEqual([t for t, _, _ in items], ["fresh", "mid", "old-heavy"])
+
+    def test_recent_ties_break_on_count_then_name(self):
+        stats = {"b": (1, 500), "a": (1, 500), "big": (9, 500)}
+        items = notoj.sort_tag_stats(stats, "recent")
+        self.assertEqual([t for t, _, _ in items], ["big", "a", "b"])
+
+
+class TestFilterByTags(unittest.TestCase):
+    def setUp(self):
+        self.a = make_note("a", tags=["work", "idea"])
+        self.b = make_note("b", tags=["work"])
+        self.c = make_note("c", tags=[])
+        self.notes = [self.a, self.b, self.c]
+
+    def test_single_tag(self):
+        self.assertEqual(notoj.filter_by_tags(self.notes, ["work"]), [self.a, self.b])
+
+    def test_all_tags_anded(self):
+        self.assertEqual(notoj.filter_by_tags(self.notes, ["work", "idea"]), [self.a])
+
+    def test_empty_active_matches_all(self):
+        self.assertEqual(notoj.filter_by_tags(self.notes, []), self.notes)
+
+    def test_no_match(self):
+        self.assertEqual(notoj.filter_by_tags(self.notes, ["nope"]), [])
+
+    def test_preserves_input_order(self):
+        self.assertEqual(notoj.filter_by_tags([self.b, self.a], ["work"]), [self.b, self.a])
+
+
+class TestTagfHelpers(unittest.TestCase):
+    def test_active_all(self):
+        tf = {"tags": ["a", "b", "c"], "idx": -1}
+        self.assertEqual(notoj.tagf_active(tf), ["a", "b", "c"])
+
+    def test_active_single(self):
+        tf = {"tags": ["a", "b", "c"], "idx": 1}
+        self.assertEqual(notoj.tagf_active(tf), ["b"])
+
+    def test_label_all(self):
+        tf = {"tags": ["a", "b"], "idx": -1}
+        self.assertEqual(notoj.tagf_label(tf), "#a #b")
+
+    def test_label_single_parenthesizes_inactive(self):
+        tf = {"tags": ["a", "b", "c"], "idx": 1}
+        self.assertEqual(notoj.tagf_label(tf), "(#a) #b (#c)")
+
+    def test_cycle_wraps_to_all(self):
+        # Mirrors the Tab handler: -1 -> 0 -> ... -> len-1 -> -1
+        tf = {"tags": ["a", "b"], "idx": -1}
+        seen = []
+        for _ in range(4):
+            tf["idx"] = tf["idx"] + 1 if tf["idx"] + 1 < len(tf["tags"]) else -1
+            seen.append(tf["idx"])
+        self.assertEqual(seen, [0, 1, -1, 0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
