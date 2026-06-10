@@ -1420,19 +1420,31 @@ def open_hist_last(n):
     open_vimdiff_at(n["path"], hashes[1])
 
 
-def hist_view(stdscr, n):
-    commits = get_note_commits(n["path"])
-    if not commits:
-        return
+MODAL_QUIT = object()
+# Sentinel returned through a modal's on_key: the user pressed q — quit the
+# whole app, like q everywhere else (ESC is the "back" key inside modals).
 
-    state = {"cur": 0, "off": 0, "d_scroll": 0, "diff": []}
 
-    def load_diff():
-        state["diff"] = get_diff_lines(n["path"], commits[state["cur"]]["hash"])
-        state["d_scroll"] = 0
+def modal_list(stdscr, view):
+    """Run a modal list screen — the chrome shared by the history, tags,
+    backlinks, and help views: erase, narrow-window bail, underlined header
+    row, left list with the cursor row reversed, optional divider + right
+    preview pane, footer band, and a blocking key loop speaking the shared
+    nav vocabulary (nav_delta / clamp_list / gg).
 
-    load_diff()
+    `view` is a dict of callbacks/settings:
+      count()                            -> number of list rows
+      header(w) / footer()               -> bar texts
+      draw_row(scr, y, i, selected, lw)  -> draw row i at screen row y
+      draw_preview(scr, x0, pw, ph, cur) -> right pane (omit for full-width)
+      on_key(k, st) -> None to keep looping, or a 1-tuple (result,) to close
+      on_move(st)                        -> selection changed (nav or gg)
+      cur                                -> initial cursor index (default 0)
 
+    st is {"cur", "off", "page_h"}; on_key may move the cursor through it.
+    Returns the value from on_key's closing tuple."""
+    st = {"cur": view.get("cur", 0), "off": 0, "page_h": 1}
+    on_key = view["on_key"]
     stdscr.timeout(-1)   # block for input here; the main loop resets on return
 
     while True:
@@ -1440,93 +1452,130 @@ def hist_view(stdscr, n):
         h, w = stdscr.getmaxyx()
 
         # Same narrow-window bail as draw(): below this the pane widths go
-        # nonsensical (diff_w can reach <= 0) and addnstr would error out.
-        if h < 5 or w < MIN_W_ERROR:
+        # nonsensical and addnstr would error out. Keys still reach on_key,
+        # so the view's exit keys keep working while squeezed.
+        narrow = h < 5 or w < MIN_W_ERROR
+        if narrow:
             try:
                 stdscr.addnstr(0, 0, "window too narrow", max(1, w - 1))
             except curses.error:
                 pass
-            stdscr.refresh()
-            if stdscr.getch() in [ord("q"), 27]:
-                break
-            continue
-
-        page_h = h - 2   # rows 1..h-2 hold content; the footer bar sits at h-1
-        list_w = min(38, w // 3)
-        diff_w = w - list_w - 2
-
-        try:
-            stdscr.hline(0, 0, ord(" ") | curses.A_UNDERLINE, w)
-        except curses.error:
-            pass
-        stdscr.addnstr(0, 0, f"history: {title(n)}", w - 1, curses.A_BOLD | curses.A_UNDERLINE)
-
-        for i, c in enumerate(commits[state["off"]:state["off"] + page_h]):
-            ci = i + state["off"]
-            attr = curses.color_pair(1) | curses.A_BOLD
-            if ci == state["cur"]:
-                attr |= curses.A_REVERSE
-            date_str = datetime.fromtimestamp(c["ts"]).strftime("%m-%d %H:%M")
-            stdscr.addnstr(i + 1, 0, f"{date_str} {c['msg']}", list_w - 1, attr)
-
-        for y in range(1, h - 1):
-            stdscr.addch(y, list_w, curses.ACS_VLINE)
-
-        diff = state["diff"]
-        if diff:
-            for i, line in enumerate(diff[state["d_scroll"]:state["d_scroll"] + page_h]):
-                if line.startswith("+") and not line.startswith("+++"):
-                    attr = curses.color_pair(3)
-                elif line.startswith("-") and not line.startswith("---"):
-                    attr = curses.color_pair(2)
-                elif line.startswith("@@"):
-                    attr = curses.color_pair(4)
-                else:
-                    attr = curses.A_NORMAL
-                try:
-                    stdscr.addnstr(i + 1, list_w + 1, line.expandtabs(4)[:diff_w], diff_w, attr)
-                except curses.error:
-                    pass   # wide glyph landing on the right edge
         else:
-            stdscr.addnstr(1, list_w + 1, "(no changes vs current)", diff_w, curses.A_DIM)
+            page_h = st["page_h"] = h - 2   # rows 1..h-2; footer bar at h-1
+            n_rows = view["count"]()
+            # Per-frame clamp: covers the initial cursor, on_key cursor
+            # moves, shrinking lists, and terminal resizes in one place.
+            clamp_list(st, n_rows, page_h)
+            list_w = min(38, w // 3) if view.get("draw_preview") else w - 1
 
-        try:
-            stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
-        except curses.error:
-            pass
-        stdscr.addnstr(h - 1, 0, "j/k select  PgDn/PgUp scroll diff  ⮐ vimdiff  q back", w - 1, footer_attr())
+            try:
+                stdscr.hline(0, 0, ord(" ") | curses.A_UNDERLINE, w)
+            except curses.error:
+                pass
+            stdscr.addnstr(0, 0, view["header"](w), w - 1,
+                           curses.A_BOLD | curses.A_UNDERLINE)
+
+            for i in range(st["off"], min(n_rows, st["off"] + page_h)):
+                view["draw_row"](stdscr, i - st["off"] + 1, i,
+                                 i == st["cur"], list_w)
+
+            if view.get("draw_preview"):
+                for y in range(1, h - 1):
+                    stdscr.addch(y, list_w, curses.ACS_VLINE)
+                view["draw_preview"](stdscr, list_w + 1, w - list_w - 2,
+                                     page_h, st["cur"])
+
+            try:
+                stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
+            except curses.error:
+                pass
+            stdscr.addnstr(h - 1, 0, view["footer"](), w - 1, footer_attr())
+
         stdscr.refresh()
-
         k = stdscr.getch()
 
-        if k in [ord("q"), 27]:
-            break
-        elif k in NAV_KEYS or k == ord("g"):
-            prev = state["cur"]
+        if not narrow and (k in NAV_KEYS or k == ord("g")):
+            prev = st["cur"]
             if k == ord("g"):
                 if stdscr.getch() == ord("g"):
-                    state["cur"] = 0
+                    st["cur"] = 0
             else:
-                d = nav_delta(k, page_h)
+                d = nav_delta(k, st["page_h"])
                 if d == NAV_BOTTOM:
-                    state["cur"] = len(commits) - 1
+                    st["cur"] = view["count"]() - 1
                 else:
-                    state["cur"] += d
-            clamp_list(state, len(commits), page_h)
-            if state["cur"] != prev:
-                load_diff()   # only re-run git show when the selection moved
-        elif k in [10, 13]:
-            open_vimdiff_at(n["path"], commits[state["cur"]]["hash"])
+                    st["cur"] += d
+            clamp_list(st, view["count"](), st["page_h"])
+            if st["cur"] != prev and view.get("on_move"):
+                view["on_move"](st)
+        else:
+            r = on_key(k, st)
+            if r is not None:
+                return r[0]
+
+
+def hist_view(stdscr, n):
+    commits = get_note_commits(n["path"])
+    if not commits:
+        return
+
+    vs = {"diff": [], "d_scroll": 0}
+
+    def load_diff(cur):
+        vs["diff"] = get_diff_lines(n["path"], commits[cur]["hash"])
+        vs["d_scroll"] = 0
+
+    load_diff(0)
+
+    def draw_row(scr, y, i, selected, list_w):
+        c = commits[i]
+        attr = curses.color_pair(1) | curses.A_BOLD
+        if selected:
+            attr |= curses.A_REVERSE
+        date_str = datetime.fromtimestamp(c["ts"]).strftime("%m-%d %H:%M")
+        scr.addnstr(y, 0, f"{date_str} {c['msg']}", list_w - 1, attr)
+
+    def draw_preview(scr, x0, pw, ph, cur):
+        diff = vs["diff"]
+        if not diff:
+            scr.addnstr(1, x0, "(no changes vs current)", pw, curses.A_DIM)
+            return
+        for i, line in enumerate(diff[vs["d_scroll"]:vs["d_scroll"] + ph]):
+            if line.startswith("+") and not line.startswith("+++"):
+                attr = curses.color_pair(3)
+            elif line.startswith("-") and not line.startswith("---"):
+                attr = curses.color_pair(2)
+            elif line.startswith("@@"):
+                attr = curses.color_pair(4)
+            else:
+                attr = curses.A_NORMAL
+            try:
+                scr.addnstr(i + 1, x0, line.expandtabs(4)[:pw], pw, attr)
+            except curses.error:
+                pass   # wide glyph landing on the right edge
+
+    def on_key(k, st):
+        if k in [ord("q"), 27]:
+            return (None,)
+        if k in (10, 13):
+            open_vimdiff_at(n["path"], commits[st["cur"]]["hash"])
             stdscr.refresh()
         elif k == curses.KEY_NPAGE:
-            state["d_scroll"] = min(state["d_scroll"] + page_h, max(0, len(diff) - page_h))
+            vs["d_scroll"] = min(vs["d_scroll"] + st["page_h"],
+                                 max(0, len(vs["diff"]) - st["page_h"]))
         elif k == curses.KEY_PPAGE:
-            state["d_scroll"] = max(0, state["d_scroll"] - page_h)
+            vs["d_scroll"] = max(0, vs["d_scroll"] - st["page_h"])
+        return None
 
-
-# Sentinel: the user pressed q inside the tags view — quit the whole app,
-# like q everywhere else (ESC is the "back" key there).
-TAGS_VIEW_QUIT = object()
+    modal_list(stdscr, {
+        "count": lambda: len(commits),
+        "header": lambda w: f"history: {title(n)}",
+        "footer": lambda: "j/k select  PgDn/PgUp scroll diff  ⮐ vimdiff  q back",
+        "draw_row": draw_row,
+        "draw_preview": draw_preview,
+        "on_key": on_key,
+        "on_move": lambda st: load_diff(st["cur"]),   # one git show per move
+    })
 
 
 def tags_view(stdscr, notes, focus=None, ui=None):
@@ -1535,111 +1584,68 @@ def tags_view(stdscr, notes, focus=None, ui=None):
     recent is the default, and `ui` (a dict) persists the chosen mode across
     visits. `focus` preselects a tag (used when ESC from a tag filter jumps
     back here). Enter returns the chosen tag name (the caller filters the
-    notes list on it); ESC returns None (back); q returns TAGS_VIEW_QUIT."""
+    notes list on it); ESC returns None (back); q returns MODAL_QUIT."""
     stats = tag_stats(notes)
     if not stats:
         return None
-    mode_i = (ui or {}).get("mode_i", 0)
-    items = sort_tag_stats(stats, TAG_SORTS[mode_i])
-
-    state = {"cur": 0, "off": 0}
+    vs = {"mode_i": (ui or {}).get("mode_i", 0)}
+    vs["items"] = sort_tag_stats(stats, TAG_SORTS[vs["mode_i"]])
+    cur0 = 0
     if focus is not None:
-        for i, it in enumerate(items):
+        for i, it in enumerate(vs["items"]):
             if it[0] == focus:
-                state["cur"] = i
+                cur0 = i
                 break
-    stdscr.timeout(-1)   # block for input here; the main loop resets on return
+    count_w = max(len(str(c)) for _, c, _ in vs["items"])
 
-    while True:
-        stdscr.erase()
-        h, w = stdscr.getmaxyx()
+    def draw_row(scr, y, i, selected, list_w):
+        tag, count, last = vs["items"][i]
+        attr = curses.color_pair(3)
+        if selected:
+            attr |= curses.A_REVERSE
+        scr.addnstr(y, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
+                    list_w - 1, attr)
 
-        if h < 5 or w < MIN_W_ERROR:
-            try:
-                stdscr.addnstr(0, 0, "window too narrow", max(1, w - 1))
-            except curses.error:
-                pass
-            stdscr.refresh()
-            kk = stdscr.getch()
-            if kk == 27:
-                return None
-            if kk == ord("q"):
-                return TAGS_VIEW_QUIT
-            continue
-
-        page_h = h - 2   # rows 1..h-2 hold content; the footer bar sits at h-1
-        list_w = min(38, w // 3)
-        prev_w = w - list_w - 2
-
-        # Keep the cursor in view every frame: covers the `focus` preselect,
-        # paging jumps, and terminal resizes in one place.
-        clamp_list(state, len(items), page_h)
-
-        try:
-            stdscr.hline(0, 0, ord(" ") | curses.A_UNDERLINE, w)
-        except curses.error:
-            pass
-        stdscr.addnstr(0, 0, f"tags ({len(items)})  sort:{TAG_SORTS[mode_i]}",
-                       w - 1, curses.A_BOLD | curses.A_UNDERLINE)
-
-        count_w = max(len(str(c)) for _, c, _ in items)
-        for i, (tag, count, last) in enumerate(items[state["off"]:state["off"] + page_h]):
-            ti = i + state["off"]
-            attr = curses.color_pair(3)
-            if ti == state["cur"]:
-                attr |= curses.A_REVERSE
-            stdscr.addnstr(i + 1, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
-                           list_w - 1, attr)
-
-        for y in range(1, h - 1):
-            stdscr.addch(y, list_w, curses.ACS_VLINE)
-
-        sel_tag = items[state["cur"]][0]
+    def draw_preview(scr, x0, pw, ph, cur):
+        sel_tag = vs["items"][cur][0]
         tagged = sort_notes(filter_by_tags(notes, [sel_tag]), "modified", True)
-        for i, n in enumerate(tagged[:page_h]):
-            line = f"{title(n)}  ({ago(n.get('modificationDate'))})"
+        for i, m in enumerate(tagged[:ph]):
+            line = f"{title(m)}  ({ago(m.get('modificationDate'))})"
             try:
-                stdscr.addnstr(i + 1, list_w + 1, line[:prev_w], prev_w, curses.color_pair(4))
+                scr.addnstr(i + 1, x0, line[:pw], pw, curses.color_pair(4))
             except curses.error:
                 pass   # wide glyph landing on the right edge
 
-        try:
-            stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
-        except curses.error:
-            pass
-        stdscr.addnstr(h - 1, 0, "j/k select  s sort  ⮐ filter notes by tag  ESC back  q quit", w - 1, footer_attr())
-        stdscr.refresh()
-
-        k = stdscr.getch()
-
+    def on_key(k, st):
         if k == 27:
-            return None
-        elif k == ord("q"):
-            return TAGS_VIEW_QUIT
-        elif k in NAV_KEYS:
-            d = nav_delta(k, page_h)
-            if d == NAV_BOTTOM:
-                state["cur"] = len(items) - 1
-            else:
-                state["cur"] += d
-            clamp_list(state, len(items), page_h)
-        elif k == ord("g"):
-            if stdscr.getch() == ord("g"):
-                state["cur"] = 0
-        elif k == ord("s"):
-            sel = items[state["cur"]][0]
-            mode_i = (mode_i + 1) % len(TAG_SORTS)
+            return (None,)
+        if k == ord("q"):
+            return (MODAL_QUIT,)
+        if k == ord("s"):
+            sel = vs["items"][st["cur"]][0]
+            vs["mode_i"] = (vs["mode_i"] + 1) % len(TAG_SORTS)
             if ui is not None:
-                ui["mode_i"] = mode_i
-            items = sort_tag_stats(stats, TAG_SORTS[mode_i])
+                ui["mode_i"] = vs["mode_i"]
+            vs["items"] = sort_tag_stats(stats, TAG_SORTS[vs["mode_i"]])
             # Keep the selection on the same tag across the re-sort; the
-            # per-frame clamp re-centers the scroll window.
-            for i, it in enumerate(items):
+            # scaffold's per-frame clamp re-centers the scroll window.
+            for i, it in enumerate(vs["items"]):
                 if it[0] == sel:
-                    state["cur"] = i
+                    st["cur"] = i
                     break
-        elif k in [10, 13]:
-            return items[state["cur"]][0]
+        elif k in (10, 13):
+            return (vs["items"][st["cur"]][0],)
+        return None
+
+    return modal_list(stdscr, {
+        "cur": cur0,
+        "count": lambda: len(vs["items"]),
+        "header": lambda w: f"tags ({len(vs['items'])})  sort:{TAG_SORTS[vs['mode_i']]}",
+        "footer": lambda: "j/k select  s sort  ⮐ filter notes by tag  ESC back  q quit",
+        "draw_row": draw_row,
+        "draw_preview": draw_preview,
+        "on_key": on_key,
+    })
 
 
 # ----------------------------
@@ -2962,7 +2968,7 @@ def run(stdscr):
                 if reopen_focus is not None:
                     sel = tags_view(stdscr, notes, focus=reopen_focus,
                                     ui=state["_tags_ui"])
-                    if sel is TAGS_VIEW_QUIT:
+                    if sel is MODAL_QUIT:
                         if cur_path:
                             save_cursor(cur_path)
                         break
@@ -3186,7 +3192,7 @@ def run(stdscr):
 
         elif k == ord("T") and not state["trash_mode"]:
             sel = tags_view(stdscr, notes, ui=state["_tags_ui"])
-            if sel is TAGS_VIEW_QUIT:
+            if sel is MODAL_QUIT:
                 if filtered and 0 <= state["cur"] < len(filtered):
                     save_cursor(filtered[state["cur"]]["path"])
                 break
