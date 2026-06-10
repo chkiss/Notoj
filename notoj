@@ -705,8 +705,22 @@ def sort_label(sort, rev, q, natural, keep):
 # Hashtag sync
 # ----------------------------
 
+HASHTAG_RE = re.compile(r'(?<![/\w])#([a-zA-Z][a-zA-Z0-9_-]*)')
+STRAY_HASH_RE = re.compile(r'#(?![A-Za-z0-9])')
+INLINE_CODE_RE = re.compile(r'`[^`]*`')
+
+
+def notag(meta):
+    """True if the note opts out of body->frontmatter hashtag sync, via a
+    `notag: true` frontmatter line. For wholesale reference notes (pasted
+    configs, IRC channel lists, hex colors) where every inline '#' is a
+    literal, not a tag. Manual tagging (the # key) still works on them."""
+    return str(meta.get("notag", "")).strip().lower() in ("true", "yes", "1")
+
+
 def extract_hashtags(text):
-    """Extract inline #hashtags, ignoring ASCII-art rows and fenced code blocks.
+    """Extract inline #hashtags, ignoring ASCII-art rows, fenced code blocks,
+    and inline `code` spans (a #literal inside backticks is content, not a tag).
 
     A line is treated as art (and skipped) if it contains a "stray" '#': one not
     immediately followed by a letter or digit. Box-drawing / map rows such as
@@ -715,11 +729,15 @@ def extract_hashtags(text):
     lines keep working, including score/year tags like "#Worldle #144 1/6" or
     "#nye #2019 #bhangra" where the '#' is followed by a digit. Fenced ``` / ~~~
     code blocks are skipped entirely.
+
+    Per-token filtering (keeping pattern-valid tags from lines that also have
+    a stray '#') was considered and rejected: real art rows in the corpus
+    yield pattern-valid matches, including multi-char ones like "gw" in
+    "#g...#.#g.#...gw...#", so the whole line must be treated as art. The
+    cost is that a real tag sharing a line with a stray '#' is dropped.
     """
     raw = []
     in_fence = False
-    pat = re.compile(r'(?<![/\w])#([a-zA-Z][a-zA-Z0-9_-]*)')
-    stray = re.compile(r'#(?![A-Za-z0-9])')
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
@@ -727,9 +745,12 @@ def extract_hashtags(text):
             continue
         if in_fence:
             continue
-        if stray.search(line):
+        # Drop inline code spans before the stray-'#' check, so backticking a
+        # literal both untags it and stops it poisoning the rest of the line.
+        line = INLINE_CODE_RE.sub("", line)
+        if STRAY_HASH_RE.search(line):
             continue
-        raw.extend(pat.findall(line))
+        raw.extend(HASHTAG_RE.findall(line))
     return list(dict.fromkeys(raw))
 
 
@@ -748,6 +769,9 @@ def sync_hashtags(path):
         return
 
     meta = parse_frontmatter(text[4:fm_end])
+    if notag(meta):
+        return
+
     existing = meta.get("tags") or []
     if isinstance(existing, str):
         existing = [existing] if existing else []

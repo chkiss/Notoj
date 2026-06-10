@@ -1092,6 +1092,59 @@ class TestSyncHashtags(unittest.TestCase):
             self.assertIn("alpha", text)
             self.assertIn("beta", text)
 
+    def test_notag_note_not_synced(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            original = (
+                "---\n"
+                "id: abc\n"
+                "created: 2013-10-08T13:08:43Z\n"
+                "modified: 2013-10-08T13:08:43Z\n"
+                "version: 1\n"
+                "notag: true\n"
+                "tags: []\n"
+                "---\n"
+                "\n"
+                "channel list: #acehelp #passthepopcorn\n"
+            )
+            self._write(path, original)
+            notoj.sync_hashtags(path)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), original)
+
+    def test_notag_keeps_manual_tags(self):
+        # notag stops the body sweep; tags already in frontmatter stay put.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, (
+                "---\n"
+                "id: abc\n"
+                "created: 2013-10-08T13:08:43Z\n"
+                "modified: 2013-10-08T13:08:43Z\n"
+                "version: 1\n"
+                "notag: true\n"
+                "tags:\n"
+                "  - reference\n"
+                "---\n"
+                "\n"
+                "config uses #LidSwitchIgnoreInhibited\n"
+            ))
+            notoj.sync_hashtags(path)
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("  - reference", text)
+            self.assertNotIn("LidSwitchIgnoreInhibited\n---", text.split("---")[1])
+
+
+class TestNotagFlag(unittest.TestCase):
+    def test_true_variants(self):
+        for v in ("true", "True", "TRUE", "yes", "1", " true "):
+            self.assertTrue(notoj.notag({"notag": v}), v)
+
+    def test_absent_or_false(self):
+        for meta in ({}, {"notag": "false"}, {"notag": ""}, {"notag": "no"}):
+            self.assertFalse(notoj.notag(meta), meta)
+
 
 # ---------------------------------------------------------------------------
 # parse_tag_input

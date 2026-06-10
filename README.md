@@ -130,6 +130,8 @@ synced to the frontmatter tags field.
 
 The filename is derived from the first line of the body. Renaming a note (editing its first line) renames the file automatically.
 
+Hashtag sync skips fenced ``` code blocks and inline `` `code` `` spans — backtick a literal like `` `#B5B5B5` `` and it stays content, not a tag. For wholesale reference notes (pasted configs, channel lists, color palettes) where every inline `#` is a literal, add `notag: true` to the frontmatter to opt the whole note out of hashtag sync; manual tagging with the `#` key still works on such notes.
+
 ## Open loops (resurfacing)
 
 Tag any note `#loop` to turn it into an open loop — something you want to be nudged about again later. Press `g r` to enter the **resurface view**, which lists only `#loop` notes, most stale first (longest since you last touched them). From there:
