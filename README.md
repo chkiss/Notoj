@@ -71,7 +71,7 @@ Print keybindings and exit.
 | `e` | Open note in Vim at bottom (for appending) |
 | `n` | Create a new blank note |
 | `d` | Move note to trash |
-| `u` | Undo last trash, loop-close (`x`), or note edit — most recent first |
+| `u` | Undo last trash, loop-close (`x`), tag addition (`#`/`.`), or note edit — most recent first |
 | `Ctrl-r` | Redo last undone action |
 
 ### Search

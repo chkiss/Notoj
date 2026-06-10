@@ -54,7 +54,7 @@ Keybindings:
     e           edit note in Vim (appends at bottom)
     n           create new blank note
     d           trash selected note
-    u           undo last trash, loop-close (x), or note edit (most recent first)
+    u           undo last trash, loop-close (x), tag addition, or note edit
     Ctrl-r      redo last undone action
 
   Search
@@ -486,22 +486,33 @@ def suspend_curses():
 
 
 def file_snapshot(directory):
+    """Map of path -> (mtime, size). Size is included so writes that preserve
+    mtime on purpose — tagging from the list keeps the modified date — are
+    still detected and reloaded."""
     snap = {}
     for f in glob.glob(os.path.join(directory, "*.md")):
         if CONFLICT_RE.match(os.path.basename(f)):
             continue  # conflict copies must not enter the reload snapshot, or normalize_external_note would rename them
         try:
-            snap[f] = os.path.getmtime(f)
+            st = os.stat(f)
+            snap[f] = (st.st_mtime, st.st_size)
         except OSError:
             pass
     return snap
 
 
 def normalize_external_note(path):
-    """Fix stale title: and modified: frontmatter after an external edit."""
+    """Fix stale title: and modified: frontmatter after an external edit.
+
+    modified: is set from the file's mtime — the time of the edit on whatever
+    device made it — not the adoption time here. The mtime is then restored
+    after rewriting, which keeps mtime == modified: that way the rewrite
+    itself never reads as yet another external change, locally or (once
+    Syncthing has carried the mtime across) on any other device."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
+        mtime = os.path.getmtime(path)
     except Exception:
         return
 
@@ -871,6 +882,24 @@ def add_tags(path, new_tags):
     return added
 
 
+def add_tags_keep_date(path, new_tags):
+    """add_tags, but keep the note's modified date: tagging from the list
+    (#, ., redo) is metadata grooming, not an edit, so it must not float the
+    note to the top of date-sorted views. Restoring the mtime keeps it equal
+    to the frontmatter modified:, so the normalize pass leaves both alone."""
+    try:
+        mod_ts = os.path.getmtime(path)
+    except OSError:
+        mod_ts = None
+    added = add_tags(path, new_tags)
+    if added and mod_ts is not None:
+        try:
+            os.utime(path, (mod_ts, mod_ts))
+        except OSError:
+            pass
+    return added
+
+
 def remove_tag(path, tag):
     """Remove a tag from a note: drop it from the YAML tags field and strip any
     matching inline #hashtag from the body (so sync_hashtags won't re-add it).
@@ -925,6 +954,57 @@ def remove_tag(path, tag):
         new_fm_lines.append(line)
 
     new_text = "---\n" + "\n".join(new_fm_lines) + "\n---\n" + body_stripped
+    try:
+        atomic_write(path, new_text)
+    except Exception:
+        return False
+    return True
+
+
+def remove_tags_frontmatter(path, tags):
+    """Drop the given tags from a note's YAML tags field only; the body is
+    left untouched (unlike remove_tag, which also strips matching inline
+    #hashtags). For undoing a #-key addition, which never writes to the body.
+    Returns True if the file changed."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return False
+    if not text.startswith("---\n"):
+        return False
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        return False
+
+    meta = parse_frontmatter(text[4:fm_end])
+    existing = meta.get("tags") or []
+    if isinstance(existing, str):
+        existing = [existing] if existing else []
+    drop = set(tags)
+    new_tags = [t for t in existing if t not in drop]
+    if new_tags == existing:
+        return False
+
+    new_fm_lines = []
+    skip_items = False
+    for line in text[4:fm_end].splitlines():
+        if line.startswith("tags:"):
+            if new_tags:
+                new_fm_lines.append("tags:")
+                for t in new_tags:
+                    new_fm_lines.append(f"  - {yaml_scalar(t)}")
+            else:
+                new_fm_lines.append("tags: []")
+            skip_items = True
+            continue
+        if skip_items:
+            if line.startswith("  - "):
+                continue
+            skip_items = False
+        new_fm_lines.append(line)
+
+    new_text = "---\n" + "\n".join(new_fm_lines) + text[fm_end:]
     try:
         atomic_write(path, new_text)
     except Exception:
@@ -1774,7 +1854,19 @@ def undo_action(act):
         return act["path"]
     if kind == "edit":
         atomic_write(act["path"], act["before"])
+        act["path"] = rename_to_title(act["path"])
         git_commit(f"undo edit: {_stem(act['path'])}")
+        return act["path"]
+    if kind == "tags":
+        if remove_tags_frontmatter(act["path"], act["added"]):
+            # Tagging bumped the modified date (via the normalize pass);
+            # restore the original mtime so undo rolls that back too.
+            if act.get("mod"):
+                try:
+                    os.utime(act["path"], (act["mod"], act["mod"]))
+                except OSError:
+                    pass
+            git_commit(f"untag: {_stem(act['path'])}")
         return act["path"]
     return None
 
@@ -1792,42 +1884,14 @@ def redo_action(act):
         return act["path"]
     if kind == "edit":
         atomic_write(act["path"], act["after"])
+        act["path"] = rename_to_title(act["path"])
         git_commit(f"redo edit: {_stem(act['path'])}")
         return act["path"]
+    if kind == "tags":
+        if add_tags_keep_date(act["path"], act["added"]):
+            git_commit(f"retag: {_stem(act['path'])}")
+        return act["path"]
     return None
-
-
-def undo_trash():
-    if not os.path.exists(TRASH_DIR):
-        return False
-
-    candidates = [
-        (os.path.getmtime(p), p)
-        for p in glob.glob(os.path.join(TRASH_DIR, "*.md"))
-        if os.path.isfile(p)
-    ]
-
-    if not candidates:
-        return False
-
-    candidates.sort(reverse=True)
-
-    src = candidates[0][1]
-    dst = os.path.join(NOTES_DIR, os.path.basename(src))
-
-    if os.path.exists(dst):
-        stem, ext = os.path.splitext(os.path.basename(src))
-        i = 2
-        while os.path.exists(dst):
-            dst = os.path.join(NOTES_DIR, f"{stem} ({i}){ext}")
-            i += 1
-
-    try:
-        os.rename(src, dst)
-        git_commit(f"restore: {os.path.splitext(os.path.basename(dst))[0]}")
-        return True
-    except Exception:
-        return False
 
 
 def load_trash():
@@ -2519,8 +2583,13 @@ def run(stdscr):
                 if filtered and 0 <= state["cur"] < len(filtered):
                     note = filtered[state["cur"]]
                     new_tags = parse_tag_input(state["tag_input"])
-                    if new_tags and add_tags(note["path"], new_tags):
+                    mod_ts = note.get("modificationDate")
+                    added = add_tags_keep_date(note["path"], new_tags) if new_tags else []
+                    if added:
+                        record({"kind": "tags", "path": note["path"],
+                                "added": added, "mod": mod_ts})
                         state["_last_tags"] = state["tag_input"].strip()
+                        git_commit(f"tag: {_stem(note['path'])}")
                         refresh_notes()
                         state["_restore_path"] = note["path"]
                 state["tag_mode"] = False
@@ -2806,9 +2875,62 @@ def run(stdscr):
         elif k == ord(".") and filtered and state["_last_tags"] and not state["trash_mode"]:
             note = filtered[state["cur"]]
             new_tags = parse_tag_input(state["_last_tags"])
-            if new_tags and add_tags(note["path"], new_tags):
+            mod_ts = note.get("modificationDate")
+            added = add_tags_keep_date(note["path"], new_tags) if new_tags else []
+            if added:
+                record({"kind": "tags", "path": note["path"],
+                        "added": added, "mod": mod_ts})
+                git_commit(f"tag: {_stem(note['path'])}")
                 refresh_notes()
                 state["_restore_path"] = note["path"]
+                state["p_scroll"] = 0
+
+        # ----------------------------
+        # Tag filter ( t = notes sharing the selected note's tags, ⇥ cycles
+        # all -> each single tag; T = browse all tags )
+        # ----------------------------
+
+        elif k == ord("t") and filtered and not state["trash_mode"]:
+            note = filtered[state["cur"]]
+            ntags = list(note.get("tags") or [])
+            if ntags:
+                state["tagf"] = {"tags": ntags, "idx": -1}
+                state["dup_mode"] = None
+                state["review_mode"] = False
+                state["sort"] = "relevance"
+                state["q"] = ""
+                state["cur"] = 0
+                state["off"] = 0
+                state["p_scroll"] = 0
+                # The source note matches its own tag set, so keep it selected.
+                state["_restore_path"] = note["path"]
+
+        elif k == 9 and state["tagf"] is not None:  # Tab — cycle active tag
+            tf = state["tagf"]
+            tf["idx"] = tf["idx"] + 1 if tf["idx"] + 1 < len(tf["tags"]) else -1
+            cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
+            state["cur"] = 0
+            state["off"] = 0
+            state["p_scroll"] = 0
+            if cur_path:
+                state["_restore_path"] = cur_path   # keep selection if it still matches
+
+        elif k == ord("T") and not state["trash_mode"]:
+            sel = tags_view(stdscr, notes, ui=state["_tags_ui"])
+            if sel is TAGS_VIEW_QUIT:
+                if filtered and 0 <= state["cur"] < len(filtered):
+                    save_cursor(filtered[state["cur"]]["path"])
+                break
+            if sel:
+                # from_T: ESC from this filter goes back to the tags view
+                # (cursor on the tag) rather than to the notes list.
+                state["tagf"] = {"tags": [sel], "idx": -1, "from_T": True}
+                state["dup_mode"] = None
+                state["review_mode"] = False
+                state["sort"] = "relevance"
+                state["q"] = ""
+                state["cur"] = 0
+                state["off"] = 0
                 state["p_scroll"] = 0
 
         # ----------------------------
@@ -2840,8 +2962,6 @@ def run(stdscr):
                 if focus:
                     state["_restore_path"] = focus
                 state["p_scroll"] = 0
-            elif undo_trash():  # legacy fallback for notes trashed before this session
-                refresh_notes()
 
         # redo: re-apply most-recently-undone action (Ctrl-R)
         elif k == 18:

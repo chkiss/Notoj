@@ -1136,6 +1136,78 @@ class TestSyncHashtags(unittest.TestCase):
             self.assertNotIn("LidSwitchIgnoreInhibited\n---", text.split("---")[1])
 
 
+class TestAddTagsKeepDate(unittest.TestCase):
+    def _note(self, d):
+        path = os.path.join(d, "note.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                "---\nid: abc\ncreated: 2020-01-01T00:00:00Z\n"
+                "modified: 2020-01-01T00:00:00Z\nversion: 1\ntags: []\n---\n\nSome note\n"
+            )
+        os.utime(path, (1_000_000, 1_000_000))
+        return path
+
+    def test_preserves_mtime(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._note(d)
+            added = notoj.add_tags_keep_date(p, ["work"])
+            self.assertEqual(added, ["work"])
+            self.assertIn("  - work", open(p, encoding="utf-8").read())
+            self.assertEqual(os.path.getmtime(p), 1_000_000)
+
+    def test_noop_add_leaves_file_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._note(d)
+            notoj.add_tags(p, ["work"])
+            os.utime(p, (1_000_000, 1_000_000))
+            self.assertEqual(notoj.add_tags_keep_date(p, ["work"]), [])
+            self.assertEqual(os.path.getmtime(p), 1_000_000)
+
+
+class TestRemoveTagsFrontmatter(unittest.TestCase):
+    def _note(self, d, tags, body="Some note with `#sidebar-header` inline\n"):
+        path = os.path.join(d, "note.md")
+        tag_block = "tags:\n" + "".join(f"  - {t}\n" for t in tags) if tags else "tags: []\n"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                "---\nid: abc\ncreated: 2020-01-01T00:00:00Z\n"
+                "modified: 2020-01-01T00:00:00Z\nversion: 1\n"
+                + tag_block + "---\n\n" + body
+            )
+        return path
+
+    def test_removes_only_given_tags(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._note(d, ["a", "b", "c"])
+            self.assertTrue(notoj.remove_tags_frontmatter(p, ["b"]))
+            text = open(p, encoding="utf-8").read()
+            self.assertIn("  - a", text)
+            self.assertNotIn("  - b", text)
+            self.assertIn("  - c", text)
+
+    def test_empties_to_flow_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._note(d, ["only"])
+            self.assertTrue(notoj.remove_tags_frontmatter(p, ["only"]))
+            self.assertIn("tags: []", open(p, encoding="utf-8").read())
+
+    def test_body_untouched(self):
+        # Unlike remove_tag, inline occurrences in the body must survive.
+        with tempfile.TemporaryDirectory() as d:
+            p = self._note(d, ["sidebar-header"], body="css fix #sidebar-header\n")
+            self.assertTrue(notoj.remove_tags_frontmatter(p, ["sidebar-header"]))
+            text = open(p, encoding="utf-8").read()
+            self.assertIn("css fix #sidebar-header", text)
+            self.assertNotIn("  - sidebar-header", text)
+
+    def test_noop_returns_false(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._note(d, ["a"])
+            before = open(p, encoding="utf-8").read()
+            self.assertFalse(notoj.remove_tags_frontmatter(p, ["zzz"]))
+            self.assertEqual(open(p, encoding="utf-8").read(), before)
+
+
 class TestNotagFlag(unittest.TestCase):
     def test_true_variants(self):
         for v in ("true", "True", "TRUE", "yes", "1", " true "):
@@ -1309,6 +1381,26 @@ class TestIncrementalUpdate(unittest.TestCase):
                 f"{title}\n"
             )
         return path
+
+    def test_mtime_preserving_write_detected(self):
+        # add_tags_keep_date restores the mtime after writing; the snapshot
+        # must still see the change (via size) so the UI reloads the note.
+        with tempfile.TemporaryDirectory() as d:
+            self._old = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                p = self._make_note_file(d, "a.md", "Alpha")
+                os.utime(p, (1_000_000, 1_000_000))
+                snap = notoj.file_snapshot(d)
+                notes = [notoj.load_md(p)]
+                notoj.add_tags_keep_date(p, ["work"])
+                new_snap = notoj.file_snapshot(d)
+                self.assertNotEqual(snap, new_snap)
+                result, changed = notoj.incremental_update(notes, snap, new_snap)
+                self.assertTrue(changed)
+                self.assertEqual(result[0]["tags"], ["work"])
+            finally:
+                notoj.NOTES_DIR = self._old
 
     def test_no_changes_returns_false(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1899,6 +1991,35 @@ class TestUndoRedoActions(unittest.TestCase):
                 self.assertIn("  - loop", open(p, encoding="utf-8").read())
                 notoj.redo_action(act)
                 self.assertNotIn("  - loop", open(p, encoding="utf-8").read())
+            finally:
+                self._restore()
+
+    def test_tags_undo_redo(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._setdirs(d)
+            try:
+                p = os.path.join(d, "note.md")
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(
+                        "---\nid: abc\ncreated: 2020-01-01T00:00:00Z\n"
+                        "modified: 2020-01-01T00:00:00Z\nversion: 1\n"
+                        "tags:\n  - keep\n---\n\nSome note\n"
+                    )
+                added = notoj.add_tags(p, ["work", "idea"])
+                self.assertEqual(added, ["work", "idea"])
+                act = {"kind": "tags", "path": p, "added": added, "mod": 1_000_000.0}
+                # Undo drops only the added tags and restores the mtime.
+                self.assertEqual(notoj.undo_action(act), p)
+                text = open(p, encoding="utf-8").read()
+                self.assertIn("  - keep", text)
+                self.assertNotIn("  - work", text)
+                self.assertNotIn("  - idea", text)
+                self.assertEqual(os.path.getmtime(p), 1_000_000.0)
+                # Redo re-adds them.
+                self.assertEqual(notoj.redo_action(act), p)
+                text = open(p, encoding="utf-8").read()
+                self.assertIn("  - work", text)
+                self.assertIn("  - idea", text)
             finally:
                 self._restore()
 
