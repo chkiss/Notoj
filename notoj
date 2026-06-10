@@ -1888,12 +1888,13 @@ def help_view(stdscr):
         except curses.error:
             pass
 
-    modal_list(stdscr, {
+    return modal_list(stdscr, {
         "count": lambda: len(rows_now()),
         "header": lambda w: "notoj keys",
-        "footer": lambda: "j/k scroll  any other key closes",
+        "footer": lambda: "j/k scroll  q quit  any other key closes",
         "draw_row": draw_row,
-        "on_key": lambda k, st: (None,),   # resize is filtered by modal_list
+        # q quits the app (like everywhere); any other non-nav key closes.
+        "on_key": lambda k, st: (MODAL_QUIT,) if k == ord("q") else (None,),
     })
 
 
@@ -3440,7 +3441,10 @@ def run(stdscr):
                 state["_restore_path"] = cur_path   # keep selection if it still matches
 
         elif k == ord("?"):
-            help_view(stdscr)
+            if help_view(stdscr) is MODAL_QUIT:
+                if filtered and 0 <= state["cur"] < len(filtered):
+                    save_cursor(filtered[state["cur"]]["path"])
+                break
 
         elif k == ord("b") and filtered and not state["trash_mode"]:
             sel = backlinks_view(stdscr, notes, filtered[state["cur"]])
