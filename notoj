@@ -49,6 +49,7 @@ KEYMAP = [
         ("Ctrl-f/b", "page down / up"),
         ("Ctrl-d/u", "half-page down / up"),
         ("PgDn/PgUp", "scroll preview pane"),
+        ("ESC", "step back (prompt → filter → view)"),
     ]),
     ("Notes", [
         ("Enter", "open note in Vim at top"),
@@ -62,9 +63,6 @@ KEYMAP = [
         ("/", "enter search mode"),
         ("<type>", "filter notes live"),
         ("Enter", "open match, or create new note titled with query"),
-        ("ESC", "step back: close the search prompt, then clear the filter, "
-                "then leave the current view for the notes list (a tag "
-                "filter opened from T returns to the tags view first)"),
     ]),
     ("Sorting (applies in every view; shown in the header)", [
         ("s", "cycle sort: relevance (default) → title → created → modified"),
@@ -1611,6 +1609,12 @@ def modal_list(stdscr, view):
         stdscr.refresh()
         k = stdscr.getch()
 
+        # A terminal resize arrives as KEY_RESIZE — or as ERR (-1) when the
+        # SIGWINCH interrupts the blocked getch (tmux does this). Neither is
+        # a view key: just loop, redrawing at the new size.
+        if k in (-1, curses.KEY_RESIZE):
+            continue
+
         if not narrow and (k in NAV_KEYS or k == ord("g")):
             prev = st["cur"]
             if k == ord("g"):
@@ -1868,17 +1872,12 @@ def help_view(stdscr):
         except curses.error:
             pass
 
-    def on_key(k, st):
-        if k == curses.KEY_RESIZE:
-            return None   # rewrap, don't close
-        return (None,)
-
     modal_list(stdscr, {
         "count": lambda: len(rows_now()),
         "header": lambda w: "notoj keys",
         "footer": lambda: "j/k scroll  any other key closes",
         "draw_row": draw_row,
-        "on_key": on_key,
+        "on_key": lambda k, st: (None,),   # resize is filtered by modal_list
     })
 
 

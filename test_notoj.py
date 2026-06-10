@@ -2657,10 +2657,10 @@ class TestKeymap(unittest.TestCase):
         # the description column (4 + HELP_KEY_W spaces).
         text = notoj.build_help(width=80)
         lines = text.splitlines()
-        esc_i = next(i for i, l in enumerate(lines)
-                     if l.startswith("    ESC         step back:"))
+        b_i = next(i for i, l in enumerate(lines)
+                   if l.startswith("    b           backlinks:"))
         indent = " " * (4 + notoj.HELP_KEY_W)
-        nxt = lines[esc_i + 1]
+        nxt = lines[b_i + 1]
         self.assertTrue(nxt.startswith(indent) and nxt[len(indent)] != " ",
                         f"expected wrapped continuation, got: {nxt!r}")
 
