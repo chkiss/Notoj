@@ -1410,27 +1410,38 @@ def hist_view(stdscr, n):
                     attr = curses.color_pair(4)
                 else:
                     attr = curses.A_NORMAL
-                stdscr.addnstr(i + 1, list_w + 1, line.expandtabs(4)[:diff_w], diff_w, attr)
+                try:
+                    stdscr.addnstr(i + 1, list_w + 1, line.expandtabs(4)[:diff_w], diff_w, attr)
+                except curses.error:
+                    pass   # wide glyph landing on the right edge
         else:
             stdscr.addnstr(1, list_w + 1, "(no changes vs current)", diff_w, curses.A_DIM)
 
-        stdscr.addnstr(h - 1, 0, "j/k select | PgDn/PgUp scroll diff | Enter vimdiff | q back", w - 1)
+        try:
+            stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
+        except curses.error:
+            pass
+        stdscr.addnstr(h - 1, 0, "j/k select  PgDn/PgUp scroll diff  ⮐ vimdiff  q back", w - 1, footer_attr())
         stdscr.refresh()
 
         k = stdscr.getch()
 
         if k in [ord("q"), 27]:
             break
-        elif k in [ord("j"), curses.KEY_DOWN] and state["cur"] < len(commits) - 1:
-            state["cur"] += 1
-            if state["cur"] >= state["off"] + page_h:
-                state["off"] = state["cur"] - page_h + 1
-            load_diff()
-        elif k in [ord("k"), curses.KEY_UP] and state["cur"] > 0:
-            state["cur"] -= 1
-            if state["cur"] < state["off"]:
-                state["off"] = state["cur"]
-            load_diff()
+        elif k in NAV_KEYS or k == ord("g"):
+            prev = state["cur"]
+            if k == ord("g"):
+                if stdscr.getch() == ord("g"):
+                    state["cur"] = 0
+            else:
+                d = nav_delta(k, page_h)
+                if d == NAV_BOTTOM:
+                    state["cur"] = len(commits) - 1
+                else:
+                    state["cur"] += d
+            clamp_list(state, len(commits), page_h)
+            if state["cur"] != prev:
+                load_diff()   # only re-run git show when the selection moved
         elif k in [10, 13]:
             open_vimdiff_at(n["path"], commits[state["cur"]]["hash"])
             stdscr.refresh()
@@ -2153,18 +2164,55 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens)
         pos = mi + len(tok)
 
 
-def clamp_scroll(state, filtered, height):
-    max_idx = max(0, len(filtered) - 1)
+# ----------------------------
+# List navigation (shared by the main list, tags view, and history view)
+# ----------------------------
 
-    state["cur"] = max(0, min(state["cur"], max_idx))
+# Sentinel nav_delta result: G — jump to the last item. (gg is a chord and
+# stays decoded per surface; only the resulting jump-to-top is trivial.)
+NAV_BOTTOM = "bottom"
 
-    page_h = height - 3
+# Every key nav_delta understands; surfaces gate their nav branch on this.
+NAV_KEYS = {ord("j"), ord("k"), ord("G"),
+            curses.KEY_DOWN, curses.KEY_UP,
+            4, 21, 6, 2}   # Ctrl-d, Ctrl-u, Ctrl-f, Ctrl-b
 
+
+def nav_delta(k, page_h):
+    """Decode a list-motion key into a cursor delta (or NAV_BOTTOM, or None
+    for non-motion keys). One decoder for every list surface, so a new
+    motion key lands everywhere at once: j/k/arrows one row, Ctrl-d/u half a
+    page, Ctrl-f/b a full page minus one row of overlap, G the bottom."""
+    if k in (ord("j"), curses.KEY_DOWN):
+        return 1
+    if k in (ord("k"), curses.KEY_UP):
+        return -1
+    if k == 4:    # Ctrl-d
+        return max(1, page_h // 2)
+    if k == 21:   # Ctrl-u
+        return -max(1, page_h // 2)
+    if k == 6:    # Ctrl-f
+        return max(1, page_h - 1)
+    if k == 2:    # Ctrl-b
+        return -max(1, page_h - 1)
+    if k == ord("G"):
+        return NAV_BOTTOM
+    return None
+
+
+def clamp_list(state, n_items, page_h):
+    """Clamp state["cur"] to the list bounds and scroll state["off"] so the
+    cursor stays on screen."""
+    state["cur"] = max(0, min(state["cur"], max(0, n_items - 1)))
     if state["cur"] < state["off"]:
         state["off"] = state["cur"]
-
     elif state["cur"] >= state["off"] + page_h:
         state["off"] = state["cur"] - page_h + 1
+
+
+def clamp_scroll(state, filtered, height):
+    # rows 1..h-2 hold notes; the footer bar sits at h-1
+    clamp_list(state, len(filtered), height - 2)
 
 
 # ----------------------------
@@ -2739,16 +2787,12 @@ def run(stdscr):
         # Navigation
         # ----------------------------
 
-        elif k in [ord("j"), curses.KEY_DOWN]:
-            state["cur"] += 1
-            state["p_scroll"] = 0
-
-        elif k in [ord("k"), curses.KEY_UP]:
-            state["cur"] -= 1
-            state["p_scroll"] = 0
-
-        elif k == ord("G"):
-            state["cur"] = len(filtered) - 1
+        elif k in NAV_KEYS:
+            d = nav_delta(k, h - 2)
+            if d == NAV_BOTTOM:
+                state["cur"] = len(filtered) - 1
+            else:
+                state["cur"] += d
             state["p_scroll"] = 0
             clamp_scroll(state, filtered, h)
 
@@ -2787,34 +2831,11 @@ def run(stdscr):
                 state["review_mode"] = not state["review_mode"]
                 state["dup_mode"] = None
                 state["trash_mode"] = False
+                state["tagf"] = None
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
                 state["sort"] = "relevance"
-
-        # Ctrl-f
-        elif k == 6:
-            state["cur"] += h - 4
-            state["p_scroll"] = 0
-            clamp_scroll(state, filtered, h)
-
-        # Ctrl-b
-        elif k == 2:
-            state["cur"] -= h - 4
-            state["p_scroll"] = 0
-            clamp_scroll(state, filtered, h)
-
-        # Ctrl-d
-        elif k == 4:
-            state["cur"] += max(1, (h - 4) // 2)
-            state["p_scroll"] = 0
-            clamp_scroll(state, filtered, h)
-
-        # Ctrl-u
-        elif k == 21:
-            state["cur"] -= max(1, (h - 4) // 2)
-            state["p_scroll"] = 0
-            clamp_scroll(state, filtered, h)
 
         # ----------------------------
         # Preview scrolling

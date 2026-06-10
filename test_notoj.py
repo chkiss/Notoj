@@ -2433,5 +2433,66 @@ class TestScheduleInlineLoop(unittest.TestCase):
         self.assertIn("soon", body)
 
 
+# ---------------------------------------------------------------------------
+# nav_delta / clamp_list (shared list navigation)
+# ---------------------------------------------------------------------------
+
+class TestNavDelta(unittest.TestCase):
+    def test_single_row(self):
+        for k in (ord("j"), curses_stub.KEY_DOWN):
+            self.assertEqual(notoj.nav_delta(k, 20), 1)
+        for k in (ord("k"), curses_stub.KEY_UP):
+            self.assertEqual(notoj.nav_delta(k, 20), -1)
+
+    def test_half_page(self):
+        self.assertEqual(notoj.nav_delta(4, 20), 10)    # Ctrl-d
+        self.assertEqual(notoj.nav_delta(21, 20), -10)  # Ctrl-u
+
+    def test_full_page_minus_overlap(self):
+        self.assertEqual(notoj.nav_delta(6, 20), 19)    # Ctrl-f
+        self.assertEqual(notoj.nav_delta(2, 20), -19)   # Ctrl-b
+
+    def test_bottom(self):
+        self.assertEqual(notoj.nav_delta(ord("G"), 20), notoj.NAV_BOTTOM)
+
+    def test_non_motion_key(self):
+        self.assertIsNone(notoj.nav_delta(ord("x"), 20))
+
+    def test_tiny_page_floors_at_one(self):
+        self.assertEqual(notoj.nav_delta(4, 1), 1)
+        self.assertEqual(notoj.nav_delta(6, 1), 1)
+        self.assertEqual(notoj.nav_delta(21, 0), -1)
+
+    def test_nav_keys_match_decoder(self):
+        for k in notoj.NAV_KEYS:
+            self.assertIsNotNone(notoj.nav_delta(k, 20), k)
+
+
+class TestClampList(unittest.TestCase):
+    def test_clamps_cursor_to_bounds(self):
+        st = {"cur": 99, "off": 0}
+        notoj.clamp_list(st, 10, 5)
+        self.assertEqual(st["cur"], 9)
+        st = {"cur": -3, "off": 0}
+        notoj.clamp_list(st, 10, 5)
+        self.assertEqual(st["cur"], 0)
+
+    def test_scrolls_down_to_keep_cursor_visible(self):
+        st = {"cur": 9, "off": 0}
+        notoj.clamp_list(st, 10, 5)
+        self.assertEqual(st["off"], 5)
+
+    def test_scrolls_up_to_keep_cursor_visible(self):
+        st = {"cur": 2, "off": 6}
+        notoj.clamp_list(st, 10, 5)
+        self.assertEqual(st["off"], 2)
+
+    def test_empty_list(self):
+        st = {"cur": 4, "off": 3}
+        notoj.clamp_list(st, 0, 5)
+        self.assertEqual(st["cur"], 0)
+        self.assertEqual(st["off"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
