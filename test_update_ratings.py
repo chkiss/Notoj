@@ -198,6 +198,26 @@ class TestParseExisting(unittest.TestCase):
         _, none = ur.parse_existing(self.BLOCK)
         self.assertEqual(none, ["Some Film", "Another One"])
 
+    def test_escaped_pipe_in_title(self):
+        block = "| What If...? \\| Marvel | 7.4 |"
+        rated, _ = ur.parse_existing(block)
+        self.assertEqual(rated, {"What If...? | Marvel": "7.4"})
+
+
+# ---------------------------------------------------------------------------
+# pipe escaping round-trip (render_block <-> parse_existing)
+# ---------------------------------------------------------------------------
+
+class TestPipeRoundTrip(unittest.TestCase):
+    def test_title_with_pipe_survives_rewrite(self):
+        rated = {"What If...? | Marvel": "7.4", "Plain Title": "94%"}
+        block = ur.render_block("Rating", "movie", rated, [])
+        # The literal pipe is escaped in the rendered table...
+        self.assertIn("What If...? \\| Marvel", block)
+        # ...and reading the block back recovers the original titles.
+        reparsed, _ = ur.parse_existing(block)
+        self.assertEqual(reparsed, rated)
+
 
 # ---------------------------------------------------------------------------
 # section_titles

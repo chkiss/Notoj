@@ -83,11 +83,13 @@ def parse_existing(block):
     """From an existing ratings block, return ({title: display}, [no_rating])."""
     rated, none = {}, []
     for line in block.splitlines():
-        m = re.match(r'\|\s*(.+?)\s*\|\s*(.+?)\s*\|', line)
+        # Cells may contain literal pipes escaped as \| (render_block writes
+        # them that way), so a cell is a run of "anything but |, or \|".
+        m = re.match(r'\|\s*((?:\\\||[^|])+?)\s*\|\s*((?:\\\||[^|])+?)\s*\|', line)
         if m and m.group(1).lower() not in ("book", "film", "title", "movie", "show"):
             if set(m.group(1)) <= set("-: "):  # the |---|---| separator
                 continue
-            rated[m.group(1)] = m.group(2)
+            rated[m.group(1).replace("\\|", "|")] = m.group(2).replace("\\|", "|")
         nm = re.search(r'No rating found:\s*(.+?)\.?\*?\s*$', line)
         if nm:
             none = [t.strip() for t in nm.group(1).split(",") if t.strip()]
@@ -170,7 +172,7 @@ def split_groups(body, block_span):
 # ---- matching ------------------------------------------------------------
 
 STOP = {"the", "and", "for", "with", "from", "her", "his", "into", "una", "los",
-        "las", "del", "una", "que", "vol", "part"}
+        "las", "del", "que", "vol", "part"}
 
 
 def words(s):
@@ -262,9 +264,10 @@ LEGEND = {
 
 
 def render_block(col, kind, rated, none):
+    esc = lambda s: s.replace("|", "\\|")   # literal pipes would split the table cells
     rows = sorted(rated.items(), key=lambda kv: (-sort_key(kv[1]), kv[0].lower()))
     out = [START, "## Ratings", "", LEGEND[kind], "", f"| {'Book' if kind=='book' else 'Film' if kind=='movie' else 'Title'} | {col} |", "|---|---|"]
-    out += [f"| {t} | {d} |" for t, d in rows]
+    out += [f"| {esc(t)} | {esc(d)} |" for t, d in rows]
     if none:
         out += ["", "*No rating found: " + ", ".join(none) + ".*"]
     out += [END]
@@ -274,7 +277,8 @@ def render_block(col, kind, rated, none):
 # ---- main ----------------------------------------------------------------
 
 def process(path, dry, no_new=False):
-    text = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
     fm, body = split_frontmatter(text)
     if not no_new:
         body = split_groups(body, find_block(body))
@@ -318,7 +322,8 @@ def process(path, dry, no_new=False):
     else:
         print(f"{name}: no new titles")
     if not dry and new_body != text[len(fm):]:
-        open(path, "w", encoding="utf-8").write(fm + new_body)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(fm + new_body)
 
 
 def main():
