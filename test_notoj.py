@@ -2635,26 +2635,37 @@ class TestKeymap(unittest.TestCase):
                 self.assertTrue(desc, (section, key))
 
     def test_build_help_covers_every_key_and_section(self):
-        text = notoj.build_help()
+        # Wrapping splits descriptions across lines, but never reorders
+        # words — compare whitespace-normalized.
+        flat = " ".join(notoj.build_help(width=80).split())
         for section, entries in notoj.KEYMAP:
-            self.assertIn(section, text)
+            self.assertIn(" ".join(section.split()), flat)
             for key, desc in entries:
-                self.assertIn(key, text)
-                for part in desc.split("\n"):
-                    self.assertIn(part, text)
+                self.assertIn(key, flat)
+                self.assertIn(" ".join(desc.split()), flat)
 
     def test_build_help_is_the_help_constant(self):
         self.assertEqual(notoj.HELP, notoj.build_help())
 
-    def test_continuation_lines_align(self):
-        # A "\n" in a description renders as an unkeyed continuation line at
-        # the same column the first line's text starts.
-        text = notoj.build_help()
-        self.assertIn("    t           filter to notes sharing", text)
-        self.assertIn("                Tab cycles the filter", text)
+    def test_wraps_to_width(self):
+        for width in (60, 80, 120):
+            for line in notoj.build_help(width=width).splitlines():
+                self.assertLessEqual(len(line), width, (width, line))
 
-    def test_help_rows_flatten(self):
-        rows = notoj.help_rows()
+    def test_continuation_lines_indent_under_description(self):
+        # The long ESC description must wrap onto unkeyed lines aligned to
+        # the description column (4 + HELP_KEY_W spaces).
+        text = notoj.build_help(width=80)
+        lines = text.splitlines()
+        esc_i = next(i for i, l in enumerate(lines)
+                     if l.startswith("    ESC         step back:"))
+        indent = " " * (4 + notoj.HELP_KEY_W)
+        nxt = lines[esc_i + 1]
+        self.assertTrue(nxt.startswith(indent) and nxt[len(indent)] != " ",
+                        f"expected wrapped continuation, got: {nxt!r}")
+
+    def test_help_rows_flatten_and_wrap(self):
+        rows = notoj.help_rows(80)
         kinds = [r[0] for r in rows]
         self.assertEqual(kinds.count("section"), len(notoj.KEYMAP))
         self.assertEqual(kinds.count("blank"), len(notoj.KEYMAP) - 1)
@@ -2662,6 +2673,11 @@ class TestKeymap(unittest.TestCase):
         self.assertTrue(any(r[0] == "entry" and r[1] == "" for r in rows))
         # every entry row's text is non-empty
         self.assertTrue(all(r[2] for r in rows if r[0] == "entry"))
+        # narrower width -> more wrapped rows, and no lost words
+        self.assertGreater(len(notoj.help_rows(50)), len(rows))
+        flat80 = " ".join(r[2] for r in rows if r[0] == "entry")
+        flat50 = " ".join(r[2] for r in notoj.help_rows(50) if r[0] == "entry")
+        self.assertEqual(flat80.split(), flat50.split())
 
 
 # ---------------------------------------------------------------------------

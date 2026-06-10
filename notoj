@@ -6,9 +6,11 @@ import os
 import glob
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import uuid
 from datetime import datetime, timezone
@@ -36,8 +38,8 @@ except ImportError:
 
 # Single source of truth for the key reference: renders both the --help text
 # (build_help) and the in-app ? overlay (help_view), so they can't drift.
-# Entries are (key, description); a "\n" in a description continues on an
-# unkeyed line.
+# Descriptions are single strings; rendering wraps them to the available
+# width with the continuation lines indented under the description column.
 KEYMAP = [
     ("Navigation", [
         ("j / ↓", "move down"),
@@ -50,7 +52,7 @@ KEYMAP = [
     ]),
     ("Notes", [
         ("Enter", "open note in Vim at top"),
-        ("e", "edit note in Vim (appends at bottom)"),
+        ("e", "open note in Vim at the last line (normal mode)"),
         ("n", "create new blank note"),
         ("d", "trash selected note"),
         ("u", "undo last trash, loop-close (x), tag addition, or note edit"),
@@ -60,7 +62,9 @@ KEYMAP = [
         ("/", "enter search mode"),
         ("<type>", "filter notes live"),
         ("Enter", "open match, or create new note titled with query"),
-        ("ESC", "exit search mode"),
+        ("ESC", "step back: close the search prompt, then clear the filter, "
+                "then leave the current view for the notes list (a tag "
+                "filter opened from T returns to the tags view first)"),
     ]),
     ("Sorting (applies in every view; shown in the header)", [
         ("s", "cycle sort: relevance (default) → title → created → modified"),
@@ -69,26 +73,25 @@ KEYMAP = [
     ("Tags", [
         ("#", "add tags to the selected note (space-separated)"),
         (".", "repeat the last tag addition on the selected note"),
-        ("t", "filter to notes sharing the selected note's tags;\n"
-              "Tab cycles the filter: all of them → each single tag"),
-        ("T", "browse all tags, most recently used first (Enter filters by\n"
+        ("t", "filter to notes sharing the selected note's tags; Tab cycles "
+              "the filter: all of them → each single tag"),
+        ("T", "browse all tags, most recently used first (Enter filters by "
               "the chosen tag; s cycles sort: recent → count → name)"),
-    ]),
-    ("Backlinks", [
-        ("b", "list notes linking to the selected one ([[wikilinks]] and\n"
-              "[text](note.md) links; Enter jumps to the linking note)"),
     ]),
     ("Resurface (open loops)", [
         ("g r", "toggle resurface view (notes tagged #loop, most stale first)"),
         ("z", 'snooze loop a week (quick "not now")'),
         ("S", "schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…)"),
         ("x", "mark loop done (removes #loop tag)"),
-        ("#loop 2w", "typed anywhere in a note's text schedules it as a loop;\n"
-                     "relative horizons are pinned to a date on save (#loop 2026-06-23)"),
+        ("#loop 2w", "typed anywhere in a note's text schedules it as a loop; "
+                     "relative horizons are pinned to a date on save "
+                     "(#loop 2026-06-23)"),
     ]),
     ("Other views", [
         ("g t", "trash (u restores; editing a trashed note restores it)"),
         ("g d", "duplicates (notes sharing a title)"),
+        ("b", "backlinks: notes linking to the selected one via [[wikilinks]] "
+              "or [text](note.md) links (Enter jumps to the linking note)"),
         ("?", "this key reference"),
     ]),
     ("Other", [
@@ -99,17 +102,23 @@ KEYMAP = [
     ]),
 ]
 
+HELP_KEY_W = 12   # description column starts at 4 (indent) + this
 
-def build_help():
-    """The --help text, rendered from KEYMAP."""
+
+def build_help(width=None):
+    """The --help text, rendered from KEYMAP; long descriptions wrap to the
+    terminal width with continuation lines under the description column."""
+    if width is None:
+        width = shutil.get_terminal_size((80, 24)).columns
+    desc_w = max(20, width - 4 - HELP_KEY_W)
     lines = ["notoj — keyboard-driven terminal notes", "",
              "Usage: notoj [--help]", "", "Keybindings:"]
     for section, entries in KEYMAP:
         lines.append(f"  {section}")
         for key, desc in entries:
-            first, *rest = desc.split("\n")
-            lines.append(f"    {key:<12}{first}")
-            lines.extend(f"    {'':<12}{r}" for r in rest)
+            first, *rest = textwrap.wrap(desc, desc_w)
+            lines.append(f"    {key:<{HELP_KEY_W}}{first}")
+            lines.extend(f"    {'':<{HELP_KEY_W}}{r}" for r in rest)
         lines.append("")
     lines.append("Notes live in the directory set in ~/.config/notoj/config.")
     return "\n".join(lines) + "\n"
@@ -1808,29 +1817,43 @@ def backlinks_view(stdscr, notes, note):
     })
 
 
-def help_rows():
+def help_rows(width):
     """KEYMAP flattened for the ? overlay: (kind, key, text) rows — section
-    headers, key entries (continuation lines carry an empty key), and blank
-    separators between sections."""
+    headers, key entries (wrapped to `width`, continuation lines carry an
+    empty key), and blank separators between sections."""
+    key_w = max(len(k) for _, entries in KEYMAP for k, _ in entries) + 3
+    desc_w = max(20, width - 2 - key_w - 1)
     rows = []
     for section, entries in KEYMAP:
         if rows:
             rows.append(("blank", "", ""))
         rows.append(("section", "", section))
         for key, desc in entries:
-            for j, part in enumerate(desc.split("\n")):
+            for j, part in enumerate(textwrap.wrap(desc, desc_w)):
                 rows.append(("entry", key if j == 0 else "", part))
     return rows
 
 
 def help_view(stdscr):
     """In-app key reference (?): KEYMAP in a scrollable full-width overlay,
-    keys colored apart from their meanings. Nav keys scroll; any other key
-    closes it."""
-    rows = help_rows()
-    key_w = max(len(k) for kind, k, _ in rows if kind == "entry") + 3
+    keys colored apart from their meanings, descriptions wrapped to the live
+    terminal width. Nav keys scroll; any other key closes it."""
+    key_w = max(len(k) for _, entries in KEYMAP for k, _ in entries) + 3
+    vs = {"w": None, "rows": []}
+
+    def rows_now():
+        # Rebuilt whenever the width changes (count() runs every frame, so a
+        # KEY_RESIZE rewraps before the next draw).
+        w = stdscr.getmaxyx()[1]
+        if w != vs["w"]:
+            vs["w"] = w
+            vs["rows"] = help_rows(w)
+        return vs["rows"]
 
     def draw_row(scr, y, i, selected, list_w):
+        rows = rows_now()
+        if i >= len(rows):
+            return
         kind, key, text = rows[i]
         if kind == "blank":
             return
@@ -1845,12 +1868,17 @@ def help_view(stdscr):
         except curses.error:
             pass
 
+    def on_key(k, st):
+        if k == curses.KEY_RESIZE:
+            return None   # rewrap, don't close
+        return (None,)
+
     modal_list(stdscr, {
-        "count": lambda: len(rows),
+        "count": lambda: len(rows_now()),
         "header": lambda w: "notoj keys",
         "footer": lambda: "j/k scroll  any other key closes",
         "draw_row": draw_row,
-        "on_key": lambda k, st: (None,),
+        "on_key": on_key,
     })
 
 
