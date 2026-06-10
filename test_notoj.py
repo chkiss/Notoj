@@ -2621,5 +2621,75 @@ class TestTagfHelpers(unittest.TestCase):
         self.assertEqual(seen, [0, 1, -1, 0])
 
 
+# ---------------------------------------------------------------------------
+# Note links / backlinks (b view)
+# ---------------------------------------------------------------------------
+
+class TestResolveLinkTarget(unittest.TestCase):
+    def test_appends_md(self):
+        self.assertEqual(notoj.resolve_link_target("My note"), "My note.md")
+
+    def test_keeps_existing_md(self):
+        self.assertEqual(notoj.resolve_link_target("My note.md"), "My note.md")
+        self.assertEqual(notoj.resolve_link_target("UPPER.MD"), "UPPER.MD")
+
+    def test_strips_angle_brackets_and_whitespace(self):
+        self.assertEqual(notoj.resolve_link_target(" <My note> "), "My note.md")
+
+    def test_rejects_urls_and_empty(self):
+        self.assertIsNone(notoj.resolve_link_target("https://example.com/x"))
+        self.assertIsNone(notoj.resolve_link_target("ftp://host/file"))
+        self.assertIsNone(notoj.resolve_link_target("  "))
+        self.assertIsNone(notoj.resolve_link_target("<>"))
+
+
+class TestExtractLinks(unittest.TestCase):
+    def test_wikilink(self):
+        self.assertEqual(notoj.extract_links("see [[Other note]] for more"),
+                         ["Other note.md"])
+
+    def test_markdown_link(self):
+        self.assertEqual(notoj.extract_links("see [that](Other note.md) too"),
+                         ["Other note.md"])
+
+    def test_image_and_url_links_ignored(self):
+        self.assertEqual(notoj.extract_links("[site](https://example.com)"), [])
+
+    def test_dedup_in_order(self):
+        text = "[[B]] then [[A]] then [x](B.md)"
+        self.assertEqual(notoj.extract_links(text), ["B.md", "A.md"])
+
+    def test_fenced_code_skipped(self):
+        text = "[[Real]]\n```\n[[fake]]\n```\n[[Also real]]"
+        self.assertEqual(notoj.extract_links(text), ["Real.md", "Also real.md"])
+
+    def test_multiple_on_one_line(self):
+        self.assertEqual(notoj.extract_links("[[A]] and [b](B)"), ["A.md", "B.md"])
+
+
+class TestLinkingLines(unittest.TestCase):
+    def test_finds_matching_lines_case_insensitive(self):
+        text = "intro\nsee [[my note]] here\nnothing\n[x](My Note.md) again\n"
+        self.assertEqual(notoj.linking_lines(text, "My note.md"),
+                         ["see [[my note]] here", "[x](My Note.md) again"])
+
+    def test_other_links_do_not_match(self):
+        self.assertEqual(notoj.linking_lines("see [[Other]]", "My note.md"), [])
+
+
+class TestFindBacklinks(unittest.TestCase):
+    def test_backlinks_by_filename_newest_first(self):
+        target = make_note("My note", path="/n/My note.md")
+        a = make_note("A", content="see [[My note]]", path="/n/A.md", modified=100)
+        b = make_note("B", content="[x](My note.md)", path="/n/B.md", modified=300)
+        c = make_note("C", content="no links", path="/n/C.md", modified=200)
+        out = notoj.find_backlinks([target, a, b, c], target)
+        self.assertEqual([n["path"] for n in out], ["/n/B.md", "/n/A.md"])
+
+    def test_self_link_excluded(self):
+        target = make_note("My note", content="[[My note]]", path="/n/My note.md")
+        self.assertEqual(notoj.find_backlinks([target], target), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

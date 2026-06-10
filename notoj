@@ -1037,6 +1037,89 @@ def reopen_loop(path, mod_ts=None):
 
 
 # ----------------------------
+# Note links / backlinks (b view)
+# ----------------------------
+
+# The same link forms the embedded vimscript's NotojFollow makes gf follow:
+# [[Note title]] wikilinks and [text](target) markdown links resolving to
+# $NOTOJ_NOTES_DIR/<name>.md. This is the Python half of that feature.
+WIKILINK_RE = re.compile(r'\[\[([^][]+)\]\]')
+MDLINK_RE = re.compile(r'\[[^][]*\]\(([^()]+)\)')
+
+
+def resolve_link_target(target):
+    """Normalize a link target the way NotojFollow does: trim whitespace,
+    strip surrounding <>, append .md when missing. Returns the note filename
+    it points at, or None for external (URL-ish) or empty targets."""
+    t = target.strip()
+    if t.startswith("<") and t.endswith(">"):
+        t = t[1:-1].strip()
+    if not t or "://" in t:
+        return None
+    if not t.lower().endswith(".md"):
+        t += ".md"
+    return t
+
+
+def line_link_targets(line):
+    """Note filenames linked from one line ([[wikilinks]] + markdown links)."""
+    out = []
+    for rx in (WIKILINK_RE, MDLINK_RE):
+        for m in rx.finditer(line):
+            t = resolve_link_target(m.group(1))
+            if t:
+                out.append(t)
+    return out
+
+
+def extract_links(text):
+    """Outgoing note links in a body, as .md filenames, deduped in order.
+    Fenced code blocks are skipped, like hashtag extraction."""
+    out = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        out.extend(line_link_targets(line))
+    return list(dict.fromkeys(out))
+
+
+def linking_lines(text, fname):
+    """Lines of `text` that link to the note file `fname` (case-insensitive,
+    so a hand-typed [[title]] doesn't miss on capitalization)."""
+    fl = fname.lower()
+    out = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if any(t.lower() == fl for t in line_link_targets(line)):
+            out.append(line)
+    return out
+
+
+def find_backlinks(notes, note):
+    """Notes whose body links to `note` (matched on its current filename),
+    newest first."""
+    fname = os.path.basename(note["path"]).lower()
+    out = []
+    for m in notes:
+        if m["path"] == note["path"]:
+            continue
+        if any(l.lower() == fname for l in extract_links(content(m))):
+            out.append(m)
+    return sort_notes(out, "modified", True)
+
+
+# ----------------------------
 # Tag filtering (t / T views)
 # ----------------------------
 
@@ -1642,6 +1725,58 @@ def tags_view(stdscr, notes, focus=None, ui=None):
         "count": lambda: len(vs["items"]),
         "header": lambda w: f"tags ({len(vs['items'])})  sort:{TAG_SORTS[vs['mode_i']]}",
         "footer": lambda: "j/k select  s sort  ⮐ filter notes by tag  ESC back  q quit",
+        "draw_row": draw_row,
+        "draw_preview": draw_preview,
+        "on_key": on_key,
+    })
+
+
+def backlinks_view(stdscr, notes, note):
+    """Notes linking to `note` (b): [[wikilinks]] and [text](target) links,
+    the ones Vim's gf follows. The preview shows the referencing lines with
+    the source title highlighted. Enter returns the chosen note's path (the
+    caller jumps there); ESC returns None (back); q returns MODAL_QUIT."""
+    links = find_backlinks(notes, note)
+    fname = os.path.basename(note["path"])
+    hi_token = title(note).lower()
+
+    def draw_row(scr, y, i, selected, list_w):
+        m = links[i]
+        attr = curses.color_pair(1)
+        if selected:
+            attr |= curses.A_REVERSE
+        scr.addnstr(y, 0, f"{title(m)}  ({ago(m.get('modificationDate'))})",
+                    list_w - 1, attr)
+
+    def draw_preview(scr, x0, pw, ph, cur):
+        if not links:
+            scr.addnstr(1, x0, "(no notes link to this one)", pw, curses.A_DIM)
+            return
+        hits = linking_lines(content(links[cur]), fname)
+        for i, line in enumerate(hits[:ph]):
+            try:
+                draw_line_highlighted(
+                    scr, i + 1, x0, line.expandtabs(4).strip()[:pw], pw,
+                    curses.color_pair(4),
+                    curses.color_pair(5) | curses.A_BOLD,
+                    [hi_token] if hi_token else [],
+                )
+            except curses.error:
+                pass   # wide glyph landing on the right edge
+
+    def on_key(k, st):
+        if k == 27:
+            return (None,)
+        if k == ord("q"):
+            return (MODAL_QUIT,)
+        if k in (10, 13) and links:
+            return (links[st["cur"]]["path"],)
+        return None
+
+    return modal_list(stdscr, {
+        "count": lambda: len(links),
+        "header": lambda w: f"backlinks: {title(note)} ({len(links)})",
+        "footer": lambda: "j/k select  ⮐ go to note  ESC back  q quit",
         "draw_row": draw_row,
         "draw_preview": draw_preview,
         "on_key": on_key,
@@ -2606,8 +2741,8 @@ def draw(stdscr, notes, state):
         segments = [
             (3, "n new"), (2, "/ search"), (7, "s/r sort"), (2, "⮐/e open"),
             (5, "#/. tag" if state.get("_last_tags") else "# tag"),
-            (6, "t/T tags"), (4, "d trash"), (10, "gt trash-view"),
-            (8, "u/^R undo"),
+            (6, "t/T tags"), (10, "b backlinks"), (4, "d trash"),
+            (10, "gt trash-view"), (8, "u/^R undo"),
             (9, "h/H hist" if hc >= 2 else ""),
             (2, "c conflicts" if conflicts else ""),
             (1, "q quit"),
@@ -3189,6 +3324,26 @@ def run(stdscr):
             state["p_scroll"] = 0
             if cur_path:
                 state["_restore_path"] = cur_path   # keep selection if it still matches
+
+        elif k == ord("b") and filtered and not state["trash_mode"]:
+            sel = backlinks_view(stdscr, notes, filtered[state["cur"]])
+            if sel is MODAL_QUIT:
+                if 0 <= state["cur"] < len(filtered):
+                    save_cursor(filtered[state["cur"]]["path"])
+                break
+            if sel:
+                # Jump to the chosen note in the plain notes list (it may not
+                # be visible in the current view/filter).
+                state["dup_mode"] = None
+                state["review_mode"] = False
+                state["trash_mode"] = False
+                state["tagf"] = None
+                state["q"] = ""
+                state["sort"] = "relevance"
+                state["cur"] = 0
+                state["off"] = 0
+                state["p_scroll"] = 0
+                state["_restore_path"] = sel
 
         elif k == ord("T") and not state["trash_mode"]:
             sel = tags_view(stdscr, notes, ui=state["_tags_ui"])
