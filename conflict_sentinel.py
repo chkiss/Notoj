@@ -120,7 +120,7 @@ def existing_signature(path):
 
 def write_report(body):
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    nid = str(uuid.uuid1())
+    nid = uuid.uuid4().hex
     created = now
     if os.path.exists(REPORT):  # preserve id/created if updating
         old = open(REPORT, encoding="utf-8").read()
