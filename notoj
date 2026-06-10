@@ -2368,22 +2368,52 @@ def draw(stdscr, notes, state):
                 except curses.error:
                     pass
 
-    conflict_hint = " | c conflicts" if conflicts else ""
+    # Footer hints as (priority, text) segments: lower number = survives
+    # longer as the terminal narrows. ⮐/e are one segment (e = open at end).
     hc = state.get("_hist_count", 0)
-    hist_hint = (" | h/H hist" if hc >= 2 else "")
     if state.get("trash_mode"):
-        footer = "gt exit trash | / search | ⮐ open | e edit | u restore | ESC clear/exit | q quit"
+        segments = [
+            (2, "gt exit trash"), (3, "/ search"),
+            (2, "⮐/e edit (saving restores)"), (2, "u restore"),
+            (4, "ESC clear/exit"), (1, "q quit"),
+        ]
     elif state.get("dup_mode") is not None:
-        footer = "gd exit duplicates | / search | ⮐ open | e edit | d trash | ESC clear/exit | q quit"
+        segments = [
+            (2, "gd exit dups"), (3, "/ search"), (2, "⮐/e open"),
+            (3, "d trash"), (4, "ESC clear/exit"), (1, "q quit"),
+        ]
     elif state.get("review_mode"):
-        footer = "ESC clear/exit | / search | ⮐ open | z snooze | S schedule | x done | d trash | u/^R undo/redo | q quit"
+        segments = [
+            (4, "ESC clear/exit"), (5, "/ search"), (3, "⮐/e open"),
+            (2, "z snooze"), (2, "S schedule"), (2, "x done"),
+            (3, "d trash"), (6, "u/^R undo"), (1, "q quit"),
+        ]
+    elif state.get("tagf") is not None:
+        many = len(state["tagf"]["tags"]) > 1
+        segments = [
+            (2, "⇥ cycle tag" if many else ""), (3, "/ search"),
+            (2, "⮐/e open"), (4, "t refilter"), (5, "# tag"),
+            (4, "d trash"), (3, "ESC clear/exit"), (1, "q quit"),
+        ]
     else:
-        retag_hint = " | . retag" if state.get("_last_tags") else ""
-        footer = (
-            f"s sort | r reverse order | / search | ⮐ open | e edit | n new | # tag{retag_hint} | d trash | u/^R undo/redo{hist_hint}{conflict_hint} | q quit"
-        )
+        segments = [
+            (3, "n new"), (2, "/ search"), (7, "s/r sort"), (2, "⮐/e open"),
+            (5, "#/. tag" if state.get("_last_tags") else "# tag"),
+            (6, "t/T tags"), (4, "d trash"), (10, "gt trash-view"),
+            (8, "u/^R undo"),
+            (9, "h/H hist" if hc >= 2 else ""),
+            (2, "c conflicts" if conflicts else ""),
+            (1, "q quit"),
+        ]
+    footer = fit_hints(segments, w - 1)
 
-    stdscr.addnstr(h - 1, 0, footer, w - 1)
+    # Footer as a full-width status bar: the tinted strip marks the bottom
+    # edge, so no content row above needs sacrificing to a separator.
+    try:
+        stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
+    except curses.error:
+        pass
+    stdscr.addnstr(h - 1, 0, footer, w - 1, footer_attr())
 
     if state["search_mode"] or state.get("tag_mode") or state.get("sched_mode"):
         if state.get("tag_mode"):

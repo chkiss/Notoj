@@ -2494,5 +2494,35 @@ class TestClampList(unittest.TestCase):
         self.assertEqual(st["off"], 0)
 
 
+# ---------------------------------------------------------------------------
+# fit_hints (footer bar)
+# ---------------------------------------------------------------------------
+
+class TestFitHints(unittest.TestCase):
+    SEGS = [(3, "s/r sort"), (2, "/ search"), (2, "⮐/e open"), (1, "q quit")]
+
+    def test_fits_all_when_wide(self):
+        self.assertEqual(notoj.fit_hints(self.SEGS, 200),
+                         "s/r sort  / search  ⮐/e open  q quit")
+
+    def test_drops_worst_priority_first(self):
+        out = notoj.fit_hints(self.SEGS, 30)
+        self.assertNotIn("sort", out)
+        self.assertIn("q quit", out)
+
+    def test_ties_drop_rightmost_first(self):
+        out = notoj.fit_hints(self.SEGS, 25)
+        # both priority-2 segments can't fit; ⮐/e open (rightmost) goes first
+        self.assertIn("/ search", out)
+        self.assertNotIn("open", out)
+
+    def test_always_keeps_last_segment(self):
+        self.assertEqual(notoj.fit_hints(self.SEGS, 3), "q quit")
+
+    def test_skips_empty_texts(self):
+        self.assertEqual(notoj.fit_hints([(1, "a b"), (2, ""), (1, "c d")], 80),
+                         "a b  c d")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
