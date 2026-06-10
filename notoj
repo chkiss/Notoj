@@ -1560,9 +1560,25 @@ def modal_list(stdscr, view):
     Returns the value from on_key's closing tuple."""
     st = {"cur": view.get("cur", 0), "off": 0, "page_h": 1}
     on_key = view["on_key"]
-    stdscr.timeout(-1)   # block for input here; the main loop resets on return
+    # Tick twice a second rather than blocking: a resize is only guaranteed
+    # to be noticed by the size poll below (SIGWINCH may surface as
+    # KEY_RESIZE, as ERR, or not wake a blocked getch at all, depending on
+    # the terminal). An idle tick redraws nothing, so it costs ~0.
+    stdscr.timeout(500)
 
     while True:
+        # Pick up resizes even when the SIGWINCH surfaced as ERR instead of
+        # KEY_RESIZE (tmux): poll the real size, like the main loop does —
+        # otherwise getmaxyx() stays stale and nothing reflows until cells
+        # happen to change. clear() forces a full repaint at the new size.
+        try:
+            ts = os.get_terminal_size()
+            if (ts.lines, ts.columns) != stdscr.getmaxyx():
+                curses.resizeterm(ts.lines, ts.columns)
+                stdscr.clear()
+        except (curses.error, OSError):
+            pass
+
         stdscr.erase()
         h, w = stdscr.getmaxyx()
 
