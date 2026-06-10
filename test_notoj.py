@@ -254,6 +254,14 @@ class TestParseFrontmatter(unittest.TestCase):
         result = self._parse('tags: ["a, b", c]\n')
         self.assertEqual(result["tags"], ["a, b", "c"])
 
+    def test_inline_flow_list_escaped_quote(self):
+        # A backslash-escaped quote inside a double-quoted item must not
+        # close the quote early and split the item at its comma.
+        result = notoj.parse_frontmatter(
+            'tags: [plain, "he said \\"hi\\", really", \'single\']')
+        self.assertEqual(result["tags"],
+                         ["plain", 'he said "hi", really', "single"])
+
     def test_inline_flow_list_empty(self):
         result = self._parse("tags: [ ]\n")
         self.assertEqual(result["tags"], [])
@@ -485,9 +493,9 @@ class TestAgo(unittest.TestCase):
         self.assertRegex(result, r"^\d+d$")
 
     def test_months(self):
-        # 100 days > 90-day threshold → months format
+        # 100 days > 90-day threshold → months format ("mo", distinct from minutes' "m")
         result = notoj.ago(self._ts(100 * 86400))
-        self.assertRegex(result, r"^\d+m$")
+        self.assertRegex(result, r"^\d+mo$")
 
     def test_years_exact(self):
         # 3 years = 36 months = 0 remainder → no trailing "m"
@@ -495,16 +503,21 @@ class TestAgo(unittest.TestCase):
         self.assertRegex(result, r"^\d+y$")
 
     def test_years_with_months(self):
-        # 2.5 years → 2y6m (30 months ÷ 12 = 2 rem 6)
+        # 2.5 years → 2y6mo (30 months ÷ 12 = 2 rem 6)
         result = notoj.ago(self._ts(int(2.5 * 365 * 86400)))
-        self.assertRegex(result, r"^\d+y\d+m$")
+        self.assertRegex(result, r"^\d+y\d+mo$")
 
     def test_boundary_90_days(self):
         # Just under 90 days → days; just over → months
         under = notoj.ago(self._ts(89 * 86400))
         over = notoj.ago(self._ts(91 * 86400))
         self.assertRegex(under, r"^\d+d$")
-        self.assertRegex(over, r"^\d+m$")
+        self.assertRegex(over, r"^\d+mo$")
+
+    def test_minutes_and_months_distinguishable(self):
+        # 4 minutes and 4 months must not both render as "4m".
+        self.assertEqual(notoj.ago(self._ts(4 * 60)), "4m")
+        self.assertEqual(notoj.ago(self._ts(4 * 30 * 86400 + 3600)), "4mo")
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +647,16 @@ class TestRankNotes(unittest.TestCase):
         result = notoj.rank_notes(self.notes, '"country club"')
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["title"], "dentist")
+
+    def test_quoted_phrase_sorted_by_modified(self):
+        # Phrase results must come back newest-first, not in input (load) order.
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="older", content="alpha beta", modified=now - 1000, path="/o.md"),
+            make_note(title="newer", content="alpha beta", modified=now - 10, path="/n.md"),
+        ]
+        result = notoj.rank_notes(notes, '"alpha beta"')
+        self.assertEqual([n["title"] for n in result], ["newer", "older"])
 
     def test_quoted_empty_phrase_no_match(self):
         # '""' has len==2 so the quoted-phrase branch (len>2) is NOT taken;
@@ -844,6 +867,23 @@ class TestExtractHashtags(unittest.TestCase):
     def test_fenced_code_block_skipped(self):
         text = "real #tag\n```\n#define FOO 1\n#include <x>\n```\n#after"
         self.assertEqual(notoj.extract_hashtags(text), ["tag", "after"])
+
+    def test_inline_code_span_skipped(self):
+        self.assertEqual(notoj.extract_hashtags("color is `#B5B5B5` here"), [])
+        self.assertEqual(
+            notoj.extract_hashtags("set `#LidSwitchIgnoreInhibited` in conf"), [])
+
+    def test_tag_outside_code_span_kept(self):
+        self.assertEqual(
+            notoj.extract_hashtags("`#sidebar-header` css fix #linux"), ["linux"])
+
+    def test_code_span_with_stray_hash_does_not_poison_line(self):
+        # A stray '#' inside backticks no longer marks the whole line as art.
+        self.assertEqual(
+            notoj.extract_hashtags("`# comment` about #bash"), ["bash"])
+
+    def test_unclosed_backtick_left_alone(self):
+        self.assertEqual(notoj.extract_hashtags("a stray ` and #tag"), ["tag"])
 
 
 # ---------------------------------------------------------------------------
@@ -1286,12 +1326,12 @@ class TestClampScroll(unittest.TestCase):
         self.assertEqual(state["cur"], 0)
 
     def test_offset_moves_down_when_cursor_below_page(self):
-        # height=10, page_h=7. cursor at 8, off=0 → off should move to 2
+        # height=10, page_h=8 (rows 1..h-2). cursor at 8, off=0 → off moves to 1
         state = self._state(cur=8, off=0)
         notes = self._notes(20)
         notoj.clamp_scroll(state, notes, 10)
         self.assertGreater(state["off"], 0)
-        self.assertLessEqual(state["cur"], state["off"] + (10 - 3) - 1)
+        self.assertLessEqual(state["cur"], state["off"] + (10 - 2) - 1)
 
     def test_offset_moves_up_when_cursor_above_window(self):
         state = self._state(cur=2, off=5)
@@ -1308,7 +1348,7 @@ class TestClampScroll(unittest.TestCase):
         state = self._state(cur=3, off=3)
         notes = self._notes(10)
         notoj.clamp_scroll(state, notes, 10)
-        page_h = 10 - 3
+        page_h = 10 - 2
         self.assertGreaterEqual(state["cur"], state["off"])
         self.assertLess(state["cur"], state["off"] + page_h)
 
@@ -1774,16 +1814,23 @@ class TestUndoRedoActions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._setdirs(d)
             try:
-                p = os.path.join(d, "note.md")
+                # An edit changed the title before→after, so on disk the
+                # post-edit file is after.md (check_rename renamed it).
+                p_before = os.path.join(d, "before.md")
+                p_after = os.path.join(d, "after.md")
                 A = "---\nid: a\n---\n\nbefore\n"
                 B = "---\nid: a\n---\n\nafter\n"
-                with open(p, "w", encoding="utf-8") as f:
+                with open(p_after, "w", encoding="utf-8") as f:
                     f.write(B)
-                act = {"kind": "edit", "path": p, "before": A, "after": B}
-                self.assertEqual(notoj.undo_action(act), p)
-                self.assertEqual(open(p, encoding="utf-8").read(), A)
-                self.assertEqual(notoj.redo_action(act), p)
-                self.assertEqual(open(p, encoding="utf-8").read(), B)
+                act = {"kind": "edit", "path": p_after, "before": A, "after": B}
+                # Undo restores the old content AND the matching filename.
+                self.assertEqual(notoj.undo_action(act), p_before)
+                self.assertEqual(open(p_before, encoding="utf-8").read(), A)
+                self.assertFalse(os.path.exists(p_after))
+                # Redo brings back both the new content and filename.
+                self.assertEqual(notoj.redo_action(act), p_after)
+                self.assertEqual(open(p_after, encoding="utf-8").read(), B)
+                self.assertFalse(os.path.exists(p_before))
             finally:
                 self._restore()
 
@@ -1906,6 +1953,310 @@ class TestVersionIncrement(unittest.TestCase):
                 self.assertNotIn("2000-01-01", text)  # modified did update
             finally:
                 notoj.NOTES_DIR = old
+
+
+# ---------------------------------------------------------------------------
+# ensure_id
+# ---------------------------------------------------------------------------
+
+class TestEnsureId(unittest.TestCase):
+    def _write(self, path, text):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_inserts_missing_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "n.md")
+            self._write(p, "---\ntitle: foo\ntags: []\n---\n\nfoo\n")
+            old_mtime = os.path.getmtime(p) - 5000
+            os.utime(p, (old_mtime, old_mtime))
+            notoj.ensure_id(p)
+            n = notoj.load_md(p)
+            self.assertTrue(n["id"])
+            # mtime preserved so the insertion doesn't read as an edit
+            self.assertAlmostEqual(os.path.getmtime(p), old_mtime, places=3)
+
+    def test_replaces_empty_id_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "n.md")
+            self._write(p, "---\nid:\ntitle: foo\ntags: []\n---\n\nfoo\n")
+            notoj.ensure_id(p)
+            text = open(p, encoding="utf-8").read()
+            self.assertEqual(text.count("\nid:"), 1)  # old empty id: line is gone
+            self.assertTrue(notoj.load_md(p)["id"])
+
+    def test_keeps_existing_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "n.md")
+            body = "---\nid: abc123\ntitle: foo\ntags: []\n---\n\nfoo\n"
+            self._write(p, body)
+            notoj.ensure_id(p)
+            self.assertEqual(open(p, encoding="utf-8").read(), body)
+
+
+# ---------------------------------------------------------------------------
+# rename_to_title
+# ---------------------------------------------------------------------------
+
+class TestRenameToTitle(unittest.TestCase):
+    def _write_note(self, d, fname, title_text):
+        p = os.path.join(d, fname)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(
+                "---\nid: abc\n"
+                f"title: {title_text}\n"
+                "created: 2013-10-08T13:08:43Z\n"
+                "modified: 2020-01-01T00:00:00Z\n"
+                "version: 1\ntags: []\n---\n\n"
+                f"{title_text}\n"
+            )
+        return p
+
+    def test_already_matching_name_untouched(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._write_note(d, "foo.md", "foo")
+            self.assertEqual(notoj.rename_to_title(p), p)
+
+    def test_renames_to_slug(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._write_note(d, "stale-name.md", "fresh title")
+            result = notoj.rename_to_title(p)
+            self.assertFalse(os.path.exists(p))
+            self.assertEqual(os.path.basename(result), "fresh title.md")
+
+    def test_collision_gets_numbered(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write_note(d, "foo.md", "other note")
+            p = self._write_note(d, "stale.md", "foo")
+            result = notoj.rename_to_title(p)
+            self.assertEqual(os.path.basename(result), "foo (2).md")
+
+    def test_numbered_variant_of_own_slug_stays_put(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write_note(d, "foo.md", "foo")
+            p = self._write_note(d, "foo (2).md", "foo")
+            self.assertEqual(notoj.rename_to_title(p), p)
+
+
+# ---------------------------------------------------------------------------
+# prune_review
+# ---------------------------------------------------------------------------
+
+class TestPruneReview(unittest.TestCase):
+    def setUp(self):
+        self.now = 1_000_000.0
+        loop = make_note(title="loop note", tags=["loop"], path="/l.md")
+        loop["id"] = "live"
+        plain = make_note(title="plain", tags=[], path="/p.md")
+        plain["id"] = "untagged"
+        self.notes = [loop, plain]
+
+    def test_keeps_future_snooze_on_live_loop(self):
+        review = {"live": {"due": self.now + 100}}
+        self.assertFalse(notoj.prune_review(review, self.notes, self.now))
+        self.assertIn("live", review)
+
+    def test_drops_expired_snooze(self):
+        review = {"live": {"due": self.now - 100}}
+        self.assertTrue(notoj.prune_review(review, self.notes, self.now))
+        self.assertEqual(review, {})
+
+    def test_drops_untagged_and_missing_notes(self):
+        review = {
+            "untagged": {"due": self.now + 100},
+            "gone": {"due": self.now + 100},
+        }
+        self.assertTrue(notoj.prune_review(review, self.notes, self.now))
+        self.assertEqual(review, {})
+
+    def test_drops_malformed_entries(self):
+        review = {"live": "not-a-dict"}
+        self.assertTrue(notoj.prune_review(review, self.notes, self.now))
+        self.assertEqual(review, {})
+
+
+# ---------------------------------------------------------------------------
+# normalize_external_note: modified comes from the file mtime, mtime preserved
+# ---------------------------------------------------------------------------
+
+class TestNormalizeUsesEditTime(unittest.TestCase):
+    def test_modified_set_to_file_mtime_not_now(self):
+        with tempfile.TemporaryDirectory() as d:
+            old_notes = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                p = os.path.join(d, "my-note.md")
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(
+                        "---\nid: abc\ntitle: my note\n"
+                        "created: 2013-10-08T13:08:43Z\n"
+                        "modified: 2000-01-01T00:00:00Z\n"
+                        "version: 1\ntags: []\n---\n\nmy note\n"
+                    )
+                # Pretend the external edit happened a day ago.
+                edit_ts = datetime.now().timestamp() - 86400
+                os.utime(p, (edit_ts, edit_ts))
+                edit_iso = datetime.fromtimestamp(edit_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                notoj.normalize_external_note(p)
+                text = open(p, encoding="utf-8").read()
+                self.assertIn(f"modified: {edit_iso}", text)
+                # And the mtime is restored, so mtime == modified stays stable.
+                self.assertAlmostEqual(os.path.getmtime(p), edit_ts, places=3)
+            finally:
+                notoj.NOTES_DIR = old_notes
+
+    def test_second_pass_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as d:
+            old_notes = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                p = os.path.join(d, "my-note.md")
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(
+                        "---\nid: abc\ntitle: my note\n"
+                        "created: 2013-10-08T13:08:43Z\n"
+                        "modified: 2000-01-01T00:00:00Z\n"
+                        "version: 1\ntags: []\n---\n\nmy note\n"
+                    )
+                edit_ts = datetime.now().timestamp() - 86400
+                os.utime(p, (edit_ts, edit_ts))
+                notoj.normalize_external_note(p)
+                first = open(p, encoding="utf-8").read()
+                first_mtime = os.path.getmtime(p)
+                notoj.normalize_external_note(p)
+                self.assertEqual(open(p, encoding="utf-8").read(), first)
+                self.assertAlmostEqual(os.path.getmtime(p), first_mtime, places=3)
+            finally:
+                notoj.NOTES_DIR = old_notes
+
+
+# ---------------------------------------------------------------------------
+# ensure_frontmatter preserves the file mtime
+# ---------------------------------------------------------------------------
+
+class TestEnsureFrontmatterMtime(unittest.TestCase):
+    def test_adoption_preserves_mtime(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "plain.md")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("just some text\n")
+            old_ts = datetime.now().timestamp() - 50000
+            os.utime(p, (old_ts, old_ts))
+            notoj.ensure_frontmatter(p)
+            n = notoj.load_md(p)
+            self.assertIsNotNone(n)
+            self.assertAlmostEqual(os.path.getmtime(p), old_ts, places=3)
+            # created/modified reflect the original mtime, not adoption time
+            self.assertAlmostEqual(n["modificationDate"], old_ts, delta=1.0)
+
+
+# ---------------------------------------------------------------------------
+# schedule_inline_loop ("#loop <when>" typed in a note body)
+# ---------------------------------------------------------------------------
+
+class TestScheduleInlineLoop(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self._old_review = notoj.REVIEW_FILE
+        notoj.REVIEW_FILE = os.path.join(self.dir, ".notoj_review.json")
+
+    def tearDown(self):
+        notoj.REVIEW_FILE = self._old_review
+        self._tmp.cleanup()
+
+    def _note(self, body, note_id="abc"):
+        p = os.path.join(self.dir, "n.md")
+        id_line = f"id: {note_id}\n" if note_id else ""
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(f"---\n{id_line}title: t\ntags: []\n---\n\n{body}")
+        return p
+
+    def _body(self, p):
+        text = open(p, encoding="utf-8").read()
+        return text[text.find("\n---\n", 4) + 5:]
+
+    def test_relative_horizon_pinned_to_date(self):
+        p = self._note("call the bank #loop 3d soon\n")
+        expected = datetime.fromtimestamp(
+            notoj.parse_when("3d")).strftime("%Y-%m-%d")
+        self.assertTrue(notoj.schedule_inline_loop(p))
+        self.assertIn(f"#loop {expected} soon", self._body(p))
+        review = notoj.load_review()
+        self.assertEqual(review["abc"]["src"], expected)
+        self.assertEqual(review["abc"]["due"], notoj.parse_when(expected))
+
+    def test_absolute_date_applied_once_so_snooze_survives(self):
+        p = self._note("renew passport #loop 2030-01-15\n")
+        self.assertFalse(notoj.schedule_inline_loop(p))  # no body rewrite
+        review = notoj.load_review()
+        self.assertEqual(review["abc"]["src"], "2030-01-15")
+        # Snooze in-app (different due), then an ordinary re-save runs the
+        # scheduler again: the snooze must NOT be clobbered (src unchanged).
+        snoozed = notoj.parse_when("2030-01-15") + 7 * 86400
+        review["abc"]["due"] = snoozed
+        notoj.save_review(review)
+        notoj.schedule_inline_loop(p)
+        self.assertEqual(notoj.load_review()["abc"]["due"], snoozed)
+
+    def test_hand_edited_date_reschedules(self):
+        p = self._note("renew passport #loop 2030-01-15\n")
+        notoj.schedule_inline_loop(p)
+        p2 = self._note("renew passport #loop 2030-06-01\n")
+        notoj.schedule_inline_loop(p2)
+        review = notoj.load_review()
+        self.assertEqual(review["abc"]["src"], "2030-06-01")
+        self.assertEqual(review["abc"]["due"], notoj.parse_when("2030-06-01"))
+
+    def test_trailing_punctuation_tolerated(self):
+        p = self._note("ping Sam #loop 2w.\n")
+        expected = datetime.fromtimestamp(
+            notoj.parse_when("2w")).strftime("%Y-%m-%d")
+        self.assertTrue(notoj.schedule_inline_loop(p))
+        self.assertIn(f"#loop {expected}.", self._body(p))
+
+    def test_unparseable_token_ignored(self):
+        p = self._note("#loop cleanup ideas\n")
+        self.assertFalse(notoj.schedule_inline_loop(p))
+        self.assertEqual(notoj.load_review(), {})
+        self.assertIn("#loop cleanup ideas", self._body(p))
+
+    def test_bare_loop_tag_ignored(self):
+        p = self._note("just an open loop #loop\n")
+        self.assertFalse(notoj.schedule_inline_loop(p))
+        self.assertEqual(notoj.load_review(), {})
+
+    def test_fenced_code_ignored(self):
+        p = self._note("```\n#loop 3d\n```\n")
+        self.assertFalse(notoj.schedule_inline_loop(p))
+        self.assertEqual(notoj.load_review(), {})
+
+    def test_other_tag_prefix_not_matched(self):
+        p = self._note("#loops 3d is not a horizon\n")
+        self.assertFalse(notoj.schedule_inline_loop(p))
+        self.assertEqual(notoj.load_review(), {})
+
+    def test_first_valid_horizon_wins(self):
+        p = self._note("#loop 3d\nlater also #loop 9d\n")
+        notoj.schedule_inline_loop(p)
+        expected = datetime.fromtimestamp(
+            notoj.parse_when("3d")).strftime("%Y-%m-%d")
+        self.assertEqual(notoj.load_review()["abc"]["src"], expected)
+        self.assertIn("#loop 9d", self._body(p))  # second left as text
+
+    def test_note_without_id_ignored(self):
+        p = self._note("#loop 3d\n", note_id=None)
+        self.assertFalse(notoj.schedule_inline_loop(p))
+        self.assertEqual(notoj.load_review(), {})
+
+    def test_remove_tag_strips_pinned_date(self):
+        p = self._note("call the bank #loop 2026-06-12 soon\n")
+        self.assertTrue(notoj.remove_tag(p, "loop"))
+        body = self._body(p)
+        self.assertNotIn("#loop", body)
+        self.assertNotIn("2026-06-12", body)
+        self.assertIn("call the bank", body)
+        self.assertIn("soon", body)
 
 
 if __name__ == "__main__":

@@ -129,10 +129,10 @@ def ago(ts):
 
     months = days // 30
     if months < 24:
-        return f"{months}m"
+        return f"{months}mo"
 
     years, rem_months = divmod(months, 12)
-    return f"{years}y{rem_months}m" if rem_months else f"{years}y"
+    return f"{years}y{rem_months}mo" if rem_months else f"{years}y"
 
 
 # ----------------------------
@@ -169,14 +169,20 @@ def iso_to_ts(s):
 def _parse_flow_list(inner):
     """Parse the inside of a YAML flow sequence (e.g. 'a, b, "c, d"') into a
     list of strings, respecting quotes so commas inside a quoted item don't
-    split it. Blank items (e.g. a trailing comma) are dropped."""
+    split it. Inside double quotes a backslash escapes the next character, so
+    '"a \\"b\\" c"' stays one item. Blank items (a trailing comma) are dropped."""
     items = []
     buf = ""
     quote = None
+    escaped = False
     for ch in inner:
         if quote:
             buf += ch
-            if ch == quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\" and quote == '"':
+                escaped = True
+            elif ch == quote:
                 quote = None
         elif ch in ('"', "'"):
             quote = ch
@@ -320,7 +326,46 @@ def ensure_frontmatter(path):
         f"---\n"
     )
     try:
+        st = os.stat(path)
         atomic_write(path, frontmatter + "\n" + text)
+        # Keep the original mtime: created/modified above are derived from it,
+        # and mtime == modified means adoption never reads as a fresh edit.
+        os.utime(path, (st.st_atime, st.st_mtime))
+    except Exception:
+        pass
+
+
+def ensure_id(path):
+    """Guarantee a non-empty id: in the frontmatter (insert one if missing).
+
+    Per-note state is keyed by id — loop snoozes in the review file — so notes
+    with an empty id would silently share state. Preserves the file mtime so
+    the insertion doesn't read as an edit."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return
+
+    if not text.startswith("---\n"):
+        return
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        return
+
+    meta = parse_frontmatter(text[4:fm_end])
+    if meta.get("id"):
+        return
+
+    fm_lines = [
+        line for line in text[4:fm_end].splitlines()
+        if not (line.startswith("id:") and not line.split(":", 1)[1].strip())
+    ]
+    fm_lines.insert(0, f"id: {uuid.uuid4().hex}")
+    try:
+        st = os.stat(path)
+        atomic_write(path, "---\n" + "\n".join(fm_lines) + text[fm_end:])
+        os.utime(path, (st.st_atime, st.st_mtime))
     except Exception:
         pass
 
@@ -334,6 +379,9 @@ def load():
         n = load_md(f)
         if n is None:
             ensure_frontmatter(f)
+            n = load_md(f)
+        if n and not n.get("id"):
+            ensure_id(f)
             n = load_md(f)
         if n:
             notes.append(n)
@@ -464,6 +512,12 @@ def normalize_external_note(path):
     if fm_end == -1:
         return
 
+    def restore_mtime(p):
+        try:
+            os.utime(p, (mtime, mtime))
+        except OSError:
+            pass
+
     meta = parse_frontmatter(text[4:fm_end])
     body = text[fm_end + 5:]
     if body.startswith("\n"):
@@ -472,9 +526,8 @@ def normalize_external_note(path):
     new_title = derive_title(body)
 
     file_mtime_iso = datetime.fromtimestamp(
-        os.path.getmtime(path), tz=timezone.utc
+        mtime, tz=timezone.utc
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     old_title = meta.get("title") or ""
     old_modified = meta.get("modified") or ""
@@ -484,6 +537,8 @@ def normalize_external_note(path):
 
     if not title_changed and not modified_changed:
         sync_hashtags(path)
+        schedule_inline_loop(path)
+        restore_mtime(path)
         return path
 
     new_yaml_lines = []
@@ -493,7 +548,7 @@ def normalize_external_note(path):
             new_yaml_lines.append(f"title: {yaml_scalar(new_title)}")
             title_written = True
         elif line.startswith("modified:"):
-            new_yaml_lines.append(f"modified: {now_iso}")
+            new_yaml_lines.append(f"modified: {file_mtime_iso}")
         # NB: version is deliberately left untouched here — the editing device
         # already incremented it (see check_rename); preserving it on adoption
         # keeps the edit count from being double-bumped on sync.
@@ -520,6 +575,8 @@ def normalize_external_note(path):
             final_path = new_path
 
     sync_hashtags(final_path)
+    schedule_inline_loop(final_path)
+    restore_mtime(final_path)
     return final_path
 
 
@@ -536,6 +593,7 @@ def incremental_update(notes, snap_old, snap_new):
     result = [n for n in notes if n["path"] not in deleted and n["path"] not in added_or_modified]
     for path in added_or_modified:
         ensure_frontmatter(path)
+        ensure_id(path)
         final_path = normalize_external_note(path) or path
         n = load_md(final_path)
         if n:
@@ -553,7 +611,11 @@ def rank_notes(notes, q):
         phrase = q[1:-1].lower()
         if not phrase:
             return notes
-        return [n for n in notes if phrase in title(n).lower() or phrase in content(n).lower()]
+        matches = [n for n in notes if phrase in title(n).lower() or phrase in content(n).lower()]
+        # Input order is load order (arbitrary after incremental updates), so
+        # give phrase results a deterministic newest-first order like tokens get.
+        matches.sort(key=lambda n: -(n.get("modificationDate") or 0))
+        return matches
 
     tokens = q.lower().split()
     q_lower = q.lower()
@@ -808,7 +870,13 @@ def remove_tag(path, tag):
         existing = [existing] if existing else []
 
     body = text[fm_end + 5:]
-    body_stripped = re.sub(r'(?<![/\w])#' + re.escape(tag) + r'(?![\w-])', '', body)
+    pat = r'(?<![/\w])#' + re.escape(tag) + r'(?![\w-])'
+    if tag == LOOP_TAG:
+        # Also take a scheduled date pinned after the inline tag ("#loop
+        # 2026-06-12", see schedule_inline_loop), so closing the loop doesn't
+        # strand an orphaned date in the prose.
+        pat += r'([ \t]+\d{4}-\d{2}-\d{2}(?![\w-]))?'
+    body_stripped = re.sub(pat, '', body)
 
     new_tags = [t for t in existing if t != tag]
     if new_tags == existing and body_stripped == body:
@@ -876,7 +944,7 @@ def find_duplicates(notes):
 # ----------------------------
 
 def load_review():
-    """Snooze state for open loops, keyed by note id: {id: {"due": ts, "idx": n}}.
+    """Snooze state for open loops, keyed by note id: {id: {"due": ts}}.
     Stored outside the notes (invisible persistence), gitignored."""
     try:
         with open(REVIEW_FILE, "r", encoding="utf-8") as f:
@@ -891,6 +959,22 @@ def save_review(review):
         atomic_write(REVIEW_FILE, json.dumps(review, indent=0, sort_keys=True))
     except Exception:
         pass
+
+
+def prune_review(review, notes, now=None):
+    """Drop review entries that can no longer matter: the note is gone or no
+    longer tagged #loop, or the snooze already expired (an expired entry and a
+    missing one behave identically in find_loops). Keeps the review file from
+    growing without bound. Mutates review; returns True if anything was
+    removed."""
+    if now is None:
+        now = datetime.now().timestamp()
+    live = {n.get("id") for n in notes if LOOP_TAG in (n.get("tags") or [])}
+    stale = [k for k, v in review.items()
+             if k not in live or not isinstance(v, dict) or v.get("due", 0) <= now]
+    for k in stale:
+        del review[k]
+    return bool(stale)
 
 
 def find_loops(notes, review, now=None):
@@ -948,7 +1032,7 @@ def parse_when(s, now=None):
         unit = (m.group(2) or "d")[0:2]
         if unit.startswith("w"):
             days = n * 7
-        elif unit == "mo" or unit.startswith("mon"):
+        elif unit == "mo":   # all month spellings slice to "mo"
             days = n * 30
         elif unit.startswith("y"):
             days = n * 365
@@ -968,6 +1052,81 @@ def parse_when(s, now=None):
 def schedule_loop(review, note_id, due_ts):
     """Set an explicit resurface date for a loop (mutates the review dict)."""
     review[note_id] = {"due": due_ts}
+
+
+# "#loop <when>" anywhere in a note body schedules it inline (see
+# schedule_inline_loop). The lookahead keeps "#loops" etc. from matching.
+LOOP_SPEC_RE = re.compile(r'(?<![/\w])#' + LOOP_TAG + r'(?![\w-])[ \t]+(\S+)')
+
+
+def schedule_inline_loop(path):
+    """Apply an inline "#loop <when>" horizon typed anywhere in a note (e.g.
+    "#loop 3d", "#loop 2w", "#loop 2026-12-01"): set the loop's due date in
+    the review file, and rewrite a relative horizon to the absolute date it
+    resolved to ("#loop 3d" -> "#loop 2026-06-12") so later saves can't
+    re-anchor it. An absolute date is re-applied only when it differs from
+    the last one applied (the review entry's "src"), so in-app snoozes (z/S)
+    survive ordinary re-saves; hand-editing the date reschedules. Fenced code
+    and ASCII-art lines are skipped, like hashtag extraction; the first valid
+    horizon wins. Returns True if the note body was rewritten."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return False
+
+    if not text.startswith("---\n"):
+        return False
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        return False
+
+    note_id = parse_frontmatter(text[4:fm_end]).get("id")
+    if not note_id or not isinstance(note_id, str):
+        return False
+
+    head = text[:fm_end + 5]
+    body_lines = text[fm_end + 5:].split("\n")
+
+    in_fence = False
+    for i, line in enumerate(body_lines):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence or STRAY_HASH_RE.search(line):
+            continue
+        m = LOOP_SPEC_RE.search(line)
+        if not m:
+            continue
+        token = m.group(1).rstrip(".,;:!?)")   # tolerate trailing prose punctuation
+        if not token or parse_when(token) is None:
+            continue
+
+        review = load_review()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
+            # Absolute date: apply only when it changed (src guard).
+            if (review.get(note_id) or {}).get("src") != token:
+                review[note_id] = {"due": parse_when(token), "src": token}
+                save_review(review)
+            return False
+
+        # Relative horizon: resolve to a calendar date once and pin that date
+        # in the body. Due is canonicalized through the written date so a
+        # reconstructed review file lands on the same timestamp.
+        date_str = datetime.fromtimestamp(parse_when(token)).strftime("%Y-%m-%d")
+        review[note_id] = {"due": parse_when(date_str), "src": date_str}
+        save_review(review)
+
+        start = m.start(1)
+        body_lines[i] = line[:start] + date_str + line[start + len(token):]
+        try:
+            atomic_write(path, head + "\n".join(body_lines))
+        except Exception:
+            return False
+        return True
+
+    return False
 
 
 # ----------------------------
@@ -1102,11 +1261,28 @@ def hist_view(stdscr, n):
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        page_h = h - 3
+
+        # Same narrow-window bail as draw(): below this the pane widths go
+        # nonsensical (diff_w can reach <= 0) and addnstr would error out.
+        if h < 5 or w < MIN_W_ERROR:
+            try:
+                stdscr.addnstr(0, 0, "window too narrow", max(1, w - 1))
+            except curses.error:
+                pass
+            stdscr.refresh()
+            if stdscr.getch() in [ord("q"), 27]:
+                break
+            continue
+
+        page_h = h - 2   # rows 1..h-2 hold content; the footer bar sits at h-1
         list_w = min(38, w // 3)
         diff_w = w - list_w - 2
 
-        stdscr.addnstr(0, 0, f"history: {title(n)}", w - 1, curses.A_BOLD)
+        try:
+            stdscr.hline(0, 0, ord(" ") | curses.A_UNDERLINE, w)
+        except curses.error:
+            pass
+        stdscr.addnstr(0, 0, f"history: {title(n)}", w - 1, curses.A_BOLD | curses.A_UNDERLINE)
 
         for i, c in enumerate(commits[state["off"]:state["off"] + page_h]):
             ci = i + state["off"]
@@ -1186,6 +1362,15 @@ def find_conflicts():
 
 
 def resolve_conflict(original, conflict):
+    # Snapshot the conflict copy into git history first: the copy is deleted
+    # below regardless of what was (or wasn't) merged in vimdiff, and conflict
+    # files never enter the regular snapshot commits, so without this an
+    # accidental :qa would lose that version forever. -f because copies under
+    # .trash/ are gitignored.
+    rel = os.path.relpath(conflict, NOTES_DIR)
+    subprocess.run(["git", "add", "-f", "--", rel], cwd=NOTES_DIR, capture_output=True)
+    subprocess.run(["git", "commit", "-m", f"conflict copy: {_stem(conflict)}"],
+                   cwd=NOTES_DIR, capture_output=True)
     suspend_curses()
     if os.path.exists(original):
         subprocess.call(["vimdiff", original, conflict])
@@ -1278,6 +1463,7 @@ def check_rename(n):
         os.rename(path, new_path)
 
     sync_hashtags(new_path)
+    schedule_inline_loop(new_path)
     return new_path
 
 
@@ -1455,6 +1641,34 @@ def open_note(n, end=False):
     return None
 
 
+def edit_trash_note(n, end=False):
+    """Open a trashed note in Vim. Any saved change restores the note from the
+    trash into the notes dir (then the usual title-rename pipeline runs);
+    quitting Vim without writing leaves it in the trash. Returns the restored
+    path, or None when the note stayed trashed."""
+    path = n["path"]
+    if not os.path.exists(path):
+        return None
+    mtime_before = os.path.getmtime(path)
+    src = vim_source_args()
+    cmd = ["vim"] + src
+    if end:
+        cmd += ["-c", "normal G"]
+    elif src:
+        cmd += ["-c", "call NotojOpenAtTitle()"]
+    cmd.append(path)
+    suspend_curses()
+    subprocess.call(cmd)
+    if not os.path.exists(path) or os.path.getmtime(path) == mtime_before:
+        return None
+    restored = do_restore(path, os.path.join(NOTES_DIR, os.path.basename(path)))
+    if not restored:
+        return None
+    final = check_rename({"path": restored}) or restored
+    git_commit(f"edit: {title(n)}")
+    return final
+
+
 
 def _stem(path):
     return os.path.splitext(os.path.basename(path))[0]
@@ -1496,6 +1710,29 @@ def do_restore(trash_path, orig_path):
 
 def trash_note(n):
     return do_trash(n["path"])
+
+
+def rename_to_title(path):
+    """Rename a note file so its name matches its title's slug. Undo/redo of
+    an edit rewrites the content from history, which can leave the filename
+    carrying the other version's title; this re-syncs them. Returns the
+    resulting path (the input path when the name already agrees)."""
+    n = load_md(path)
+    if not n:
+        return path
+    stem = slugify(title(n))
+    d = os.path.dirname(path) or "."
+    candidate = os.path.join(d, stem + ".md")
+    i = 2
+    while True:
+        if os.path.abspath(candidate) == os.path.abspath(path):
+            return path
+        if not os.path.exists(candidate):
+            break
+        candidate = os.path.join(d, f"{stem} ({i}).md")
+        i += 1
+    os.rename(path, candidate)
+    return candidate
 
 
 def undo_action(act):
@@ -1642,6 +1879,7 @@ def finalize_new_note(tmp_path):
         f.write(new_text)
     os.rename(tmp_path, dest)
     sync_hashtags(dest)
+    schedule_inline_loop(dest)
     git_commit(f"add: {first_line}")
     return dest
 
@@ -1711,9 +1949,46 @@ SHOW_AGO_MIN  = 53   # min list_w to start showing the relative date     (col 47
 TAG_PROMPT = "add tags (space-separated): "
 SCHED_PROMPT = "resurface when (e.g. 2w, 3mo, 1y, 2026-12-01, someday): "
 
+TRASH_EDIT_NOTICE = [
+    "This note is in the trash.",
+    "",
+    "Editing it restores it: saving any change in Vim moves the note",
+    "out of the trash and back into your notes.",
+    "Quitting Vim without saving (:q!) leaves it in the trash.",
+    "",
+    "Enter/y  edit (restore on save)      ESC/n  stay in the trash list",
+]
+
+
+def confirm_screen(stdscr, lines):
+    """Full-screen interstitial. Returns True to proceed (Enter / y), False to
+    cancel (ESC / n / q)."""
+    stdscr.timeout(-1)   # block for the answer; the main loop resets this
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    for i, line in enumerate(lines):
+        if i + 1 >= h - 1:
+            break
+        try:
+            stdscr.addnstr(i + 1, 2, line, max(1, w - 3),
+                           curses.A_BOLD if i == 0 else curses.A_NORMAL)
+        except curses.error:
+            pass
+    stdscr.refresh()
+    while True:
+        k = stdscr.getch()
+        if k in (10, 13, ord("y"), ord("Y")):
+            return True
+        if k in (27, ord("n"), ord("N"), ord("q")):
+            return False
+
+
+
+_footer_band = False   # set in init_colors when the terminal can tint the bar
 
 
 def init_colors():
+    global _footer_band
     curses.start_color()
     curses.use_default_colors()
 
@@ -1724,6 +1999,36 @@ def init_colors():
     curses.init_pair(4, curses.COLOR_CYAN, -1)    # preview
     curses.init_pair(5, curses.COLOR_GREEN, -1)   # search match
 
+    # Footer status bar: default fg over a gray band, distinct enough to read
+    # as the screen's bottom edge so every row above it can hold content.
+    if curses.COLORS >= 256:
+        curses.init_pair(10, -1, 239)
+        _footer_band = True
+
+
+def footer_attr():
+    """Attr for the footer bar (row h-1): gray band, or reverse video — the
+    classic status-line look — without 256 colors."""
+    if _footer_band:
+        return curses.color_pair(10)
+    return curses.A_REVERSE
+
+
+def fit_hints(segments, width):
+    """Build the footer from (priority, text) hint segments, joined by two
+    spaces. When it doesn't fit, drop whole segments — highest priority
+    number first, rightmost first within a tie — instead of letting the
+    right edge truncate mid-hint. Empty texts are skipped."""
+    segs = [(pri, txt) for pri, txt in segments if txt]
+    while True:
+        s = "  ".join(t for _, t in segs)
+        if len(s) <= width or len(segs) <= 1:
+            return s
+        worst = max(p for p, _ in segs)
+        for i in range(len(segs) - 1, -1, -1):
+            if segs[i][0] == worst:
+                del segs[i]
+                break
 
 
 def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens):
@@ -1907,10 +2212,10 @@ def draw(stdscr, notes, state):
             lines = content(cur).split("\n")
 
             start = state["p_scroll"]
-            end = start + h - 3
+            end = start + h - 2
 
             for i, line in enumerate(lines[start:end]):
-                if i >= h - 3:
+                if i >= h - 2:
                     break
 
                 safe = line.expandtabs(4).replace("\n", "")[:preview_w]
@@ -1992,7 +2297,10 @@ def run(stdscr):
         "dup_mode": None,
         "_dups": [],
         "trash_mode": False,
+        "_trash": None,         # cached trash listing; None = reload on next draw
         "review_mode": False,
+        "tagf": None,           # tag-filter view: {"tags": [...], "idx": -1|i}
+        "_tags_ui": {"mode_i": 0},   # tags view sort mode, kept across visits
         "sched_mode": False,
         "sched_input": "",
         "_review": load_review(),
@@ -2008,6 +2316,8 @@ def run(stdscr):
 
     notes = load()
     snap = file_snapshot(NOTES_DIR)
+    if prune_review(state["_review"], notes):
+        save_review(state["_review"])
     state["_dups"] = find_duplicates(notes)
     state["_loops_due"] = len(find_loops(notes, state["_review"]))
     state["_conflicts"] = find_conflicts()
@@ -2019,9 +2329,16 @@ def run(stdscr):
     def refresh_notes():
         nonlocal notes, snap
         new_snap = file_snapshot(NOTES_DIR)
-        notes, _ = incremental_update(notes, snap, new_snap)
-        snap = new_snap
+        notes, changed = incremental_update(notes, snap, new_snap)
+        # incremental_update may rename files (title normalization), so after
+        # a change re-snapshot — like the idle scan does — rather than keeping
+        # pre-rename paths that would be reprocessed on the next tick.
+        snap = file_snapshot(NOTES_DIR) if changed else new_snap
+        state["_trash"] = None
         state["_dups"] = find_duplicates(notes)
+        # Inline "#loop <when>" scheduling writes the review file from inside
+        # the update pipeline, so reload it rather than trust the in-memory copy.
+        state["_review"] = load_review()
         state["_loops_due"] = len(find_loops(notes, state["_review"]))
         state["_conflicts"] = find_conflicts()
         state["_hist_cache"].clear()   # commit counts may have changed
@@ -2034,6 +2351,22 @@ def run(stdscr):
         if act:
             state["_undo"].append(act)
             state["_redo"] = []
+
+    def open_selected(note, end=False):
+        """Open `note` in Vim. Trashed notes first get an interstitial saying
+        that saving any change restores them from the trash."""
+        if state["trash_mode"]:
+            if confirm_screen(stdscr, TRASH_EDIT_NOTICE):
+                restored = edit_trash_note(note, end=end)
+                refresh_notes()
+                state["_hist_path"] = None
+                if restored:
+                    state["_restore_path"] = restored
+        else:
+            record(open_note(note, end=end))
+            refresh_notes()
+            state["_hist_path"] = None
+            state["_restore_path"] = note["path"]
 
     last_scan = time.monotonic()   # throttles the external-change / conflict scan
     SCAN_EVERY = 2.0
@@ -2057,11 +2390,16 @@ def run(stdscr):
         # `natural` is how that order is labelled in the header.
         q = state["q"]
         if state["trash_mode"]:
-            base, keep, natural = load_trash(), False, "modified 🞃"
+            if state["_trash"] is None:
+                state["_trash"] = load_trash()
+            base, keep, natural = state["_trash"], False, "modified 🞃"
         elif state["dup_mode"] is not None:
             base, keep, natural = state["dup_mode"], True, "grouped"
         elif state["review_mode"]:
             base, keep, natural = find_loops(notes, state["_review"]), True, "most stale first"
+        elif state["tagf"] is not None:
+            base = filter_by_tags(notes, tagf_active(state["tagf"]))
+            keep, natural = False, "modified 🞃"
         else:
             base, keep, natural = notes, False, "modified 🞃"
 
@@ -2125,18 +2463,24 @@ def run(stdscr):
             # (the adaptive timeout can fire this branch as often as 120ms).
             if time.monotonic() - last_scan >= SCAN_EVERY:
                 last_scan = time.monotonic()
+                state["_trash"] = None   # pick up external trash changes too
                 new_snap = file_snapshot(NOTES_DIR)
                 notes, changed = incremental_update(notes, snap, new_snap)
                 state["_conflicts"] = find_conflicts()
                 if changed:
                     snap = file_snapshot(NOTES_DIR)
                     state["_dups"] = find_duplicates(notes)
+                    state["_review"] = load_review()   # inline scheduling may have written it
                     state["_hist_cache"].clear()
                     if state["dup_mode"] is not None:
                         state["dup_mode"] = state["_dups"]
                     cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
                     state["_restore_path"] = cur_path
                     git_commit("sync: external changes")
+                # Recompute the due-loop badge on every idle tick, not just on
+                # file changes: in a long tmux session a loop can come due
+                # purely by time passing.
+                state["_loops_due"] = len(find_loops(notes, state["_review"]))
 
         # ----------------------------
         # Tag prompt mode (intercepts all keys while active)
@@ -2208,24 +2552,16 @@ def run(stdscr):
         # ----------------------------
 
         elif k in [10, 13] and filtered and not state["search_mode"]:
-            note = filtered[state["cur"]]
-            record(open_note(note))
-            refresh_notes()
-            state["_hist_path"] = None
-            state["_restore_path"] = note["path"]
+            open_selected(filtered[state["cur"]])
 
         elif k == ord("e") and filtered and not state["search_mode"]:
-            note = filtered[state["cur"]]
-            record(open_note(note, end=True))
-            refresh_notes()
-            state["_hist_path"] = None
-            state["_restore_path"] = note["path"]
+            open_selected(filtered[state["cur"]], end=True)
 
         # ----------------------------
         # Incremental search mode
         # ----------------------------
 
-        elif k == 27 and not state["search_mode"] and (state["q"] or state["dup_mode"] is not None or state["trash_mode"] or state["review_mode"]):
+        elif k == 27 and not state["search_mode"] and (state["q"] or state["dup_mode"] is not None or state["trash_mode"] or state["review_mode"] or state["tagf"] is not None):
             cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
             if state["q"]:
                 # First ESC: clear the search filter, stay in the current view
@@ -2256,23 +2592,21 @@ def run(stdscr):
             elif k in [10, 13]:
                 state["search_mode"] = False
                 if filtered:
-                    note = filtered[state["cur"]]
-                    record(open_note(note))
-                    refresh_notes()
-                    state["_hist_path"] = None
-                    state["_restore_path"] = note["path"]
+                    open_selected(filtered[state["cur"]])
                 elif state["q"].strip() and not (
                         state["review_mode"] or state["dup_mode"] is not None
-                        or state["trash_mode"]):
+                        or state["trash_mode"] or state["tagf"] is not None):
                     # "no match -> create a note from the query" only makes
                     # sense in the plain notes view, not while filtering a
                     # loops / duplicates / trash subset.
-                    new_note_with_title(state["q"].strip())
+                    dest = new_note_with_title(state["q"].strip())
                     refresh_notes()
                     state["q"] = ""
                     state["cur"] = 0
                     state["off"] = 0
                     state["p_scroll"] = 0
+                    if dest:
+                        state["_restore_path"] = dest
 
             elif k == curses.KEY_DOWN:
                 state["cur"] += 1
@@ -2347,8 +2681,10 @@ def run(stdscr):
 
             elif nxt == ord("t"):
                 state["trash_mode"] = not state["trash_mode"]
+                state["_trash"] = None
                 state["dup_mode"] = None
                 state["review_mode"] = False
+                state["tagf"] = None
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
@@ -2496,11 +2832,13 @@ def run(stdscr):
 
         # new note
         elif k == ord("n"):
-            new_note()
+            dest = new_note()
             refresh_notes()
             state["cur"] = 0
             state["off"] = 0
             state["p_scroll"] = 0
+            if dest:
+                state["_restore_path"] = dest
 
         # resolve conflict
         elif k == ord("c"):

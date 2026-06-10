@@ -138,6 +138,8 @@ Tag any note `#loop` to turn it into an open loop — something you want to be n
 - `S` schedules exactly when it should next resurface: relative (`+2w`, `3mo`, `1y`) or an absolute date (`2026-12-01`).
 - `x` closes the loop, removing the `#loop` tag. Closing is undoable with `u` (and redoable with `Ctrl-r`), alongside trashes and note edits.
 
+You can also schedule inline, without leaving the note: type `#loop <when>` anywhere in its text — `#loop 3d`, `#loop 2w`, `#loop tomorrow`, or an absolute `#loop 2026-12-01`. On save, a relative horizon is pinned to the date it resolved to (`#loop 3d` becomes `#loop 2026-06-12`), so re-editing the note never re-anchors the reminder; hand-edit that date to reschedule. This works from any device — a note synced in from your phone schedules itself when it lands. Closing the loop with `x` removes the pinned date along with the tag.
+
 This is a **tickler**, not spaced repetition: notes surface when they're due (or overdue), so capture turns into follow-through instead of a pile you never revisit.
 
 ## Rating tables (`update_ratings.py`)
@@ -168,7 +170,7 @@ You can list several films on one bullet separated by `;` (e.g. `- Bollywood fro
 
 ## Sync and conflicts
 
-notoj works well with Syncthing. External edits are detected and reloaded automatically. Syncthing sync-conflict files are detected and surfaced in the header; press `c` to resolve them in vimdiff.
+notoj works well with Syncthing. External edits are detected and reloaded automatically. Syncthing sync-conflict files are detected and surfaced in the header; press `c` to resolve them in vimdiff. The conflict copy is committed to the snapshot history before it is deleted, so a version discarded during resolution can always be recovered with `git show`.
 
 A local git repository is maintained in the notes directory for snapshot history. Every edit, create, trash, restore, and conflict resolution is committed automatically.
 
