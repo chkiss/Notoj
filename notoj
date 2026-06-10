@@ -34,63 +34,88 @@ try:
 except ImportError:
     pass
 
-HELP = """\
-notoj — keyboard-driven terminal notes
+# Single source of truth for the key reference: renders both the --help text
+# (build_help) and the in-app ? overlay (help_view), so they can't drift.
+# Entries are (key, description); a "\n" in a description continues on an
+# unkeyed line.
+KEYMAP = [
+    ("Navigation", [
+        ("j / ↓", "move down"),
+        ("k / ↑", "move up"),
+        ("g g", "jump to top"),
+        ("G", "jump to bottom"),
+        ("Ctrl-f/b", "page down / up"),
+        ("Ctrl-d/u", "half-page down / up"),
+        ("PgDn/PgUp", "scroll preview pane"),
+    ]),
+    ("Notes", [
+        ("Enter", "open note in Vim at top"),
+        ("e", "edit note in Vim (appends at bottom)"),
+        ("n", "create new blank note"),
+        ("d", "trash selected note"),
+        ("u", "undo last trash, loop-close (x), tag addition, or note edit"),
+        ("Ctrl-r", "redo last undone action"),
+    ]),
+    ("Search", [
+        ("/", "enter search mode"),
+        ("<type>", "filter notes live"),
+        ("Enter", "open match, or create new note titled with query"),
+        ("ESC", "exit search mode"),
+    ]),
+    ("Sorting (applies in every view; shown in the header)", [
+        ("s", "cycle sort: relevance (default) → title → created → modified"),
+        ("r", "reverse sort order"),
+    ]),
+    ("Tags", [
+        ("#", "add tags to the selected note (space-separated)"),
+        (".", "repeat the last tag addition on the selected note"),
+        ("t", "filter to notes sharing the selected note's tags;\n"
+              "Tab cycles the filter: all of them → each single tag"),
+        ("T", "browse all tags, most recently used first (Enter filters by\n"
+              "the chosen tag; s cycles sort: recent → count → name)"),
+    ]),
+    ("Backlinks", [
+        ("b", "list notes linking to the selected one ([[wikilinks]] and\n"
+              "[text](note.md) links; Enter jumps to the linking note)"),
+    ]),
+    ("Resurface (open loops)", [
+        ("g r", "toggle resurface view (notes tagged #loop, most stale first)"),
+        ("z", 'snooze loop a week (quick "not now")'),
+        ("S", "schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…)"),
+        ("x", "mark loop done (removes #loop tag)"),
+        ("#loop 2w", "typed anywhere in a note's text schedules it as a loop;\n"
+                     "relative horizons are pinned to a date on save (#loop 2026-06-23)"),
+    ]),
+    ("Other views", [
+        ("g t", "trash (u restores; editing a trashed note restores it)"),
+        ("g d", "duplicates (notes sharing a title)"),
+        ("?", "this key reference"),
+    ]),
+    ("Other", [
+        ("h", "diff vs previous version (vimdiff)"),
+        ("H", "browse full history with diff preview"),
+        ("c", "resolve next Syncthing conflict (vimdiff)"),
+        ("q", "quit"),
+    ]),
+]
 
-Usage: notoj [--help]
 
-Keybindings:
-  Navigation
-    j / ↓       move down
-    k / ↑       move up
-    g g         jump to top
-    G           jump to bottom
-    Ctrl-f/b    page down / up
-    Ctrl-d/u    half-page down / up
-    PgDn/PgUp   scroll preview pane
+def build_help():
+    """The --help text, rendered from KEYMAP."""
+    lines = ["notoj — keyboard-driven terminal notes", "",
+             "Usage: notoj [--help]", "", "Keybindings:"]
+    for section, entries in KEYMAP:
+        lines.append(f"  {section}")
+        for key, desc in entries:
+            first, *rest = desc.split("\n")
+            lines.append(f"    {key:<12}{first}")
+            lines.extend(f"    {'':<12}{r}" for r in rest)
+        lines.append("")
+    lines.append("Notes live in the directory set in ~/.config/notoj/config.")
+    return "\n".join(lines) + "\n"
 
-  Notes
-    Enter       open note in Vim at top
-    e           edit note in Vim (appends at bottom)
-    n           create new blank note
-    d           trash selected note
-    u           undo last trash, loop-close (x), tag addition, or note edit
-    Ctrl-r      redo last undone action
 
-  Search
-    /           enter search mode
-    <type>      filter notes live
-    Enter       open match, or create new note titled with query
-    ESC         exit search mode
-
-  Sorting (applies in every view; shown in the header)
-    s           cycle sort: relevance (default) → title → created → modified
-    r           reverse sort order
-
-  Tags
-    #           add tags to the selected note (space-separated)
-    .           repeat the last tag addition on the selected note
-    t           filter to notes sharing the selected note's tags;
-                Tab cycles the filter: all of them → each single tag
-    T           browse all tags, most recently used first (Enter filters by
-                the chosen tag; s cycles sort: recent → count → name)
-
-  Resurface (open loops)
-    g r         toggle resurface view (notes tagged #loop, most stale first)
-    z           snooze loop a week (quick "not now")
-    S           schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…)
-    x           mark loop done (removes #loop tag)
-    #loop 2w    typed anywhere in a note's text schedules it as a loop;
-                relative horizons are pinned to a date on save (#loop 2026-06-23)
-
-  Other
-    h           diff vs previous version (vimdiff)
-    H           browse full history with diff preview
-    c           resolve next Syncthing conflict (vimdiff)
-    q           quit
-
-Notes are stored as Markdown files in ~/Notoj/test_files/converted/
-"""
+HELP = build_help()
 
 NOTES_DIR = ""
 TRASH_DIR = ""
@@ -1783,6 +1808,52 @@ def backlinks_view(stdscr, notes, note):
     })
 
 
+def help_rows():
+    """KEYMAP flattened for the ? overlay: (kind, key, text) rows — section
+    headers, key entries (continuation lines carry an empty key), and blank
+    separators between sections."""
+    rows = []
+    for section, entries in KEYMAP:
+        if rows:
+            rows.append(("blank", "", ""))
+        rows.append(("section", "", section))
+        for key, desc in entries:
+            for j, part in enumerate(desc.split("\n")):
+                rows.append(("entry", key if j == 0 else "", part))
+    return rows
+
+
+def help_view(stdscr):
+    """In-app key reference (?): KEYMAP in a scrollable full-width overlay,
+    keys colored apart from their meanings. Nav keys scroll; any other key
+    closes it."""
+    rows = help_rows()
+    key_w = max(len(k) for kind, k, _ in rows if kind == "entry") + 3
+
+    def draw_row(scr, y, i, selected, list_w):
+        kind, key, text = rows[i]
+        if kind == "blank":
+            return
+        base = curses.A_REVERSE if selected else 0
+        try:
+            if kind == "section":
+                scr.addnstr(y, 0, text, list_w - 1, curses.A_BOLD | base)
+            else:
+                scr.addnstr(y, 2, f"{key:<{key_w}}", min(key_w, list_w - 3),
+                            curses.color_pair(3) | base)
+                scr.addnstr(y, 2 + key_w, text, max(1, list_w - 3 - key_w), base)
+        except curses.error:
+            pass
+
+    modal_list(stdscr, {
+        "count": lambda: len(rows),
+        "header": lambda w: "notoj keys",
+        "footer": lambda: "j/k scroll  any other key closes",
+        "draw_row": draw_row,
+        "on_key": lambda k, st: (None,),
+    })
+
+
 # ----------------------------
 # Conflict detection / resolution
 # ----------------------------
@@ -2745,7 +2816,7 @@ def draw(stdscr, notes, state):
             (10, "gt trash-view"), (8, "u/^R undo"),
             (9, "h/H hist" if hc >= 2 else ""),
             (2, "c conflicts" if conflicts else ""),
-            (1, "q quit"),
+            (3, "? help"), (1, "q quit"),
         ]
     footer = fit_hints(segments, w - 1)
 
@@ -3324,6 +3395,9 @@ def run(stdscr):
             state["p_scroll"] = 0
             if cur_path:
                 state["_restore_path"] = cur_path   # keep selection if it still matches
+
+        elif k == ord("?"):
+            help_view(stdscr)
 
         elif k == ord("b") and filtered and not state["trash_mode"]:
             sel = backlinks_view(stdscr, notes, filtered[state["cur"]])

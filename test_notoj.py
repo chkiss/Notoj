@@ -2622,6 +2622,49 @@ class TestTagfHelpers(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# KEYMAP / build_help / help_rows (? overlay and --help)
+# ---------------------------------------------------------------------------
+
+class TestKeymap(unittest.TestCase):
+    def test_structure(self):
+        for section, entries in notoj.KEYMAP:
+            self.assertTrue(section)
+            self.assertTrue(entries)
+            for key, desc in entries:
+                self.assertTrue(key, (section, desc))
+                self.assertTrue(desc, (section, key))
+
+    def test_build_help_covers_every_key_and_section(self):
+        text = notoj.build_help()
+        for section, entries in notoj.KEYMAP:
+            self.assertIn(section, text)
+            for key, desc in entries:
+                self.assertIn(key, text)
+                for part in desc.split("\n"):
+                    self.assertIn(part, text)
+
+    def test_build_help_is_the_help_constant(self):
+        self.assertEqual(notoj.HELP, notoj.build_help())
+
+    def test_continuation_lines_align(self):
+        # A "\n" in a description renders as an unkeyed continuation line at
+        # the same column the first line's text starts.
+        text = notoj.build_help()
+        self.assertIn("    t           filter to notes sharing", text)
+        self.assertIn("                Tab cycles the filter", text)
+
+    def test_help_rows_flatten(self):
+        rows = notoj.help_rows()
+        kinds = [r[0] for r in rows]
+        self.assertEqual(kinds.count("section"), len(notoj.KEYMAP))
+        self.assertEqual(kinds.count("blank"), len(notoj.KEYMAP) - 1)
+        # continuation rows exist and carry an empty key
+        self.assertTrue(any(r[0] == "entry" and r[1] == "" for r in rows))
+        # every entry row's text is non-empty
+        self.assertTrue(all(r[2] for r in rows if r[0] == "entry"))
+
+
+# ---------------------------------------------------------------------------
 # Note links / backlinks (b view)
 # ---------------------------------------------------------------------------
 
