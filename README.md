@@ -46,9 +46,12 @@ full keybinding reference. The essentials:
 - `/` filters as you type; Enter opens the best match, or creates a new note
   titled with your query if nothing matches.
 - Views: `g t` trash, `g d` duplicates, `g r` resurface (open loops),
-  `T` all tags, `t` notes sharing the selected note's tags. ESC steps back.
+  `T` all tags, `t` notes sharing the selected note's tags, `b` backlinks
+  (notes whose `[[wikilinks]]` or `[text](note.md)` links point at the
+  selected note — the same links Vim's `gf` follows). ESC steps back.
 - `h`/`H` diff or browse a note's git history; `u`/`Ctrl-r` undo/redo
-  trashes, loop-closes, tag additions, and edits.
+  trashes, loop-closes, tag additions, and edits; `?` shows the full key
+  reference in-app.
 
 ## Note format
 
