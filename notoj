@@ -1560,6 +1560,7 @@ def modal_list(stdscr, view):
     Returns the value from on_key's closing tuple."""
     st = {"cur": view.get("cur", 0), "off": 0, "page_h": 1}
     on_key = view["on_key"]
+    eof_spins = 0
     # Tick twice a second rather than blocking: a resize is only guaranteed
     # to be noticed by the size poll below (SIGWINCH may surface as
     # KEY_RESIZE, as ERR, or not wake a blocked getch at all, depending on
@@ -1623,13 +1624,25 @@ def modal_list(stdscr, view):
             stdscr.addnstr(h - 1, 0, view["footer"](), w - 1, footer_attr())
 
         stdscr.refresh()
+        t_wait = time.monotonic()
         k = stdscr.getch()
 
         # A terminal resize arrives as KEY_RESIZE — or as ERR (-1) when the
         # SIGWINCH interrupts the blocked getch (tmux does this). Neither is
         # a view key: just loop, redrawing at the new size.
         if k in (-1, curses.KEY_RESIZE):
+            # But a *dead* terminal (closed pty, dropped SSH) also yields
+            # ERR — instantly, ignoring the timeout — which would busy-spin
+            # at 100% CPU. A run of instant ERRs means the input is gone:
+            # unwind; the main loop's matching guard then exits the app.
+            if k == -1 and time.monotonic() - t_wait < 0.01:
+                eof_spins += 1
+                if eof_spins > 50:
+                    return None
+            else:
+                eof_spins = 0
             continue
+        eof_spins = 0
 
         if not narrow and (k in NAV_KEYS or k == ord("g")):
             prev = st["cur"]
@@ -2521,8 +2534,21 @@ def confirm_screen(stdscr, lines):
         except curses.error:
             pass
     stdscr.refresh()
+    eof_spins = 0
     while True:
+        t_wait = time.monotonic()
         k = stdscr.getch()
+        if k == -1:
+            # Dead-terminal guard (see the main loop): a run of instant
+            # ERRs means the input is gone — decline and unwind.
+            if time.monotonic() - t_wait < 0.01:
+                eof_spins += 1
+                if eof_spins > 50:
+                    return False
+            else:
+                eof_spins = 0
+            continue
+        eof_spins = 0
         if k in (10, 13, ord("y"), ord("Y")):
             return True
         if k in (27, ord("n"), ord("N"), ord("q")):
@@ -3060,7 +3086,21 @@ def run(stdscr):
         # Poll quickly only while a history lookup is pending (so the hint
         # appears soon after you stop); otherwise idle at the slow scan cadence.
         stdscr.timeout(120 if state["_hist_dirty"] else 2000)
+        t_wait = time.monotonic()
         k = stdscr.getch()
+
+        # Dead-terminal guard: when the pty/SSH session dies, getch returns
+        # ERR instantly instead of honoring the timeout, which would busy-
+        # spin at 100% CPU with no UI attached. A genuine timeout takes
+        # >=120ms; a run of instant ERRs means the input is gone — exit.
+        if k == -1 and time.monotonic() - t_wait < 0.01:
+            state["_eof_spins"] = state.get("_eof_spins", 0) + 1
+            if state["_eof_spins"] > 50:
+                if 0 <= state["cur"] < len(filtered):
+                    save_cursor(filtered[state["cur"]]["path"])
+                break
+        else:
+            state["_eof_spins"] = 0
 
         # ----------------------------
         # Quit
