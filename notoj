@@ -661,10 +661,16 @@ def rank_notes(notes, q):
         return notes
 
     if q.startswith('"') and q.endswith('"') and len(q) > 2:
-        phrase = q[1:-1].lower()
-        if not phrase:
+        # Quoted = strict contiguous phrase. Case-insensitive, and each run of
+        # whitespace in the query matches any whitespace in the note (\s+), so
+        # "cat food" still hits when the words straddle a line break. It stays a
+        # substring of the running text, so "CAT foods" matches but "food cat"
+        # and "catch the food" (reordered / extra words) do not.
+        words = q[1:-1].split()
+        if not words:
             return notes
-        matches = [n for n in notes if phrase in title(n).lower() or phrase in content(n).lower()]
+        phrase_re = re.compile(r"\s+".join(map(re.escape, words)), re.IGNORECASE)
+        matches = [n for n in notes if phrase_re.search(title(n)) or phrase_re.search(content(n))]
         # Input order is load order (arbitrary after incremental updates), so
         # give phrase results a deterministic newest-first order like tokens get.
         matches.sort(key=lambda n: -(n.get("modificationDate") or 0))

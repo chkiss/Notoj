@@ -658,6 +658,32 @@ class TestRankNotes(unittest.TestCase):
         result = notoj.rank_notes(notes, '"alpha beta"')
         self.assertEqual([n["title"] for n in result], ["newer", "older"])
 
+    def test_quoted_phrase_crosses_whitespace(self):
+        # The space in the query matches any whitespace run, incl. a newline.
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="t", content="buy cat\nfood today", modified=now, path="/a.md"),
+            make_note(title="t", content="buy cat    food today", modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, '"cat food"')
+        self.assertEqual(len(result), 2)
+
+    def test_quoted_phrase_matches_into_word(self):
+        # Substring into a word still counts: "CAT foods" matches "cat food".
+        now = datetime.now().timestamp()
+        notes = [make_note(title="CAT foods", content="x", modified=now, path="/a.md")]
+        result = notoj.rank_notes(notes, '"cat food"')
+        self.assertEqual(len(result), 1)
+
+    def test_quoted_phrase_reorder_and_extra_words_excluded(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="t", content="food cat", modified=now, path="/a.md"),
+            make_note(title="t", content="catch the food", modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, '"cat food"')
+        self.assertEqual(result, [])
+
     def test_quoted_empty_phrase_no_match(self):
         # '""' has len==2 so the quoted-phrase branch (len>2) is NOT taken;
         # it falls through to token matching where '""' literally matches nothing.
