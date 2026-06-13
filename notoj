@@ -62,7 +62,13 @@ KEYMAP = [
     ]),
     ("Search", [
         ("/", "enter search mode"),
-        ("<type>", "filter notes live"),
+        ("<type>", "filter notes live (any language — UTF-8 input is accepted)"),
+        ('"phrase"', "quoted = strict phrase (contiguous, crosses whitespace)"),
+        ("←/→", "move the edit cursor; Home/End jump to start/end"),
+        ("Ctrl-a/e/b/f", "readline motion: start / end / back / forward"),
+        ("Ctrl-w/u/k/d", "kill: prev word / to start / to end / char ahead"),
+        ("Alt-b/f", "word motion: back / forward one word"),
+        ("Alt-d/⌫", "delete word ahead / word behind"),
         ("Enter", "open match, or create new note titled with query"),
     ]),
     ("Sorting (applies in every view; shown in the header)", [
@@ -2953,7 +2959,8 @@ def draw(stdscr, notes, state):
             # wherever it sits in this view's header (notes / trash / dup / loops).
             anchor = header.find("filter:")
             base_col = anchor + len("filter:") if anchor >= 0 else 0
-            cursor_col = min(base_col + len(state["q"]), w - 1)
+            q_pos = min(state.get("q_pos", len(state["q"])), len(state["q"]))
+            cursor_col = min(base_col + q_pos, w - 1)
         try:
             curses.curs_set(1)
         except curses.error:
@@ -2976,12 +2983,17 @@ def run(stdscr):
     curses.curs_set(0)
     init_colors()
     stdscr.timeout(2000)
+    if hasattr(curses, "set_escdelay"):
+        # Keep bare ESC snappy (default is up to 1s) and bound the window in
+        # which an ESC+letter is gathered as a Meta/Alt chord in the filter.
+        curses.set_escdelay(25)
 
     state = {
         "cur": 0,
         "off": 0,
         "p_scroll": 0,
         "q": "",
+        "q_pos": 0,             # insertion-cursor index into q while searching
         "sort": "relevance",
         "rev": True,
         "search_mode": False,
@@ -3319,8 +3331,39 @@ def run(stdscr):
             state["p_scroll"] = 0
 
         elif state["search_mode"]:
-            if k == 27:  # ESC
-                state["search_mode"] = False
+            # The filter field is editable text with an insertion cursor
+            # (state["q_pos"], an index into state["q"]). Clamp it first so it
+            # can't dangle past the query if q was reset elsewhere.
+            state["q_pos"] = min(state.get("q_pos", len(state["q"])), len(state["q"]))
+
+            if k == 27:  # ESC — bare ESC exits; ESC+letter is a Meta (Alt) chord.
+                # A real Alt-key sends ESC and the letter back-to-back, so the
+                # follow-up is already buffered after set_escdelay; peek for it
+                # with a short window (the loop resets the timeout next iter).
+                stdscr.timeout(25)
+                nxt = stdscr.getch()
+                q, p = state["q"], state["q_pos"]
+                if nxt in (ord("b"), ord("B")):        # Alt-b — back one word
+                    state["q_pos"] = word_boundary(q, p, forward=False)
+                elif nxt in (ord("f"), ord("F")):      # Alt-f — forward one word
+                    state["q_pos"] = word_boundary(q, p, forward=True)
+                elif nxt in (ord("d"), ord("D")):      # Alt-d — delete word ahead
+                    end = word_boundary(q, p, forward=True)
+                    if end > p:
+                        state["q"] = q[:p] + q[end:]
+                        state["cur"] = 0
+                        state["off"] = 0
+                elif nxt in (curses.KEY_BACKSPACE, 127, 8):  # Alt-⌫ — delete word back
+                    start = word_boundary(q, p, forward=False)
+                    if start < p:
+                        state["q"] = q[:start] + q[p:]
+                        state["q_pos"] = start
+                        state["cur"] = 0
+                        state["off"] = 0
+                else:
+                    # Nothing followed (-1) = bare ESC -> leave search. A stray
+                    # non-Meta key is dropped; ESC's exit takes precedence.
+                    state["search_mode"] = False
 
             elif k in [10, 13]:
                 state["search_mode"] = False
@@ -3335,6 +3378,7 @@ def run(stdscr):
                     dest = new_note_with_title(state["q"].strip())
                     refresh_notes()
                     state["q"] = ""
+                    state["q_pos"] = 0
                     state["cur"] = 0
                     state["off"] = 0
                     state["p_scroll"] = 0
@@ -3349,15 +3393,66 @@ def run(stdscr):
                 state["cur"] -= 1
                 state["p_scroll"] = 0
 
-            elif k in [curses.KEY_BACKSPACE, 127, 8]:
-                state["q"] = state["q"][:-1]
-                state["cur"] = 0
-                state["off"] = 0
+            elif k in (curses.KEY_LEFT, 2):    # ←, Ctrl-b — back one char
+                state["q_pos"] = max(0, state["q_pos"] - 1)
 
-            elif 32 <= k <= 126:
-                state["q"] += chr(k)
-                state["cur"] = 0
-                state["off"] = 0
+            elif k in (curses.KEY_RIGHT, 6):   # →, Ctrl-f — forward one char
+                state["q_pos"] = min(len(state["q"]), state["q_pos"] + 1)
+
+            elif k in (curses.KEY_HOME, 1):    # Home, Ctrl-a — start of line
+                state["q_pos"] = 0
+
+            elif k in (curses.KEY_END, 5):     # End, Ctrl-e — end of line
+                state["q_pos"] = len(state["q"])
+
+            elif k in [curses.KEY_BACKSPACE, 127, 8]:
+                # Delete the character before the cursor, not just the last one.
+                p = state["q_pos"]
+                if p > 0:
+                    state["q"] = state["q"][:p - 1] + state["q"][p:]
+                    state["q_pos"] = p - 1
+                    state["cur"] = 0
+                    state["off"] = 0
+
+            elif k == 4:    # Ctrl-d — delete the char under the cursor
+                p = state["q_pos"]
+                if p < len(state["q"]):
+                    state["q"] = state["q"][:p] + state["q"][p + 1:]
+                    state["cur"] = 0
+                    state["off"] = 0
+
+            elif k == 23:   # Ctrl-w — delete the word before the cursor
+                p = state["q_pos"]
+                start = word_boundary(state["q"], p, forward=False)
+                if start < p:
+                    state["q"] = state["q"][:start] + state["q"][p:]
+                    state["q_pos"] = start
+                    state["cur"] = 0
+                    state["off"] = 0
+
+            elif k == 21:   # Ctrl-u — delete from the cursor to the start
+                p = state["q_pos"]
+                if p > 0:
+                    state["q"] = state["q"][p:]
+                    state["q_pos"] = 0
+                    state["cur"] = 0
+                    state["off"] = 0
+
+            elif k == 11:   # Ctrl-k — delete from the cursor to the end
+                p = state["q_pos"]
+                if p < len(state["q"]):
+                    state["q"] = state["q"][:p]
+                    state["cur"] = 0
+                    state["off"] = 0
+
+            else:
+                ch = typed_char(stdscr, k)
+                if ch:
+                    p = state["q_pos"]
+                    state["q"] = state["q"][:p] + ch + state["q"][p:]
+                    state["q_pos"] = p + len(ch)
+                    state["cur"] = 0
+                    state["off"] = 0
 
             continue
 
@@ -3371,6 +3466,7 @@ def run(stdscr):
             # the relevance sort (best matches first) until you pick another.
             state["search_mode"] = True
             state["q"] = ""
+            state["q_pos"] = 0
             state["cur"] = 0
             state["off"] = 0
             state["sort"] = "relevance"
