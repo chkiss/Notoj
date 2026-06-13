@@ -2,6 +2,7 @@
 import atexit
 import collections
 import curses
+import locale
 import os
 import glob
 import json
@@ -2657,6 +2658,44 @@ NAV_KEYS = {ord("j"), ord("k"), ord("G"),
             4, 21, 6, 2}   # Ctrl-d, Ctrl-u, Ctrl-f, Ctrl-b
 
 
+def typed_char(stdscr, k):
+    """The text a printable keypress contributes to an input field, or None if
+    `k` isn't printable. getch() delivers a multibyte UTF-8 character one byte
+    at a time, so a lead byte (0xC0..0xF7) pulls its continuation bytes and the
+    whole codepoint is decoded — that's what lets Arabic, accents and emoji be
+    typed into the search / tag / schedule fields."""
+    if 32 <= k <= 126:
+        return chr(k)
+    if 0xC0 <= k <= 0xF7:
+        extra = 1 + (k >= 0xE0) + (k >= 0xF0)   # bytes that follow the lead
+        buf = bytes([k] + [stdscr.getch() & 0xFF for _ in range(extra)])
+        try:
+            return buf.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return None
+
+
+def word_boundary(s, pos, forward):
+    """Index of the next word boundary from `pos` in `s`, readline-style: skip
+    any run of whitespace, then a run of word characters. `forward` scans right,
+    otherwise left. Used by Ctrl-W (delete previous word) and, later, the
+    Alt-b / Alt-f word motions."""
+    i = pos
+    if forward:
+        n = len(s)
+        while i < n and s[i].isspace():
+            i += 1
+        while i < n and not s[i].isspace():
+            i += 1
+    else:
+        while i > 0 and s[i - 1].isspace():
+            i -= 1
+        while i > 0 and not s[i - 1].isspace():
+            i -= 1
+    return i
+
+
 def nav_delta(k, page_h):
     """Decode a list-motion key into a cursor delta (or NAV_BOTTOM, or None
     for non-motion keys). One decoder for every list surface, so a new
@@ -3179,8 +3218,10 @@ def run(stdscr):
             elif k in [curses.KEY_BACKSPACE, 127, 8]:
                 state["tag_input"] = state["tag_input"][:-1]
 
-            elif 32 <= k <= 126:
-                state["tag_input"] += chr(k)
+            else:
+                ch = typed_char(stdscr, k)
+                if ch:
+                    state["tag_input"] += ch
 
             continue
 
@@ -3207,8 +3248,10 @@ def run(stdscr):
             elif k in [curses.KEY_BACKSPACE, 127, 8]:
                 state["sched_input"] = state["sched_input"][:-1]
 
-            elif 32 <= k <= 126:
-                state["sched_input"] += chr(k)
+            else:
+                ch = typed_char(stdscr, k)
+                if ch:
+                    state["sched_input"] += ch
 
             continue
 
@@ -3656,6 +3699,10 @@ def offer_simplenote_import(notes_dir):
 
 
 if __name__ == "__main__":
+    # Honor the user's locale so curses decodes/encodes UTF-8: without this,
+    # multibyte input (Arabic, accents, emoji) and output are mishandled.
+    locale.setlocale(locale.LC_ALL, "")
+
     if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
         print(HELP)
         sys.exit(0)

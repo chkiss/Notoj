@@ -708,6 +708,77 @@ class TestRankNotes(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# typed_char — printable-key decoding, incl. multibyte UTF-8 reassembly
+# ---------------------------------------------------------------------------
+
+class FakeScreen:
+    """Minimal stdscr stand-in: getch() returns queued ints in order."""
+    def __init__(self, queued=()):
+        self._q = list(queued)
+    def getch(self):
+        return self._q.pop(0)
+
+
+class TestTypedChar(unittest.TestCase):
+    def test_ascii_printable(self):
+        self.assertEqual(notoj.typed_char(FakeScreen(), ord("a")), "a")
+        self.assertEqual(notoj.typed_char(FakeScreen(), ord(" ")), " ")
+
+    def test_control_and_special_keys_rejected(self):
+        for k in (10, 13, 27, 9, 127, curses_stub.KEY_BACKSPACE):
+            self.assertIsNone(notoj.typed_char(FakeScreen(), k))
+
+    def test_two_byte_arabic(self):
+        # "ب" U+0628 -> 0xD8 0xA8: lead byte arrives via k, continuation via getch.
+        ch = "ب"
+        lead, cont = ch.encode("utf-8")
+        self.assertEqual(notoj.typed_char(FakeScreen([cont]), lead), ch)
+
+    def test_three_byte(self):
+        # "あ" U+3042 -> three bytes; two follow the lead.
+        ch = "あ"
+        b = ch.encode("utf-8")
+        self.assertEqual(notoj.typed_char(FakeScreen(list(b[1:])), b[0]), ch)
+
+    def test_four_byte_emoji(self):
+        ch = "\U0001f600"  # 😀
+        b = ch.encode("utf-8")
+        self.assertEqual(notoj.typed_char(FakeScreen(list(b[1:])), b[0]), ch)
+
+    def test_invalid_sequence_returns_none(self):
+        # Lead byte expecting a continuation, fed a bogus one -> decode fails.
+        self.assertIsNone(notoj.typed_char(FakeScreen([0x00]), 0xD8))
+
+
+class TestWordBoundary(unittest.TestCase):
+    def test_back_from_end(self):
+        # "delete previous word" target: start of the word left of the cursor.
+        s = "hello world"
+        self.assertEqual(notoj.word_boundary(s, len(s), forward=False), 6)
+
+    def test_back_skips_trailing_space(self):
+        s = "hello world   "
+        self.assertEqual(notoj.word_boundary(s, len(s), forward=False), 6)
+
+    def test_back_from_start_is_zero(self):
+        self.assertEqual(notoj.word_boundary("abc", 0, forward=False), 0)
+
+    def test_back_mid_word(self):
+        # Cursor inside "world" (after "wor") rubs out back to the word start.
+        self.assertEqual(notoj.word_boundary("hello world", 9, forward=False), 6)
+
+    def test_forward_from_start(self):
+        self.assertEqual(notoj.word_boundary("hello world", 0, forward=True), 5)
+
+    def test_forward_skips_leading_space(self):
+        self.assertEqual(notoj.word_boundary("  hello", 0, forward=True), 7)
+
+    def test_forward_from_end_is_len(self):
+        s = "abc"
+        self.assertEqual(notoj.word_boundary(s, len(s), forward=True), len(s))
+
+
+# ---------------------------------------------------------------------------
 # search_subset — filter that composes with any view's ordering
 # ---------------------------------------------------------------------------
 
