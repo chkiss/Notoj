@@ -44,7 +44,10 @@ shows the keys that matter in the current view, and `notoj --help` prints the
 full keybinding reference. The essentials:
 
 - `/` filters as you type; Enter opens the best match, or creates a new note
-  titled with your query if nothing matches.
+  titled with your query if nothing matches. Your search terms are carried
+  into Vim: matches are highlighted, the cursor jumps to the first one, and
+  `n`/`N` step through the rest (a quoted `"phrase"` is matched across line
+  breaks too).
 - Views: `g t` trash, `g d` duplicates, `g r` resurface (open loops),
   `T` all tags, `t` notes sharing the selected note's tags, `b` backlinks
   (notes whose `[[wikilinks]]` or `[text](note.md)` links point at the

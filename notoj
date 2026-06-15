@@ -2195,7 +2195,63 @@ def vim_source_args():
     return ["-c", "source " + esc]
 
 
-def open_note(n, end=False):
+def vim_search_pattern(q):
+    """Translate a notoj search query into a Vim search pattern, so opening a
+    matched note can highlight the hits and drop the cursor on the first one.
+    Mirrors rank_notes: a quoted phrase stays contiguous with any whitespace
+    between its words (\\s\\+), while a token query ORs its terms so `n` cycles
+    through every hit. Built in \\V ("very nomagic") so the typed text is taken
+    literally — only backslashes need doubling — with a leading \\c for
+    case-insensitivity. Returns None when there's nothing to search for."""
+    q = (q or "").strip()
+    if not q:
+        return None
+    lit = lambda s: s.replace("\\", "\\\\")
+    if q.startswith('"') and q.endswith('"') and len(q) > 2:
+        words = q[1:-1].split()
+        if not words:
+            return None
+        # \_s (not \s) so the gap can span a line break, matching how the
+        # quoted-phrase search joins the note's running text in rank_notes.
+        body = r"\_s\+".join(lit(w) for w in words)
+    else:
+        toks = q.split()
+        if not toks:
+            return None
+        body = r"\|".join(lit(t) for t in toks)
+    return r"\c\V" + body
+
+
+def _vim_position_args(src, end, search):
+    """The -c args that place the cursor (and, with an active search, highlight
+    the matches) for a spawned Vim.
+
+    `search` is always wired in with `let @/` rather than `/pat`/`+/pat`: notoj
+    ranks fuzzily (edit distance, tag and substring hits), so a note can rank
+    for a query it doesn't contain verbatim. `let @/` sets the pattern (so `n`
+    and 'hlsearch' use *this* query, never a stale one) without the E486 that a
+    failed `/pat` would raise. Positioning: the last line (end), else the first
+    literal match via the quiet search() — falling back to the title when the
+    note has no verbatim hit — else the title. `src` flags that the notoj
+    vimscript (with NotojOpenAtTitle) was sourced."""
+    args = []
+    if search:
+        args += ["-c", "let @/ = '%s'" % search.replace("'", "''"),
+                 "-c", "set hlsearch"]
+    if end:
+        args += ["-c", "normal G"]
+    elif search:
+        # search() (unlike /pat or `normal n`) is silent when there's no match,
+        # so a fuzzy-only hit won't beep or error — it just keeps the fallback.
+        jump = "silent! keepjumps call cursor(1, 1) | if search(@/, 'cw') == 0"
+        jump += " | call NotojOpenAtTitle() | endif" if src else " | endif"
+        args += ["-c", jump]
+    elif src:
+        args += ["-c", "call NotojOpenAtTitle()"]
+    return args
+
+
+def open_note(n, end=False, search=None):
     suspend_curses()
     path = n["path"]
     before = None
@@ -2208,11 +2264,7 @@ def open_note(n, end=False):
         except Exception:
             before = None
     src = vim_source_args()
-    cmd = ["vim"] + src
-    if end:
-        cmd += ["-c", "normal G"]
-    elif src:
-        cmd += ["-c", "call NotojOpenAtTitle()"]
+    cmd = ["vim"] + src + _vim_position_args(src, end, search)
     cmd.append(path)
     subprocess.call(cmd)
     if os.path.exists(path) and os.path.getmtime(path) != mtime_before:
@@ -2229,7 +2281,7 @@ def open_note(n, end=False):
     return None
 
 
-def edit_trash_note(n, end=False):
+def edit_trash_note(n, end=False, search=None):
     """Open a trashed note in Vim. Any saved change restores the note from the
     trash into the notes dir (then the usual title-rename pipeline runs);
     quitting Vim without writing leaves it in the trash. Returns the restored
@@ -2239,11 +2291,7 @@ def edit_trash_note(n, end=False):
         return None
     mtime_before = os.path.getmtime(path)
     src = vim_source_args()
-    cmd = ["vim"] + src
-    if end:
-        cmd += ["-c", "normal G"]
-    elif src:
-        cmd += ["-c", "call NotojOpenAtTitle()"]
+    cmd = ["vim"] + src + _vim_position_args(src, end, search)
     cmd.append(path)
     suspend_curses()
     subprocess.call(cmd)
@@ -3059,17 +3107,20 @@ def run(stdscr):
             state["_redo"] = []
 
     def open_selected(note, end=False):
-        """Open `note` in Vim. Trashed notes first get an interstitial saying
-        that saving any change restores them from the trash."""
+        """Open `note` in Vim. An active search query is carried into Vim so the
+        matches are highlighted and the cursor lands on the first one (`n` cycles
+        the rest). Trashed notes first get an interstitial saying that saving any
+        change restores them from the trash."""
+        search = vim_search_pattern(state["q"])
         if state["trash_mode"]:
             if confirm_screen(stdscr, TRASH_EDIT_NOTICE):
-                restored = edit_trash_note(note, end=end)
+                restored = edit_trash_note(note, end=end, search=search)
                 refresh_notes()
                 state["_hist_path"] = None
                 if restored:
                     state["_restore_path"] = restored
         else:
-            record(open_note(note, end=end))
+            record(open_note(note, end=end, search=search))
             refresh_notes()
             state["_hist_path"] = None
             state["_restore_path"] = note["path"]

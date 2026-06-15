@@ -2,6 +2,8 @@
 
 import importlib.machinery
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -2845,6 +2847,105 @@ class TestFindBacklinks(unittest.TestCase):
     def test_self_link_excluded(self):
         target = make_note("My note", content="[[My note]]", path="/n/My note.md")
         self.assertEqual(notoj.find_backlinks([target], target), [])
+
+
+class VimSearchPatternTests(unittest.TestCase):
+    def test_empty_query_is_none(self):
+        self.assertIsNone(notoj.vim_search_pattern(""))
+        self.assertIsNone(notoj.vim_search_pattern("   "))
+        self.assertIsNone(notoj.vim_search_pattern(None))
+
+    def test_tokens_are_ored_case_insensitive_literal(self):
+        self.assertEqual(notoj.vim_search_pattern("cat food"), r"\c\Vcat\|food")
+        self.assertEqual(notoj.vim_search_pattern("foo"), r"\c\Vfoo")
+
+    def test_quoted_phrase_spans_whitespace_across_lines(self):
+        # \_s (not \s) so the gap can straddle a line break, like the search.
+        self.assertEqual(notoj.vim_search_pattern('"cat food"'), r"\c\Vcat\_s\+food")
+        self.assertEqual(
+            notoj.vim_search_pattern('"a  b   c"'), r"\c\Va\_s\+b\_s\+c"
+        )
+
+    def test_backslash_is_escaped_for_very_nomagic(self):
+        self.assertEqual(notoj.vim_search_pattern(r"back\slash"), r"\c\Vback\\slash")
+
+    def test_position_args_set_pattern_then_jump(self):
+        # The pattern goes in via `let @/` (never a failing /pat that would
+        # leave a stale register), and the cursor jumps via the quiet search().
+        args = notoj._vim_position_args(src=True, end=False, search=r"\c\Vfoo")
+        self.assertEqual(args[:4], ["-c", r"let @/ = '\c\Vfoo'", "-c", "set hlsearch"])
+        self.assertIn("search(@/, 'cw')", args[-1])
+        self.assertIn("NotojOpenAtTitle", args[-1])  # fallback when no hit
+
+    def test_position_args_at_end_only_highlight(self):
+        args = notoj._vim_position_args(src=True, end=True, search=r"\c\Vfoo")
+        self.assertEqual(
+            args, ["-c", r"let @/ = '\c\Vfoo'", "-c", "set hlsearch", "-c", "normal G"]
+        )
+        self.assertFalse(any("search(@/" in a for a in args))
+
+    def test_position_args_no_search_uses_title(self):
+        self.assertEqual(
+            notoj._vim_position_args(src=True, end=False, search=None),
+            ["-c", "call NotojOpenAtTitle()"],
+        )
+
+    def test_position_args_quotes_escaped_for_let(self):
+        args = notoj._vim_position_args(src=False, end=True, search=r"\c\Vit's")
+        self.assertIn(r"let @/ = '\c\Vit''s'", args)
+
+
+@unittest.skipUnless(
+    shutil.which("vim"), "vim not installed"
+)
+class VimSearchIntegrationTests(unittest.TestCase):
+    """Drive a real (headless) Vim with notoj's own args and read back @/ and the
+    cursor — guarding against the regression where a fuzzily-ranked note with no
+    literal hit left `n` searching a stale pattern."""
+
+    def _run(self, body, search, end=False):
+        d = tempfile.mkdtemp()
+        try:
+            note = os.path.join(d, "note.md")
+            with open(note, "w", encoding="utf-8") as f:
+                f.write(body)
+            out = os.path.join(d, "out")
+            # -i NONE: never touch (or read) the user's real ~/.viminfo, so the
+            # search register starts empty and the test can't pollute it.
+            args = (["vim", "-N", "-u", "NONE", "-i", "NONE"]
+                    + notoj._vim_position_args(src=False, end=end, search=search)
+                    + ["-c", 'call writefile([@/, line("."), col(".")], "%s")' % out,
+                       "-c", "qa!", note])
+            subprocess.run(args, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(out, encoding="utf-8") as f:
+                reg, line, col = f.read().splitlines()
+            return reg, int(line), int(col)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_register_set_and_cursor_on_first_match(self):
+        body = "alpha\nbeta economics here\ngamma\n"
+        pat = notoj.vim_search_pattern("economics")
+        reg, line, _ = self._run(body, pat)
+        self.assertEqual(reg, pat)        # @/ is our pattern, ready for `n`
+        self.assertEqual(line, 2)         # landed on the match
+
+    def test_no_literal_hit_keeps_real_pattern_no_stale(self):
+        # The note ranked for "economics" but contains only "economic" — exactly
+        # the fuzzy case that used to fall back to a stale viminfo pattern.
+        body = "alpha\neconomic theory\ngamma\n"
+        pat = notoj.vim_search_pattern("economics")
+        reg, line, _ = self._run(body, pat)
+        self.assertEqual(reg, pat)        # `n` would report *this* pattern, not junk
+        self.assertEqual(line, 1)         # title fallback (no NotojOpenAtTitle here)
+
+    def test_phrase_matches_across_a_line_break(self):
+        body = "intro\nthe cat\nfood bowl\n"
+        pat = notoj.vim_search_pattern('"cat food"')
+        reg, line, _ = self._run(body, pat)
+        self.assertEqual(reg, pat)
+        self.assertEqual(line, 2)         # line holding the start of the phrase
 
 
 if __name__ == "__main__":
