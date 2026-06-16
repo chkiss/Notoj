@@ -433,6 +433,13 @@ def load():
             ensure_id(f)
             n = load_md(f)
         if n:
+            # Catch inline #hashtags on notes that predate this session: the
+            # incremental rescan only normalizes files it sees appear or change
+            # while running, so a note already on disk at startup is otherwise
+            # loaded verbatim and never gets its body tags synced. Reload only
+            # when the sync actually rewrote the file.
+            if sync_hashtags_keep_date(f):
+                n = load_md(f)
             notes.append(n)
 
     return notes
@@ -821,22 +828,24 @@ def extract_hashtags(text):
 
 
 def sync_hashtags(path):
-    """Add any inline #hashtags found in the note body to the YAML tags field."""
+    """Add any inline #hashtags found in the note body to the YAML tags field.
+
+    Returns True if the file was rewritten (new tags adopted), else False."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
     except Exception:
-        return
+        return False
 
     if not text.startswith("---\n"):
-        return
+        return False
     fm_end = text.find("\n---\n", 4)
     if fm_end == -1:
-        return
+        return False
 
     meta = parse_frontmatter(text[4:fm_end])
     if notag(meta):
-        return
+        return False
 
     existing = meta.get("tags") or []
     if isinstance(existing, str):
@@ -848,7 +857,7 @@ def sync_hashtags(path):
 
     new_tags = [t for t in extract_hashtags(body) if t not in existing]
     if not new_tags:
-        return
+        return False
 
     all_tags = existing + new_tags
     new_fm_lines = []
@@ -869,8 +878,31 @@ def sync_hashtags(path):
     new_text = "---\n" + "\n".join(new_fm_lines) + text[fm_end:]
     try:
         atomic_write(path, new_text)
+        return True
     except Exception:
-        pass
+        return False
+
+
+def sync_hashtags_keep_date(path):
+    """sync_hashtags, preserving the file's mtime so a newly-adopted inline tag
+    doesn't read as a fresh edit — which would float the note in date-sorted
+    views and later bump its `modified:` during normalization (same reasoning as
+    add_tags_keep_date). Used by the initial load() to catch notes that already
+    existed, with un-synced body hashtags, before notoj started: the incremental
+    rescan only normalizes files that appear or change while running, so without
+    this their body tags would never reach the YAML tags field. Returns True if
+    the file changed."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    changed = sync_hashtags(path)
+    if changed and mtime is not None:
+        try:
+            os.utime(path, (mtime, mtime))
+        except OSError:
+            pass
+    return changed
 
 
 def parse_tag_input(s):
