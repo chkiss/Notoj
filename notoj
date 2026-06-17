@@ -313,8 +313,12 @@ def derive_title(body):
 
 def load_md(path):
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig drops a leading BOM if present; normalize CRLF/CR to LF.
+        # ensure_canonical() persists this on disk during adoption, but reading
+        # tolerantly here keeps a not-yet-canonicalized file loadable too.
+        with open(path, "r", encoding="utf-8-sig") as f:
             text = f.read()
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
 
         if not text.startswith("---\n"):
             return None
@@ -343,6 +347,42 @@ def load_md(path):
         }
     except Exception:
         return None
+
+
+def ensure_canonical(path):
+    """Rewrite an external file to canonical UTF-8: strip a leading BOM and
+    convert CRLF/CR line endings to LF.
+
+    Windows editors and some LLM/export pipelines emit a UTF-8 BOM or CRLF
+    endings. Either one hides the frontmatter fence from every
+    startswith("---\\n")/find("\\n---\\n") check — a leading BOM makes the file
+    start with "\\ufeff---", and CRLF makes the first line "---\\r" — so the
+    note is left unadopted or, worse, gets a second frontmatter block prepended.
+    Running this first in the adoption pipeline makes every downstream parse see
+    plain LF text. Preserves mtime so the cleanup never reads as a fresh edit."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except Exception:
+        return
+
+    had_bom = raw.startswith(b"\xef\xbb\xbf")
+    body = raw[3:] if had_bom else raw
+    if not had_bom and b"\r" not in body:
+        return
+
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return  # not UTF-8 — leave it alone rather than corrupt it
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    try:
+        st = os.stat(path)
+        atomic_write(path, text)
+        os.utime(path, (st.st_atime, st.st_mtime))
+    except Exception:
+        pass
 
 
 def ensure_frontmatter(path):
@@ -425,6 +465,7 @@ def load():
     for f in glob.glob(os.path.join(NOTES_DIR, "*.md")):
         if CONFLICT_RE.match(os.path.basename(f)):
             continue  # Syncthing conflict copy — handled by find_conflicts()/`c`, never adopted as a note
+        ensure_canonical(f)
         n = load_md(f)
         if n is None:
             ensure_frontmatter(f)
@@ -599,10 +640,22 @@ def normalize_external_note(path):
     old_title = meta.get("title") or ""
     old_modified = meta.get("modified") or ""
 
+    fm_lines = text[4:fm_end].splitlines()
+    has_created = any(line.startswith("created:") for line in fm_lines)
+    has_modified = any(line.startswith("modified:") for line in fm_lines)
+    has_version = any(line.startswith("version:") for line in fm_lines)
+
     title_changed = bool(new_title) and new_title != old_title
     modified_changed = file_mtime_iso != old_modified
+    # Externally-produced files often arrive with only a partial frontmatter
+    # block — e.g. an id/title/tags header and none of the housekeeping dates.
+    # Backfill whatever is missing so the note sorts, dedupes, and resurfaces
+    # like any other instead of carrying empty created/modified/version through
+    # every load (which also left modified_changed permanently true, rewriting
+    # the file on every scan).
+    needs_backfill = not (has_created and has_modified and has_version)
 
-    if not title_changed and not modified_changed:
+    if not title_changed and not modified_changed and not needs_backfill:
         sync_hashtags(path)
         schedule_inline_loop(path)
         restore_mtime(path)
@@ -610,20 +663,30 @@ def normalize_external_note(path):
 
     new_yaml_lines = []
     title_written = False
-    for line in text[4:fm_end].splitlines():
+    for line in fm_lines:
         if line.startswith("title:") and title_changed:
             new_yaml_lines.append(f"title: {yaml_scalar(new_title)}")
             title_written = True
         elif line.startswith("modified:"):
             new_yaml_lines.append(f"modified: {file_mtime_iso}")
-        # NB: version is deliberately left untouched here — the editing device
-        # already incremented it (see check_rename); preserving it on adoption
-        # keeps the edit count from being double-bumped on sync.
+        # NB: an existing version is deliberately left untouched here — the
+        # editing device already incremented it (see check_rename); preserving
+        # it on adoption keeps the edit count from being double-bumped on sync.
         else:
             new_yaml_lines.append(line)
             if line.startswith("id:") and title_changed and not title_written:
                 new_yaml_lines.append(f"title: {yaml_scalar(new_title)}")
                 title_written = True
+
+    # Append any housekeeping field the external file never carried. created has
+    # no better source than the same mtime; version starts at 1. (mtime is
+    # restored below, so these inserts never read as a fresh edit on sync.)
+    if not has_created:
+        new_yaml_lines.append(f"created: {file_mtime_iso}")
+    if not has_modified:
+        new_yaml_lines.append(f"modified: {file_mtime_iso}")
+    if not has_version:
+        new_yaml_lines.append("version: 1")
 
     atomic_write(path, "---\n" + "\n".join(new_yaml_lines) + text[fm_end:])
 
@@ -659,6 +722,7 @@ def incremental_update(notes, snap_old, snap_new):
 
     result = [n for n in notes if n["path"] not in deleted and n["path"] not in added_or_modified]
     for path in added_or_modified:
+        ensure_canonical(path)
         ensure_frontmatter(path)
         ensure_id(path)
         final_path = normalize_external_note(path) or path

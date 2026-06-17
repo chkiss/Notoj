@@ -354,6 +354,42 @@ class TestLoadMd(unittest.TestCase):
             path = self._write(d, "note.md", "---\nid: abc\n")
             self.assertIsNone(notoj.load_md(path))
 
+    def test_loads_with_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "bom.md")
+            with open(path, "w", encoding="utf-8-sig") as f:
+                f.write(
+                    "---\n"
+                    "id: abc\n"
+                    "title: BOM note\n"
+                    "modified: 2026-05-10T07:17:33Z\n"
+                    "---\n"
+                    "\n"
+                    "BOM note\n"
+                )
+            n = notoj.load_md(path)
+            self.assertIsNotNone(n)
+            self.assertEqual(n["title"], "BOM note")
+            self.assertEqual(n["id"], "abc")
+
+    def test_loads_with_crlf_line_endings(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "crlf.md")
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(
+                    "---\r\n"
+                    "id: abc\r\n"
+                    "title: CRLF note\r\n"
+                    "modified: 2026-05-10T07:17:33Z\r\n"
+                    "---\r\n"
+                    "\r\n"
+                    "CRLF note\r\n"
+                )
+            n = notoj.load_md(path)
+            self.assertIsNotNone(n)
+            self.assertEqual(n["title"], "CRLF note")
+            self.assertEqual(n["id"], "abc")
+
     def test_title_from_frontmatter_when_body_empty(self):
         with tempfile.TemporaryDirectory() as d:
             path = self._write(d, "note.md", (
@@ -1743,6 +1779,132 @@ class TestNormalizeExternalNote(unittest.TestCase):
                 self._write(path, "just plain text")
                 notoj.normalize_external_note(path)  # should not raise
                 self.assertTrue(os.path.exists(path))
+            finally:
+                notoj.NOTES_DIR = old_notes
+
+    def test_backfills_missing_housekeeping_fields(self):
+        # An externally-produced note with a partial frontmatter (id/title/tags
+        # but no created/modified/version) should have the missing fields
+        # filled in so it loads with a real modified date.
+        with tempfile.TemporaryDirectory() as d:
+            old_notes = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                path = os.path.join(d, "craigslist-post.md")
+                self._write(path, (
+                    "---\n"
+                    "id: abc\n"
+                    "title: Craigslist Post\n"
+                    "tags:\n"
+                    "  - inventory\n"
+                    "---\n"
+                    "\n"
+                    "# Craigslist Post\n"
+                    "\n"
+                    "Body with a --- horizontal rule.\n"
+                ))
+                notoj.normalize_external_note(path)
+                n = notoj.load_md(path)
+                self.assertIsNotNone(n)
+                self.assertGreater(n["modificationDate"], 0)
+                self.assertGreater(n["creationDate"], 0)
+                self.assertEqual(n["version"], "1")
+                # The body's --- rule must survive — only the real frontmatter
+                # fence is touched.
+                self.assertIn("horizontal rule", n["content"])
+                self.assertEqual(n["tags"], ["inventory"])
+            finally:
+                notoj.NOTES_DIR = old_notes
+
+    def test_canonical_strips_bom_and_crlf_preserving_mtime(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "external.md")
+            with open(path, "wb") as f:
+                f.write(
+                    b"\xef\xbb\xbf"  # UTF-8 BOM
+                    b"---\r\n"
+                    b"id: abc\r\n"
+                    b"title: External\r\n"
+                    b"---\r\n"
+                    b"\r\n"
+                    b"External\r\n"
+                )
+            os.utime(path, (1_000_000_000, 1_000_000_000))
+            notoj.ensure_canonical(path)
+            with open(path, "rb") as f:
+                raw = f.read()
+            self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
+            self.assertNotIn(b"\r", raw)
+            self.assertTrue(raw.startswith(b"---\n"))
+            # mtime preserved so the cleanup doesn't read as a fresh edit.
+            self.assertEqual(int(os.path.getmtime(path)), 1_000_000_000)
+
+    def test_canonical_no_rewrite_when_already_clean(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "clean.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("---\nid: abc\ntitle: Clean\n---\n\nClean\n")
+            before = os.stat(path).st_mtime_ns
+            notoj.ensure_canonical(path)
+            # Untouched file: same mtime (no rewrite).
+            self.assertEqual(os.stat(path).st_mtime_ns, before)
+
+    def test_canonical_then_adopt_does_not_double_front(self):
+        # A BOM+CRLF file with a partial frontmatter must be canonicalized and
+        # backfilled — never given a second frontmatter block.
+        with tempfile.TemporaryDirectory() as d:
+            old_notes = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                path = os.path.join(d, "post.md")
+                with open(path, "wb") as f:
+                    f.write(
+                        b"\xef\xbb\xbf"
+                        b"---\r\n"
+                        b"id: abc\r\n"
+                        b"title: Post\r\n"
+                        b"tags: []\r\n"
+                        b"---\r\n"
+                        b"\r\n"
+                        b"Post\r\n"
+                    )
+                notoj.ensure_canonical(path)
+                notoj.ensure_frontmatter(path)  # must be a no-op now
+                notoj.normalize_external_note(path)
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertEqual(text.count("\n---\n"), 1)  # single fence
+                n = notoj.load_md(path)
+                self.assertIsNotNone(n)
+                self.assertEqual(n["title"], "Post")
+                self.assertGreater(n["modificationDate"], 0)
+            finally:
+                notoj.NOTES_DIR = old_notes
+
+    def test_backfill_is_idempotent(self):
+        # After backfilling, a second pass must make no further changes — i.e.
+        # the file is no longer rewritten on every scan.
+        with tempfile.TemporaryDirectory() as d:
+            old_notes = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                path = os.path.join(d, "post.md")
+                self._write(path, (
+                    "---\n"
+                    "id: abc\n"
+                    "title: Post\n"
+                    "tags: []\n"
+                    "---\n"
+                    "\n"
+                    "Post\n"
+                ))
+                notoj.normalize_external_note(path)
+                with open(path, encoding="utf-8") as f:
+                    first = f.read()
+                notoj.normalize_external_note(path)
+                with open(path, encoding="utf-8") as f:
+                    second = f.read()
+                self.assertEqual(first, second)
             finally:
                 notoj.NOTES_DIR = old_notes
 
