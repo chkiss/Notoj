@@ -665,6 +665,7 @@ def normalize_external_note(path):
 
     if not title_changed and not modified_changed and not needs_backfill:
         sync_hashtags(path)
+        canonicalize_wikilinks(path)
         schedule_inline_loop(path)
         restore_mtime(path)
         return path
@@ -713,6 +714,7 @@ def normalize_external_note(path):
             final_path = new_path
 
     sync_hashtags(final_path)
+    canonicalize_wikilinks(final_path)
     schedule_inline_loop(final_path)
     restore_mtime(final_path)
     return final_path
@@ -1253,6 +1255,77 @@ def linking_lines(text, fname):
         if any(t.lower() == fl for t in line_link_targets(line)):
             out.append(line)
     return out
+
+
+def canonicalize_wikilinks(path):
+    """Rewrite [[wikilink]] bracket text to the exact on-disk filename stem
+    when it matches an existing note case-insensitively.
+
+    notoj's own resolver is lenient — linking_lines matches case-insensitively,
+    so a hand-typed [[twin dome device inventory]] follows fine here. But Markor
+    (and other editors) resolve a wikilink by using the bracket text verbatim as
+    the path, so only an exact match opens the note on the phone. Canonicalizing
+    to the real filename makes every link portable without changing which note
+    it points at. Dangling or unmatched links are left untouched — we never
+    invent a target. Body only (the frontmatter carries no [[ ]] links); fenced
+    code blocks are skipped, like hashtag sync. Returns True if anything changed;
+    the caller restores mtime so the rewrite never reads as a fresh edit."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return False
+
+    # Confine the rewrite to the body — the frontmatter fence stays verbatim.
+    head = ""
+    body = text
+    if text.startswith("---\n"):
+        fm_end = text.find("\n---\n", 4)
+        if fm_end != -1:
+            head = text[:fm_end + 5]
+            body = text[fm_end + 5:]
+
+    # lowercase stem -> actual on-disk stem of every note that currently exists
+    try:
+        stems = {}
+        for fn in os.listdir(NOTES_DIR):
+            if fn.endswith(".md"):
+                stems.setdefault(fn[:-3].lower(), fn[:-3])
+    except OSError:
+        return False
+
+    def canon(m):
+        inner = m.group(1)
+        target = resolve_link_target(inner)  # '<inner>.md', or None if URL-ish
+        if not target:
+            return m.group(0)
+        actual = stems.get(target[:-3].lower())
+        if actual is None or actual == inner.strip():
+            return m.group(0)
+        return "[[" + actual + "]]"
+
+    out_lines = []
+    in_fence = False
+    changed = False
+    for line in body.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            out_lines.append(line)
+            continue
+        if in_fence:
+            out_lines.append(line)
+            continue
+        new_line = WIKILINK_RE.sub(canon, line)
+        if new_line != line:
+            changed = True
+        out_lines.append(new_line)
+
+    if not changed:
+        return False
+
+    atomic_write(path, head + "".join(out_lines))
+    return True
 
 
 def find_backlinks(notes, note):
