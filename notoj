@@ -200,8 +200,16 @@ def yaml_scalar(value):
 
 
 def slugify(title):
-    safe = re.sub(r'[/\\:\0]', '-', title)
-    safe = re.sub(r'\s+', ' ', safe).strip().lstrip('.').rstrip('-')
+    # Replace characters that are illegal in filenames on Windows and on
+    # Android/FAT/exFAT storage (sdcardfs) so notes sync to phones and copy to
+    # USB drives without failing: < > : " / \ | ? * and ASCII control
+    # characters (including NUL). Leaving any of these in a filename causes
+    # Syncthing pulls to the phone to fail permanently.
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '-', title)
+    # Collapse whitespace; drop a leading dot (hidden file) plus any leading
+    # space it exposes; trim trailing spaces, dots and dashes (trailing dot and
+    # space are also illegal/stripped on Windows & Android).
+    safe = re.sub(r'\s+', ' ', safe).strip().lstrip('.').strip().rstrip(' .-')
     return safe or 'untitled'
 
 

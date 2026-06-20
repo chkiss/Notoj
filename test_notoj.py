@@ -154,6 +154,34 @@ class TestSlugify(unittest.TestCase):
         # "10-1, 4-10" → "10-1, 4-10" (no stripping of commas, hyphens, spaces)
         self.assertEqual(notoj.slugify("10-1, 4-10"), "10-1, 4-10")
 
+    def test_question_mark_becomes_dash(self):
+        # "?" is illegal on Android/FAT storage; a trailing one is stripped.
+        self.assertEqual(notoj.slugify("Why tech?"), "Why tech")
+        self.assertEqual(notoj.slugify("a?b"), "a-b")
+
+    def test_double_quote_becomes_dash(self):
+        # '"' is illegal on Android/Windows storage.
+        self.assertEqual(notoj.slugify('say "hi" there'), "say -hi- there")
+
+    def test_windows_android_illegal_chars_become_dash(self):
+        # < > | * are all rejected by Android/FAT filesystems.
+        for ch in "<>|*":
+            self.assertEqual(notoj.slugify(f"a{ch}b"), "a-b",
+                             f"char {ch!r} not sanitized")
+
+    def test_control_char_becomes_dash(self):
+        # Tabs/newlines collapse via \s; other control chars must still go.
+        self.assertEqual(notoj.slugify("a\x07b"), "a-b")
+
+    def test_trailing_dot_stripped(self):
+        # Trailing dots are illegal on Windows and stripped by Android.
+        result = notoj.slugify("note.")
+        self.assertFalse(result.endswith("."), f"Trailing dot not stripped: {result!r}")
+        self.assertEqual(result, "note")
+
+    def test_only_illegal_chars_returns_untitled(self):
+        self.assertEqual(notoj.slugify('???'), "untitled")
+
 
 # ---------------------------------------------------------------------------
 # derive_title
