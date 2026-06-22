@@ -839,6 +839,23 @@ def order_notes(base, sort, rev, q, keep):
     return sort_notes(matches, sort, rev)
 
 
+def frame_cache(store, key, compute):
+    """Memoize one per-frame computation so holding j/k doesn't rebuild it.
+
+    The list and modal-preview loops redraw on every keystroke with no input
+    coalescing, so derived data keyed only by what the user actually changed —
+    the search query while filtering, the selected row for a preview pane —
+    must not be recomputed while merely scrolling. (Re-ranking every note, or
+    re-filtering the whole set by tag, per j/k is what made search and the tag
+    browser lag.) Recompute only when `key` differs from the previous frame;
+    otherwise return the cached value. `store` is any dict that lives across
+    frames (the loop's state); give each cached computation its own store."""
+    if "key" not in store or store["key"] != key:
+        store["key"] = key
+        store["val"] = compute()
+    return store["val"]
+
+
 def sort_label(sort, rev, q, natural, keep):
     """Human label for the active sort, shown in every view's header. `natural`
     is what "relevance" means at rest for this view. Only the plain views rank
@@ -1943,7 +1960,11 @@ def tags_view(stdscr, notes, focus=None, ui=None):
 
     def draw_preview(scr, x0, pw, ph, cur):
         sel_tag = vs["items"][cur][0]
-        tagged = sort_notes(filter_by_tags(notes, [sel_tag]), "modified", True)
+        # Filtering every note by the selected tag is too costly to redo on
+        # each j/k; it only changes when the selection does.
+        tagged = frame_cache(
+            vs.setdefault("_prev", {}), sel_tag,
+            lambda: sort_notes(filter_by_tags(notes, [sel_tag]), "modified", True))
         for i, m in enumerate(tagged[:ph]):
             line = f"{title(m)}  ({ago(m.get('modificationDate'))})"
             addnstr_w(scr, i + 1, x0, line, pw, curses.color_pair(4))
@@ -1988,6 +2009,7 @@ def backlinks_view(stdscr, notes, note):
     links = find_backlinks(notes, note)
     fname = os.path.basename(note["path"])
     hi_token = title(note).lower()
+    prev_cache = {}   # memoizes the preview scan across redraws (see frame_cache)
 
     def draw_row(scr, y, i, selected, list_w):
         m = links[i]
@@ -2001,7 +2023,10 @@ def backlinks_view(stdscr, notes, note):
         if not links:
             addnstr_w(scr, 1, x0, "(no notes link to this one)", pw, curses.A_DIM)
             return
-        hits = linking_lines(content(links[cur]), fname)
+        # Scanning the source note for referencing lines only changes with the
+        # selection, so cache it rather than re-scan on every scroll step.
+        hits = frame_cache(prev_cache, cur,
+                           lambda: linking_lines(content(links[cur]), fname))
         for i, line in enumerate(hits[:ph]):
             draw_line_highlighted(
                 scr, i + 1, x0, line.expandtabs(4).strip(), pw,
@@ -3286,6 +3311,7 @@ def run(stdscr):
         "_hist_dirty": False,
         "_hist_cache": {},      # path -> commit count (lazy; cleared on change)
         "_conflicts": [],
+        "_filter_cache": {},    # memoized rank/filter, rebuilt only on real input change
     }
 
     notes = load()
@@ -3366,21 +3392,35 @@ def run(stdscr):
         # "relevance" sort should preserve (loops staleness, dup grouping);
         # `natural` is how that order is labelled in the header.
         q = state["q"]
-        if state["trash_mode"]:
-            if state["_trash"] is None:
-                state["_trash"] = load_trash()
-            base, keep, natural = state["_trash"], False, "modified 🞃"
-        elif state["dup_mode"] is not None:
-            base, keep, natural = state["dup_mode"], True, "grouped"
-        elif state["review_mode"]:
-            base, keep, natural = find_loops(notes, state["_review"]), True, "most stale first"
-        elif state["tagf"] is not None:
-            base = filter_by_tags(notes, tagf_active(state["tagf"]))
-            keep, natural = False, "modified 🞃"
-        else:
-            base, keep, natural = notes, False, "modified 🞃"
+        # Resolve the lazily-loaded trash list up front so its identity is
+        # stable in the cache key below (rather than flipping None->list mid-key).
+        if state["trash_mode"] and state["_trash"] is None:
+            state["_trash"] = load_trash()
 
-        filtered = order_notes(base, state["sort"], state["rev"], q, keep)
+        def compute_filtered():
+            if state["trash_mode"]:
+                base, keep = state["_trash"], False
+            elif state["dup_mode"] is not None:
+                base, keep = state["dup_mode"], True
+            elif state["review_mode"]:
+                base, keep = find_loops(notes, state["_review"]), True
+            elif state["tagf"] is not None:
+                base, keep = filter_by_tags(notes, tagf_active(state["tagf"])), False
+            else:
+                base, keep = notes, False
+            return order_notes(base, state["sort"], state["rev"], q, keep)
+
+        # Rank/filter only when an input that affects the list changes — not on
+        # every j/k. id(notes) flips exactly when an incremental reload swaps in
+        # a fresh list (it returns the same object when nothing changed), so it
+        # is a free generation marker; the rest are the mode, sort and query.
+        filter_key = (
+            id(notes), state["sort"], state["rev"], q,
+            state["trash_mode"], id(state["_trash"]),
+            id(state["dup_mode"]), state["review_mode"], id(state["_review"]),
+            tuple(tagf_active(state["tagf"])) if state["tagf"] is not None else None,
+        )
+        filtered = frame_cache(state["_filter_cache"], filter_key, compute_filtered)
 
         # Restore cursor to a specific note after external reload
         restore_path = state.pop("_restore_path", None)
