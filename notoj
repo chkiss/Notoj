@@ -2849,6 +2849,8 @@ def char_width(ch):
 
 
 def disp_width(s):
+    if s.isascii():            # fast path: plain ASCII is one column per char
+        return len(s)
     return sum(char_width(c) for c in s)
 
 
@@ -2856,6 +2858,8 @@ def clip_to_width(s, max_w):
     """Truncate s so its display width does not exceed max_w columns."""
     if max_w <= 0:
         return ""
+    if s.isascii():            # fast path: ASCII is one column per char, so a
+        return s[:max_w]       # character slice is already a column slice
     w = 0
     for i, ch in enumerate(s):
         w += char_width(ch)
