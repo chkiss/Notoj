@@ -13,6 +13,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 
@@ -1778,10 +1779,7 @@ def modal_list(stdscr, view):
         # so the view's exit keys keep working while squeezed.
         narrow = h < 5 or w < MIN_W_ERROR
         if narrow:
-            try:
-                stdscr.addnstr(0, 0, "window too narrow", max(1, w - 1))
-            except curses.error:
-                pass
+            addnstr_w(stdscr, 0, 0, "window too narrow", max(1, w - 1))
         else:
             page_h = st["page_h"] = h - 2   # rows 1..h-2; footer bar at h-1
             n_rows = view["count"]()
@@ -1794,8 +1792,8 @@ def modal_list(stdscr, view):
                 stdscr.hline(0, 0, ord(" ") | curses.A_UNDERLINE, w)
             except curses.error:
                 pass
-            stdscr.addnstr(0, 0, view["header"](w), w - 1,
-                           curses.A_BOLD | curses.A_UNDERLINE)
+            addnstr_w(stdscr, 0, 0, view["header"](w), w - 1,
+                      curses.A_BOLD | curses.A_UNDERLINE)
 
             for i in range(st["off"], min(n_rows, st["off"] + page_h)):
                 view["draw_row"](stdscr, i - st["off"] + 1, i,
@@ -1811,7 +1809,7 @@ def modal_list(stdscr, view):
                 stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
             except curses.error:
                 pass
-            stdscr.addnstr(h - 1, 0, view["footer"](), w - 1, footer_attr())
+            addnstr_w(stdscr, h - 1, 0, view["footer"](), w - 1, footer_attr())
 
         stdscr.refresh()
         t_wait = time.monotonic()
@@ -1873,12 +1871,12 @@ def hist_view(stdscr, n):
         if selected:
             attr |= curses.A_REVERSE
         date_str = datetime.fromtimestamp(c["ts"]).strftime("%m-%d %H:%M")
-        scr.addnstr(y, 0, f"{date_str} {c['msg']}", list_w - 1, attr)
+        addnstr_w(scr, y, 0, f"{date_str} {c['msg']}", list_w - 1, attr)
 
     def draw_preview(scr, x0, pw, ph, cur):
         diff = vs["diff"]
         if not diff:
-            scr.addnstr(1, x0, "(no changes vs current)", pw, curses.A_DIM)
+            addnstr_w(scr, 1, x0, "(no changes vs current)", pw, curses.A_DIM)
             return
         for i, line in enumerate(diff[vs["d_scroll"]:vs["d_scroll"] + ph]):
             if line.startswith("+") and not line.startswith("+++"):
@@ -1889,10 +1887,7 @@ def hist_view(stdscr, n):
                 attr = curses.color_pair(4)
             else:
                 attr = curses.A_NORMAL
-            try:
-                scr.addnstr(i + 1, x0, line.expandtabs(4)[:pw], pw, attr)
-            except curses.error:
-                pass   # wide glyph landing on the right edge
+            addnstr_w(scr, i + 1, x0, line.expandtabs(4), pw, attr)
 
     def on_key(k, st):
         if k in [ord("q"), 27]:
@@ -1943,18 +1938,15 @@ def tags_view(stdscr, notes, focus=None, ui=None):
         attr = curses.color_pair(3)
         if selected:
             attr |= curses.A_REVERSE
-        scr.addnstr(y, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
-                    list_w - 1, attr)
+        addnstr_w(scr, y, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
+                  list_w - 1, attr)
 
     def draw_preview(scr, x0, pw, ph, cur):
         sel_tag = vs["items"][cur][0]
         tagged = sort_notes(filter_by_tags(notes, [sel_tag]), "modified", True)
         for i, m in enumerate(tagged[:ph]):
             line = f"{title(m)}  ({ago(m.get('modificationDate'))})"
-            try:
-                scr.addnstr(i + 1, x0, line[:pw], pw, curses.color_pair(4))
-            except curses.error:
-                pass   # wide glyph landing on the right edge
+            addnstr_w(scr, i + 1, x0, line, pw, curses.color_pair(4))
 
     def on_key(k, st):
         if k == 27:
@@ -2002,24 +1994,21 @@ def backlinks_view(stdscr, notes, note):
         attr = curses.color_pair(1)
         if selected:
             attr |= curses.A_REVERSE
-        scr.addnstr(y, 0, f"{title(m)}  ({ago(m.get('modificationDate'))})",
-                    list_w - 1, attr)
+        addnstr_w(scr, y, 0, f"{title(m)}  ({ago(m.get('modificationDate'))})",
+                  list_w - 1, attr)
 
     def draw_preview(scr, x0, pw, ph, cur):
         if not links:
-            scr.addnstr(1, x0, "(no notes link to this one)", pw, curses.A_DIM)
+            addnstr_w(scr, 1, x0, "(no notes link to this one)", pw, curses.A_DIM)
             return
         hits = linking_lines(content(links[cur]), fname)
         for i, line in enumerate(hits[:ph]):
-            try:
-                draw_line_highlighted(
-                    scr, i + 1, x0, line.expandtabs(4).strip()[:pw], pw,
-                    curses.color_pair(4),
-                    curses.color_pair(5) | curses.A_BOLD,
-                    [hi_token] if hi_token else [],
-                )
-            except curses.error:
-                pass   # wide glyph landing on the right edge
+            draw_line_highlighted(
+                scr, i + 1, x0, line.expandtabs(4).strip(), pw,
+                curses.color_pair(4),
+                curses.color_pair(5) | curses.A_BOLD,
+                [hi_token] if hi_token else [],
+            )
 
     def on_key(k, st):
         if k == 27:
@@ -2044,7 +2033,7 @@ def help_rows(width):
     """KEYMAP flattened for the ? overlay: (kind, key, text) rows — section
     headers, key entries (wrapped to `width`, continuation lines carry an
     empty key), and blank separators between sections."""
-    key_w = max(len(k) for _, entries in KEYMAP for k, _ in entries) + 3
+    key_w = max(disp_width(k) for _, entries in KEYMAP for k, _ in entries) + 3
     desc_w = max(20, width - 2 - key_w - 1)
     rows = []
     for section, entries in KEYMAP:
@@ -2061,7 +2050,7 @@ def help_view(stdscr):
     """In-app key reference (?): KEYMAP in a scrollable full-width overlay,
     keys colored apart from their meanings, descriptions wrapped to the live
     terminal width. Nav keys scroll; any other key closes it."""
-    key_w = max(len(k) for _, entries in KEYMAP for k, _ in entries) + 3
+    key_w = max(disp_width(k) for _, entries in KEYMAP for k, _ in entries) + 3
     vs = {"w": None, "rows": []}
 
     def rows_now():
@@ -2081,15 +2070,15 @@ def help_view(stdscr):
         if kind == "blank":
             return
         base = curses.A_REVERSE if selected else 0
-        try:
-            if kind == "section":
-                scr.addnstr(y, 0, text, list_w - 1, curses.A_BOLD | base)
-            else:
-                scr.addnstr(y, 2, f"{key:<{key_w}}", min(key_w, list_w - 3),
-                            curses.color_pair(3) | base)
-                scr.addnstr(y, 2 + key_w, text, max(1, list_w - 3 - key_w), base)
-        except curses.error:
-            pass
+        if kind == "section":
+            addnstr_w(scr, y, 0, text, list_w - 1, curses.A_BOLD | base)
+        else:
+            # Pad the key field by display width so wide keys (←/→, ↑/↓, ⌫)
+            # don't shove the description column out of alignment.
+            key_field = key + " " * max(0, key_w - disp_width(key))
+            addnstr_w(scr, y, 2, key_field, max(1, list_w - 3),
+                      curses.color_pair(3) | base)
+            addnstr_w(scr, y, 2 + key_w, text, max(1, list_w - 3 - key_w), base)
 
     return modal_list(stdscr, {
         "count": lambda: len(rows_now()),
@@ -2766,11 +2755,8 @@ def confirm_screen(stdscr, lines):
     for i, line in enumerate(lines):
         if i + 1 >= h - 1:
             break
-        try:
-            stdscr.addnstr(i + 1, 2, line, max(1, w - 3),
-                           curses.A_BOLD if i == 0 else curses.A_NORMAL)
-        except curses.error:
-            pass
+        addnstr_w(stdscr, i + 1, 2, line, max(1, w - 3),
+                  curses.A_BOLD if i == 0 else curses.A_NORMAL)
     stdscr.refresh()
     eof_spins = 0
     while True:
@@ -2832,7 +2818,7 @@ def fit_hints(segments, width):
     segs = [(pri, txt) for pri, txt in segments if txt]
     while True:
         s = "  ".join(t for _, t in segs)
-        if len(s) <= width or len(segs) <= 1:
+        if disp_width(s) <= width or len(segs) <= 1:
             return s
         worst = max(p for p, _ in segs)
         for i in range(len(segs) - 1, -1, -1):
@@ -2841,14 +2827,73 @@ def fit_hints(segments, width):
                 break
 
 
+def char_width(ch):
+    """Display columns a character occupies. Deliberately conservative: any
+    glyph that *might* render double-width (CJK, fullwidth, ambiguous, arrows,
+    symbols, emoji) counts as 2. A clipped string then never overflows its pane
+    and wraps into the neighbouring column — which is what painted preview text
+    over the left list. Over-truncating an accented line by a column at the far
+    right edge is invisible; under-counting corrupts the screen."""
+    if unicodedata.combining(ch):
+        return 0
+    o = ord(ch)
+    if o < 0x20:
+        return 0
+    if o < 0x7f:                                        # ASCII printable
+        return 1
+    if unicodedata.east_asian_width(ch) in ("W", "F", "A"):
+        return 2
+    if o >= 0x2190:                                     # arrows / symbols / emoji
+        return 2
+    return 1
+
+
+def disp_width(s):
+    return sum(char_width(c) for c in s)
+
+
+def clip_to_width(s, max_w):
+    """Truncate s so its display width does not exceed max_w columns."""
+    if max_w <= 0:
+        return ""
+    w = 0
+    for i, ch in enumerate(s):
+        w += char_width(ch)
+        if w > max_w:
+            return s[:i]
+    return s
+
+
+def addnstr_w(win, y, x, text, max_w, attr=0):
+    """Display-width-aware addnstr: the single place every pane draws dynamic
+    text through. Clips `text` to max_w *columns* (not characters) so wide
+    glyphs (emoji, em-dash, CJK, arrows) can't overrun the budget and wrap into
+    the neighbouring column, and swallows the edge-of-window curses error so
+    callers don't each need their own try/except."""
+    text = clip_to_width(text, max_w)
+    if not text:
+        return
+    try:
+        win.addnstr(y, x, text, len(text), attr)
+    except curses.error:
+        pass
+
+
 def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens):
-    """Render text at (y, x), switching to hi_attr on token match substrings."""
-    if not tokens or not text:
-        stdscr.addnstr(y, x, text, max_w, base_attr)
+    """Render text at (y, x), switching to hi_attr on token-match substrings.
+
+    Column accounting is by display width, so wide glyphs (emoji, em-dash, CJK,
+    arrows) advance the cursor by their true width and the line is clipped to
+    max_w *columns* — it can't run past the pane and wrap into the next row."""
+    text = clip_to_width(text, max_w)
+    if not text:
+        return
+    if not tokens:
+        addnstr_w(stdscr, y, x, text, max_w, base_attr)
         return
     pos = 0
     col = x
-    rem = max_w
+    rem = max_w                       # remaining budget, in display columns
     tl = text.lower()
     while pos < len(text) and rem > 0:
         best = None
@@ -2857,21 +2902,23 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens)
             if idx != -1 and (best is None or idx < best[0]):
                 best = (idx, tok)
         if best is None:
-            stdscr.addnstr(y, col, text[pos:], rem, base_attr)
+            addnstr_w(stdscr, y, col, text[pos:], rem, base_attr)
             break
         mi, tok = best
         if mi > pos:
-            n = min(mi - pos, rem)
-            stdscr.addnstr(y, col, text[pos:mi], n, base_attr)
-            col += n
-            rem -= n
+            seg = text[pos:mi]
+            addnstr_w(stdscr, y, col, seg, rem, base_attr)
+            w = disp_width(seg)
+            col += w
+            rem -= w
             pos = mi
-        if rem <= 0:
-            break
-        n = min(len(tok), rem)
-        stdscr.addnstr(y, col, text[mi:mi + len(tok)], n, hi_attr)
-        col += n
-        rem -= n
+            if rem <= 0:
+                break
+        seg = text[mi:mi + len(tok)]
+        addnstr_w(stdscr, y, col, seg, rem, hi_attr)
+        w = disp_width(seg)
+        col += w
+        rem -= w
         pos = mi + len(tok)
 
 
@@ -2974,10 +3021,7 @@ def draw(stdscr, notes, state):
     h, w = stdscr.getmaxyx()
 
     if h < 3 or w < MIN_W_ERROR:
-        try:
-            stdscr.addnstr(0, 0, "window too narrow", w)
-        except curses.error:
-            pass
+        addnstr_w(stdscr, 0, 0, "window too narrow", w)
         stdscr.refresh()
         return
 
@@ -3031,7 +3075,7 @@ def draw(stdscr, notes, state):
         stdscr.hline(0, 0, ord(" ") | curses.A_UNDERLINE, w)
     except curses.error:
         pass
-    stdscr.addnstr(0, 0, header, w - 1, curses.A_UNDERLINE)
+    addnstr_w(stdscr, 0, 0, header, w - 1, curses.A_UNDERLINE)
 
     visible = notes[state["off"]:state["off"] + h - 2]
     q_str = state["q"].strip()
@@ -3070,12 +3114,13 @@ def draw(stdscr, notes, state):
 
         hi_title = curses.color_pair(5) | (curses.A_REVERSE if selected else 0)
         title_w = min(28, list_w)
-        t_clip = t[:title_w]
+        t_clip = clip_to_width(t, title_w)
         draw_line_highlighted(stdscr, y, 0, t_clip, title_w, attr_title, hi_title, tokens)
-        pad = title_w - len(t_clip)
+        drawn_w = disp_width(t_clip)
+        pad = title_w - drawn_w
         if pad > 0:
             try:
-                stdscr.addnstr(y, len(t_clip), " " * pad, pad, attr_title)
+                stdscr.addnstr(y, drawn_w, " " * pad, pad, attr_title)
             except curses.error:
                 pass
 
@@ -3089,7 +3134,7 @@ def draw(stdscr, notes, state):
             stdscr.addnstr(y, COL_AGO, LRM + ago_str, min(1 + len(ago_str), list_w - COL_AGO), attr_date)
 
         if show_date and tg and tag_col < list_w:
-            stdscr.addnstr(y, tag_col, tg, list_w - tag_col, attr_tag)
+            addnstr_w(stdscr, y, tag_col, tg, list_w - tag_col, attr_tag)
 
     # ----------------------------
     # RIGHT PANE (preview)
@@ -3113,19 +3158,13 @@ def draw(stdscr, notes, state):
                 if i >= h - 2:
                     break
 
-                safe = line.expandtabs(4).replace("\n", "")[:preview_w]
-
-                # Content now runs to the last column; guard against a wide
-                # glyph landing on the edge (addnstr would raise on the wrap).
-                try:
-                    draw_line_highlighted(
-                        stdscr, i + 1, mid + 1, safe, preview_w,
-                        curses.color_pair(4),
-                        curses.color_pair(5) | curses.A_BOLD,
-                        tokens,
-                    )
-                except curses.error:
-                    pass
+                safe = line.expandtabs(4).replace("\n", "")
+                draw_line_highlighted(
+                    stdscr, i + 1, mid + 1, safe, preview_w,
+                    curses.color_pair(4),
+                    curses.color_pair(5) | curses.A_BOLD,
+                    tokens,
+                )
 
     # Footer hints as (priority, text) segments: lower number = survives
     # longer as the terminal narrows. ⮐/e are one segment (e = open at end).
@@ -3172,7 +3211,7 @@ def draw(stdscr, notes, state):
         stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
     except curses.error:
         pass
-    stdscr.addnstr(h - 1, 0, footer, w - 1, footer_attr())
+    addnstr_w(stdscr, h - 1, 0, footer, w - 1, footer_attr())
 
     if state["search_mode"] or state.get("tag_mode") or state.get("sched_mode"):
         if state.get("tag_mode"):
