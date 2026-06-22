@@ -316,7 +316,10 @@ def derive_title(body):
         s = line.strip()
         if s:
             s = re.sub(r"^#{1,6}\s+", "", s)
-            return s[:TITLE_MAX]
+            # rstrip so a cut that lands on whitespace can't leave a trailing
+            # space — YAML strips it on read-back, which would otherwise make
+            # title_changed perpetually true and rewrite the note every scan.
+            return s[:TITLE_MAX].rstrip()
     return ""
 
 
@@ -674,8 +677,14 @@ def normalize_external_note(path):
     new_yaml_lines = []
     title_written = False
     for line in fm_lines:
-        if line.startswith("title:") and title_changed:
-            new_yaml_lines.append(f"title: {yaml_scalar(new_title)}")
+        if line.startswith("title:"):
+            # Collapse any duplicate title lines to a single one; rewrite it
+            # when the derived title changed, else keep the line verbatim.
+            if title_written:
+                continue
+            new_yaml_lines.append(
+                f"title: {yaml_scalar(new_title)}" if title_changed else line
+            )
             title_written = True
         elif line.startswith("modified:"):
             new_yaml_lines.append(f"modified: {file_mtime_iso}")
