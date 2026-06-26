@@ -2575,13 +2575,13 @@ def undo_action(act, review=None):
     """Reverse a recorded destructive action (mutating act with live paths so a
     later redo stays consistent). Returns the path to focus afterward, if any.
 
-    `review` is the live snooze dict; it is required to undo a "snooze" action
-    (other kinds ignore it)."""
+    `review` is the live resurface dict; it is required to undo a "defer" action
+    — snooze (z) or schedule (S) — (other kinds ignore it)."""
     kind = act["kind"]
-    if kind == "snooze":
+    if kind == "defer":
         if review is not None:
-            # Restore the prior snooze state: a missing "before" means the loop
-            # had no review entry, so undo removes the one snooze added.
+            # Restore the prior resurface state: a missing "before" means the
+            # loop had no review entry, so undo removes the one defer added.
             if act.get("before") is None:
                 review.pop(act["id"], None)
             else:
@@ -2620,10 +2620,10 @@ def redo_action(act, review=None):
     """Re-apply a previously undone action. Returns the path to focus, or None
     when the action hides the note (a re-trash).
 
-    `review` is the live snooze dict; it is required to redo a "snooze" action
-    (other kinds ignore it)."""
+    `review` is the live resurface dict; it is required to redo a "defer" action
+    — snooze (z) or schedule (S) — (other kinds ignore it)."""
     kind = act["kind"]
-    if kind == "snooze":
+    if kind == "defer":
         if review is not None:
             review[act["id"]] = act["after"]
             save_review(review)
@@ -3592,8 +3592,12 @@ def run(stdscr):
                     note = filtered[state["cur"]]
                     due = parse_when(state["sched_input"])
                     if due is not None:
-                        schedule_loop(state["_review"], note["id"], due)
+                        nid = note["id"]
+                        before = state["_review"].get(nid)
+                        schedule_loop(state["_review"], nid, due)
                         save_review(state["_review"])
+                        record({"kind": "defer", "id": nid, "path": note["path"],
+                                "before": before, "after": state["_review"][nid]})
                         refresh_notes()
                 state["sched_mode"] = False
                 state["sched_input"] = ""
@@ -3901,7 +3905,7 @@ def run(stdscr):
             before = state["_review"].get(nid)
             snooze_loop(state["_review"], nid)
             save_review(state["_review"])
-            record({"kind": "snooze", "id": nid, "path": note["path"],
+            record({"kind": "defer", "id": nid, "path": note["path"],
                     "before": before, "after": state["_review"][nid]})
             refresh_notes()
             state["p_scroll"] = 0
@@ -4029,7 +4033,8 @@ def run(stdscr):
         elif k == ord("r"):
             state["rev"] = not state["rev"]
 
-        # undo: reverse most-recent destructive action (trash, loop-close, or edit)
+        # undo: reverse most-recent recorded action (trash, loop-close, edit,
+        # tag, or defer — snooze/schedule)
         elif k == ord("u"):
             if state["trash_mode"] and filtered and 0 <= state["cur"] < len(filtered):
                 restore_note(filtered[state["cur"]])

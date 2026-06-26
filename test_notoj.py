@@ -2227,7 +2227,7 @@ class TestRemoveTag(unittest.TestCase):
 
 class TestUndoRedoActions(unittest.TestCase):
     """undo_action / redo_action over every tracked action kind
-    (trash, loop, edit, tags, snooze)."""
+    (trash, loop, edit, tags, defer)."""
 
     def _setdirs(self, d):
         self._old = (notoj.NOTES_DIR, notoj.TRASH_DIR)
@@ -2332,19 +2332,21 @@ class TestUndoRedoActions(unittest.TestCase):
             finally:
                 self._restore()
 
-    def test_snooze_undo_redo(self):
+    def test_defer_undo_redo(self):
+        # "defer" backs both snooze (z) and schedule (S): they only differ in
+        # how the due date is computed, so one undo path covers both.
         with tempfile.TemporaryDirectory() as d:
             old = notoj.REVIEW_FILE
             notoj.REVIEW_FILE = os.path.join(d, ".notoj_review.json")
             try:
                 now = 1_000_000.0
-                # Loop with no prior review entry: snooze, then undo removes the
+                # Snooze a loop with no prior review entry: undo removes the
                 # entry entirely (the loop falls back to "due"); redo re-snoozes
                 # and persists.
                 review = {}
                 notoj.snooze_loop(review, "n1", now=now)
                 after = dict(review["n1"])
-                act = {"kind": "snooze", "id": "n1", "path": "/x/n1.md",
+                act = {"kind": "defer", "id": "n1", "path": "/x/n1.md",
                        "before": None, "after": after}
                 self.assertEqual(notoj.undo_action(act, review), "/x/n1.md")
                 self.assertNotIn("n1", review)
@@ -2352,13 +2354,14 @@ class TestUndoRedoActions(unittest.TestCase):
                 self.assertEqual(review["n1"], after)
                 self.assertEqual(notoj.load_review()["n1"], after)
 
-                # Loop with a prior scheduled entry: snooze overwrites it, undo
-                # restores the original due date rather than deleting it.
-                prior = {"due": now + 99 * 86400, "src": "99"}
+                # Schedule (S) a loop that was already snoozed: the new due date
+                # overwrites the old entry, and undo restores the original
+                # rather than deleting it.
+                prior = {"due": now + 7 * 86400}
                 review2 = {"n2": dict(prior)}
                 before = dict(review2["n2"])
-                notoj.snooze_loop(review2, "n2", now=now)
-                act2 = {"kind": "snooze", "id": "n2", "path": "/x/n2.md",
+                notoj.schedule_loop(review2, "n2", now + 99 * 86400)
+                act2 = {"kind": "defer", "id": "n2", "path": "/x/n2.md",
                         "before": before, "after": dict(review2["n2"])}
                 notoj.undo_action(act2, review2)
                 self.assertEqual(review2["n2"], prior)
