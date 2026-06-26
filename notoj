@@ -2571,10 +2571,23 @@ def rename_to_title(path):
     return candidate
 
 
-def undo_action(act):
+def undo_action(act, review=None):
     """Reverse a recorded destructive action (mutating act with live paths so a
-    later redo stays consistent). Returns the path to focus afterward, if any."""
+    later redo stays consistent). Returns the path to focus afterward, if any.
+
+    `review` is the live snooze dict; it is required to undo a "snooze" action
+    (other kinds ignore it)."""
     kind = act["kind"]
+    if kind == "snooze":
+        if review is not None:
+            # Restore the prior snooze state: a missing "before" means the loop
+            # had no review entry, so undo removes the one snooze added.
+            if act.get("before") is None:
+                review.pop(act["id"], None)
+            else:
+                review[act["id"]] = act["before"]
+            save_review(review)
+        return act.get("path")
     if kind == "trash":
         restored = do_restore(act["trash"], act["orig"])
         if restored:
@@ -2603,10 +2616,18 @@ def undo_action(act):
     return None
 
 
-def redo_action(act):
+def redo_action(act, review=None):
     """Re-apply a previously undone action. Returns the path to focus, or None
-    when the action hides the note (a re-trash)."""
+    when the action hides the note (a re-trash).
+
+    `review` is the live snooze dict; it is required to redo a "snooze" action
+    (other kinds ignore it)."""
     kind = act["kind"]
+    if kind == "snooze":
+        if review is not None:
+            review[act["id"]] = act["after"]
+            save_review(review)
+        return act.get("path")
     if kind == "trash":
         act["trash"] = do_trash(act["orig"])
         return None
@@ -3876,8 +3897,12 @@ def run(stdscr):
 
         elif k == ord("z") and state["review_mode"] and filtered:
             note = filtered[state["cur"]]
-            snooze_loop(state["_review"], note["id"])
+            nid = note["id"]
+            before = state["_review"].get(nid)
+            snooze_loop(state["_review"], nid)
             save_review(state["_review"])
+            record({"kind": "snooze", "id": nid, "path": note["path"],
+                    "before": before, "after": state["_review"][nid]})
             refresh_notes()
             state["p_scroll"] = 0
 
@@ -4012,7 +4037,7 @@ def run(stdscr):
                 state["cur"] = max(0, state["cur"] - 1)
             elif state["_undo"]:
                 act = state["_undo"].pop()
-                focus = undo_action(act)
+                focus = undo_action(act, state["_review"])
                 state["_redo"].append(act)
                 refresh_notes()
                 if focus:
@@ -4023,7 +4048,7 @@ def run(stdscr):
         elif k == 18:
             if state["_redo"]:
                 act = state["_redo"].pop()
-                focus = redo_action(act)
+                focus = redo_action(act, state["_review"])
                 state["_undo"].append(act)
                 refresh_notes()
                 if focus:
