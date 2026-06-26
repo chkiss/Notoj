@@ -122,8 +122,33 @@ def action_keycode(action, default_label):
     return _label_to_keycode(default_label)
 
 
+# Two-key chord actions: default binding is two characters (prefix + suffix);
+# remappable to a different 2-key chord via key.<action> = <two chars>.
+CHORD_DEFAULTS = {"goto_top": "gg", "dups_view": "gd",
+                  "trash_view": "gt", "resurface": "gr"}
+CHORD_ACTIONS = set(CHORD_DEFAULTS)
+
+
+def chord_binding(action):
+    """The effective two-character chord for a chord action (spaces ignored;
+    falls back to the default if the config value isn't exactly two keys)."""
+    v = (config_get("key." + action) or "").replace(" ", "").strip()
+    return v if len(v) == 2 else CHORD_DEFAULTS[action]
+
+
+def build_chord_dispatch():
+    """({(kc1, kc2): action}, {prefix_kc, …}) from the chord bindings."""
+    chords = {}
+    for action in CHORD_DEFAULTS:
+        b = chord_binding(action)
+        chords[(ord(b[0]), ord(b[1]))] = action
+    return chords, {c1 for c1, _c2 in chords}
+
+
 def action_label(action, default_label):
-    """Effective key label (what the help screen shows for the action)."""
+    """Effective key label for the help screens (chord actions show 'g t')."""
+    if action in CHORD_ACTIONS:
+        return " ".join(chord_binding(action))
     return _keycode_to_label(action_keycode(action, default_label))
 
 
@@ -135,10 +160,12 @@ def key_matches(k, kc):
 
 
 def build_key_dispatch():
-    """{action: effective_keycode} for every remappable KEYMAP row."""
+    """{action: effective_keycode} for every remappable single-key KEYMAP row
+    (chord actions are handled separately, via build_chord_dispatch)."""
     return {action: action_keycode(action, label)
             for _, entries in KEYMAP
-            for action, label, _desc in entries if action}
+            for action, label, _desc in entries
+            if action and action not in CHORD_ACTIONS}
 
 
 # Single source of truth for the key reference: renders both the --help text
@@ -153,7 +180,7 @@ KEYMAP = [
     ("Navigation", [
         (None, "j / ↓", "move down"),
         (None, "k / ↑", "move up"),
-        (None, "g g", "jump to top"),
+        ("goto_top", "g g", "jump to top"),
         (None, "G", "jump to bottom"),
         (None, "Ctrl-f/b", "page down / up"),
         (None, "Ctrl-d/u", "half-page down / up"),
@@ -192,7 +219,7 @@ KEYMAP = [
               "the chosen tag; s cycles sort: recent → count → name)"),
     ]),
     ("Resurface (open loops)", [
-        (None, "g r", "toggle resurface view (notes tagged #loop, most stale first)"),
+        ("resurface", "g r", "toggle resurface view (notes tagged #loop, most stale first)"),
         ("snooze", "z", 'snooze loop a week (quick "not now")'),
         ("schedule", "S", "schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…)"),
         ("loop_done", "x", "mark loop done (removes #loop tag)"),
@@ -201,8 +228,8 @@ KEYMAP = [
                      "(#loop 2026-06-23)"),
     ]),
     ("Other views", [
-        (None, "g t", "trash (u restores; editing a trashed note restores it)"),
-        (None, "g d", "duplicates (notes sharing a title)"),
+        ("trash_view", "g t", "trash (u restores; editing a trashed note restores it)"),
+        ("dups_view", "g d", "duplicates (notes sharing a title)"),
         ("backlinks", "b", "backlinks: notes linking to the selected one via [[wikilinks]] "
               "or [text](note.md) links (Enter jumps to the linking note)"),
         ("help", "?", "this key reference"),
@@ -3139,13 +3166,11 @@ try:
     })
 
     def _reshape(s):
-        # Arabic *script*, not just the Arabic language: the same cursive
-        # joining covers Urdu, Persian/Farsi, Pashto, Sindhi, Uyghur, Kurdish
-        # (Sorani), etc. Trigger ranges: Arabic, Arabic Supplement, Arabic
-        # Extended-A/B, and the two presentation-form blocks. Config key:
-        # reshape_arabic_script (old name reshape_arabic still honored).
-        if not config_bool("reshape_arabic_script",
-                           config_bool("reshape_arabic", True)):
+        # Arabic *script* (covers Urdu, Persian, Pashto, Sindhi, Uyghur,
+        # Kurdish…), the only script with Unicode presentation forms to swap
+        # to. Trigger ranges: Arabic, Arabic Supplement, Arabic Extended-A/B,
+        # and the two presentation-form blocks.
+        if not config_bool("reshape_arabic", True):
             return s
         for ch in s:
             o = ord(ch)
@@ -3653,6 +3678,7 @@ def run(stdscr):
     curses.curs_set(0)
     init_colors()
     KEY = build_key_dispatch()   # {action: keycode}, with config rebindings
+    CHORDS, CHORD_PREFIXES = build_chord_dispatch()   # 2-key chords (gg/gt/…)
     stdscr.timeout(2000)
     if hasattr(curses, "set_escdelay"):
         # Keep bare ESC snappy (default is up to 1s) and bound the window in
@@ -4177,17 +4203,18 @@ def run(stdscr):
             state["p_scroll"] = 0
             clamp_scroll(state, filtered, h)
 
-        elif k == ord("g"):
+        elif k in CHORD_PREFIXES:
             stdscr.timeout(1000)   # fixed window for the chord's second key
             nxt = stdscr.getch()   # (the loop resets the timeout next iteration)
+            act = CHORDS.get((k, nxt))
 
-            if nxt == ord("g"):
+            if act == "goto_top":
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
                 clamp_scroll(state, filtered, h)
 
-            elif nxt == ord("d"):
+            elif act == "dups_view":
                 if state["dup_mode"] is not None:
                     state["dup_mode"] = None
                 elif state["_dups"]:
@@ -4198,7 +4225,7 @@ def run(stdscr):
                 state["p_scroll"] = 0
                 state["sort"] = "relevance"
 
-            elif nxt == ord("t"):
+            elif act == "trash_view":
                 state["trash_mode"] = not state["trash_mode"]
                 state["_trash"] = None
                 state["dup_mode"] = None
@@ -4209,7 +4236,7 @@ def run(stdscr):
                 state["p_scroll"] = 0
                 state["sort"] = "relevance"
 
-            elif nxt == ord("r"):
+            elif act == "resurface":
                 state["review_mode"] = not state["review_mode"]
                 state["dup_mode"] = None
                 state["trash_mode"] = False
