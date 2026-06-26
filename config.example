@@ -35,11 +35,19 @@
 #                                         # notes route to mlterm (mlvim wrapper
 #                                         # ships in ~/.local/bin).
 #
-# Complex scripts (Indic, Syriac, …) can't be shaped in a terminal grid at
-# all — they need a HarfBuzz-backed GUI editor. Route them per-tag:
-#   tag_editor.hindi  = gvim -f                 # GUI vim; -f blocks
-#   tag_editor.syriac = gedit --new-window -w   # (needs a Syriac font, e.g.
-#                                               #  Noto Sans Syriac)
+# Complex scripts need full text shaping — reordering, conjuncts, or cursive
+# joining — that a terminal cell-grid can't do. Route those per-tag to a
+# HarfBuzz-backed GUI editor (gvim keeps your vim keys, -f blocks; gedit is
+# plain). Scripts that need this:
+#   - Indic: Devanagari, Bengali, Gurmukhi, Gujarati, Odia, Tamil, Telugu,
+#            Kannada, Malayalam, Sinhala
+#   - Khmer, Burmese (Myanmar), Tibetan
+#   - non-Arabic cursive: Syriac, N'Ko, Thaana, Mandaic
+# (Arabic itself is handled above via mlterm. You also need a font for the
+# script installed, e.g. Noto Sans <Script>.) One rule per tag you use:
+#   tag_editor.hindi  = gvim -f
+#   tag_editor.khmer  = gedit --new-window -w
+#   tag_editor.syriac = gedit --new-window -w
 #   tag_editor.draft  = gedit --new-window -w
 
 # ===========================================================================
