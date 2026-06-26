@@ -39,128 +39,18 @@ try:
 except ImportError:
     pass
 
-# Single source of truth for the key reference: renders both the --help text
-# (build_help) and the in-app ? overlay (help_view), so they can't drift.
-# Descriptions are single strings; rendering wraps them to the available
-# width with the continuation lines indented under the description column.
-KEYMAP = [
-    ("Navigation", [
-        ("j / ↓", "move down"),
-        ("k / ↑", "move up"),
-        ("g g", "jump to top"),
-        ("G", "jump to bottom"),
-        ("Ctrl-f/b", "page down / up"),
-        ("Ctrl-d/u", "half-page down / up"),
-        ("PgDn/PgUp", "scroll preview pane"),
-        ("ESC", "step back (prompt → filter → view)"),
-    ]),
-    ("Notes", [
-        ("Enter", "open note in Vim at top"),
-        ("e", "open note in Vim at the last line (normal mode)"),
-        ("n", "create new blank note"),
-        ("d", "trash selected note"),
-        ("u", "undo last trash, loop-close (x), tag addition, or note edit"),
-        ("Ctrl-r", "redo last undone action"),
-    ]),
-    ("Search", [
-        ("/", "enter search mode"),
-        ("<type>", "filter notes live (any language — UTF-8 input is accepted)"),
-        ('"phrase"', "quoted = strict phrase (contiguous, crosses whitespace)"),
-        ("←/→", "move the edit cursor; Home/End jump to start/end"),
-        ("Ctrl-a/e/b/f", "readline motion: start / end / back / forward"),
-        ("Ctrl-w/u/k/d", "kill: prev word / to start / to end / char ahead"),
-        ("Alt-b/f", "word motion: back / forward one word"),
-        ("Alt-d/⌫", "delete word ahead / word behind"),
-        ("Enter", "open match, or create new note titled with query"),
-    ]),
-    ("Sorting (applies in every view; shown in the header)", [
-        ("s", "cycle sort: relevance (default) → title → created → modified"),
-        ("r", "reverse sort order"),
-    ]),
-    ("Tags", [
-        ("#", "add tags to the selected note (space-separated)"),
-        (".", "repeat the last tag addition on the selected note"),
-        ("t", "filter to notes sharing the selected note's tags; Tab cycles "
-              "the filter: all of them → each single tag"),
-        ("T", "browse all tags, most recently used first (Enter filters by "
-              "the chosen tag; s cycles sort: recent → count → name)"),
-    ]),
-    ("Resurface (open loops)", [
-        ("g r", "toggle resurface view (notes tagged #loop, most stale first)"),
-        ("z", 'snooze loop a week (quick "not now")'),
-        ("S", "schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…)"),
-        ("x", "mark loop done (removes #loop tag)"),
-        ("#loop 2w", "typed anywhere in a note's text schedules it as a loop; "
-                     "relative horizons are pinned to a date on save "
-                     "(#loop 2026-06-23)"),
-    ]),
-    ("Other views", [
-        ("g t", "trash (u restores; editing a trashed note restores it)"),
-        ("g d", "duplicates (notes sharing a title)"),
-        ("b", "backlinks: notes linking to the selected one via [[wikilinks]] "
-              "or [text](note.md) links (Enter jumps to the linking note)"),
-        ("?", "this key reference"),
-    ]),
-    ("Other", [
-        ("h", "diff vs previous version (vimdiff)"),
-        ("H", "browse full history with diff preview"),
-        ("c", "resolve next Syncthing conflict (vimdiff)"),
-        ("q", "quit"),
-    ]),
-]
-
-HELP_KEY_W = 12   # description column starts at 4 (indent) + this
-
-
-def build_help(width=None):
-    """The --help text, rendered from KEYMAP; long descriptions wrap to the
-    terminal width with continuation lines under the description column."""
-    if width is None:
-        width = shutil.get_terminal_size((80, 24)).columns
-    desc_w = max(20, width - 4 - HELP_KEY_W)
-    lines = ["notoj — keyboard-driven terminal notes", "",
-             "Usage: notoj [--help]", "", "Keybindings:"]
-    for section, entries in KEYMAP:
-        lines.append(f"  {section}")
-        for key, desc in entries:
-            first, *rest = textwrap.wrap(desc, desc_w)
-            lines.append(f"    {key:<{HELP_KEY_W}}{first}")
-            lines.extend(f"    {'':<{HELP_KEY_W}}{r}" for r in rest)
-        lines.append("")
-    lines.append("Notes live in the directory set in ~/.config/notoj/config.")
-    return "\n".join(lines) + "\n"
-
-
-HELP = build_help()
-
-NOTES_DIR = ""
-TRASH_DIR = ""
-STATE_FILE = ""
-REVIEW_FILE = ""
-TITLE_MAX = 72
-
-# Open loops: notes tagged with this are surfaced in resurface mode (gr).
-LOOP_TAG = "loop"
-# Quick-snooze horizon, in days: "not this review, show me again soon." Unlike a
-# spaced-repetition ladder this does NOT grow — an open loop's natural cadence is
-# something only you know, so explicit scheduling (S) sets longer horizons.
-SNOOZE_DAYS = 7
+# ----------------------------
+# Config (~/.config/notoj/config) — simple `key = value` lines, # comments.
+# ----------------------------
 
 CONFIG_FILE = os.path.expanduser("~/.config/notoj/config")
-SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-
-LRM = "\u200e"
-
-# ----------------------------
-# Config (~/.config/notoj/config) \u2014 simple `key = value` lines, # comments.
-# ----------------------------
 
 _config_cache = None
 
 
 def _read_config():
     """Parse the config file into a {key: value} dict (cached). Lines are
-    `key = value`; blank lines and those starting with `#` are ignored."""
+    `key = value`; blank lines and lines starting with `#` are ignored."""
     global _config_cache
     if _config_cache is None:
         _config_cache = {}
@@ -187,28 +77,185 @@ def config_bool(key, default=False):
     return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
 
 
-# Single-key actions the user may rebind via `key.<action> = <char>`; the value
-# is the keycode the built-in dispatch already checks for. Multi-key chords
-# (gg/gt/gd/gr) and Enter are intentionally not remappable.
-REMAPPABLE = {
-    "new": ord("n"), "search": ord("/"), "sort": ord("s"),
-    "sort_reverse": ord("r"), "edit_end": ord("e"), "tag": ord("#"),
-    "tag_filter": ord("t"), "tag_browse": ord("T"), "backlinks": ord("b"),
-    "trash": ord("d"), "undo": ord("u"), "redo": 18, "help": ord("?"),
-    "quit": ord("q"),
-}
+# --- Key-binding helpers ----------------------------------------------------
+# Actions are named (see KEYMAP). A binding is a single key written as one
+# character, a name (enter/tab/space/esc), or Ctrl-<letter>. Users rebind with
+# `key.<action> = <key>`; this is a TRUE remap — the default stops triggering
+# the action unless something is still bound to it.
+_KEY_NAMED = {"enter": 10, "return": 10, "tab": 9, "space": 32,
+              "esc": 27, "escape": 27}
 
 
-def load_keymap():
-    """Build a {pressed_keycode: canonical_keycode} map from `key.<action>`
-    config lines, so a custom key also triggers a built-in action. Only
-    single printable keys; the action's default key keeps working too."""
-    km = {}
-    for action, canon in REMAPPABLE.items():
-        v = config_get("key." + action)
-        if v and len(v.strip()) == 1:
-            km[ord(v.strip())] = canon
-    return km
+def _label_to_keycode(label):
+    """A key label / config value -> keycode, or None if not a single key."""
+    s = (label or "").strip()
+    low = s.lower()
+    if low in _KEY_NAMED:
+        return _KEY_NAMED[low]
+    if low.startswith("ctrl-") and len(low) == 6:
+        return ord(low[5].upper()) & 0x1f
+    if len(s) == 1:
+        return ord(s)
+    return None
+
+
+def _keycode_to_label(kc):
+    """Keycode -> display label for the help screen."""
+    special = {10: "Enter", 13: "Enter", 9: "Tab", 32: "Space", 27: "ESC"}
+    if kc in special:
+        return special[kc]
+    if 1 <= kc <= 26:
+        return "Ctrl-" + chr(kc + 96)
+    if 32 < kc < 127:
+        return chr(kc)
+    return "?"
+
+
+def action_keycode(action, default_label):
+    """Effective keycode for an action: the `key.<action>` config override if
+    it parses to a single key, else the action's default."""
+    v = config_get("key." + action)
+    if v:
+        kc = _label_to_keycode(v)
+        if kc is not None:
+            return kc
+    return _label_to_keycode(default_label)
+
+
+def action_label(action, default_label):
+    """Effective key label (what the help screen shows for the action)."""
+    return _keycode_to_label(action_keycode(action, default_label))
+
+
+def key_matches(k, kc):
+    """True if keypress k triggers keycode kc (Enter accepts both CR and LF)."""
+    if kc in (10, 13):
+        return k in (10, 13)
+    return k == kc
+
+
+def build_key_dispatch():
+    """{action: effective_keycode} for every remappable KEYMAP row."""
+    return {action: action_keycode(action, label)
+            for _, entries in KEYMAP
+            for action, label, _desc in entries if action}
+
+
+# Single source of truth for the key reference: renders both the --help text
+# (build_help) and the in-app ? overlay (help_view), so they can't drift.
+# Descriptions are single strings; rendering wraps them to the available
+# width with the continuation lines indented under the description column.
+# Each entry is (action, key, desc). `action` is a stable id for remappable
+# single-key rows (the displayed key comes from the effective binding); None
+# marks fixed rows (navigation, readline editing, 2-key chords) that aren't
+# remappable in this pass.
+KEYMAP = [
+    ("Navigation", [
+        (None, "j / ↓", "move down"),
+        (None, "k / ↑", "move up"),
+        (None, "g g", "jump to top"),
+        (None, "G", "jump to bottom"),
+        (None, "Ctrl-f/b", "page down / up"),
+        (None, "Ctrl-d/u", "half-page down / up"),
+        (None, "PgDn/PgUp", "scroll preview pane"),
+        (None, "ESC", "step back (prompt → filter → view)"),
+    ]),
+    ("Notes", [
+        ("open", "Enter", "open note in Vim at top"),
+        ("open_end", "e", "open note in Vim at the last line (normal mode)"),
+        ("new", "n", "create new blank note"),
+        ("trash", "d", "trash selected note"),
+        ("undo", "u", "undo last trash, loop-close (x), tag addition, or note edit"),
+        ("redo", "Ctrl-r", "redo last undone action"),
+    ]),
+    ("Search", [
+        ("search", "/", "enter search mode"),
+        (None, "<type>", "filter notes live (any language — UTF-8 input is accepted)"),
+        (None, '"phrase"', "quoted = strict phrase (contiguous, crosses whitespace)"),
+        (None, "←/→", "move the edit cursor; Home/End jump to start/end"),
+        (None, "Ctrl-a/e/b/f", "readline motion: start / end / back / forward"),
+        (None, "Ctrl-w/u/k/d", "kill: prev word / to start / to end / char ahead"),
+        (None, "Alt-b/f", "word motion: back / forward one word"),
+        (None, "Alt-d/⌫", "delete word ahead / word behind"),
+        (None, "Enter", "open match, or create new note titled with query"),
+    ]),
+    ("Sorting (applies in every view; shown in the header)", [
+        ("sort", "s", "cycle sort: relevance (default) → title → created → modified"),
+        ("sort_reverse", "r", "reverse sort order"),
+    ]),
+    ("Tags", [
+        ("tag", "#", "add tags to the selected note (space-separated)"),
+        ("tag_repeat", ".", "repeat the last tag addition on the selected note"),
+        ("tag_filter", "t", "filter to notes sharing the selected note's tags; Tab cycles "
+              "the filter: all of them → each single tag"),
+        ("tag_browse", "T", "browse all tags, most recently used first (Enter filters by "
+              "the chosen tag; s cycles sort: recent → count → name)"),
+    ]),
+    ("Resurface (open loops)", [
+        (None, "g r", "toggle resurface view (notes tagged #loop, most stale first)"),
+        ("snooze", "z", 'snooze loop a week (quick "not now")'),
+        ("schedule", "S", "schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…)"),
+        ("loop_done", "x", "mark loop done (removes #loop tag)"),
+        (None, "#loop 2w", "typed anywhere in a note's text schedules it as a loop; "
+                     "relative horizons are pinned to a date on save "
+                     "(#loop 2026-06-23)"),
+    ]),
+    ("Other views", [
+        (None, "g t", "trash (u restores; editing a trashed note restores it)"),
+        (None, "g d", "duplicates (notes sharing a title)"),
+        ("backlinks", "b", "backlinks: notes linking to the selected one via [[wikilinks]] "
+              "or [text](note.md) links (Enter jumps to the linking note)"),
+        ("help", "?", "this key reference"),
+    ]),
+    ("Other", [
+        ("hist_diff", "h", "diff vs previous version (vimdiff)"),
+        ("hist_browse", "H", "browse full history with diff preview"),
+        ("conflict", "c", "resolve next Syncthing conflict (vimdiff)"),
+        ("quit", "q", "quit"),
+    ]),
+]
+
+HELP_KEY_W = 12   # description column starts at 4 (indent) + this
+
+
+def build_help(width=None):
+    """The --help text, rendered from KEYMAP; long descriptions wrap to the
+    terminal width with continuation lines under the description column."""
+    if width is None:
+        width = shutil.get_terminal_size((80, 24)).columns
+    desc_w = max(20, width - 4 - HELP_KEY_W)
+    lines = ["notoj — keyboard-driven terminal notes", "",
+             "Usage: notoj [--help]", "", "Keybindings:"]
+    for section, entries in KEYMAP:
+        lines.append(f"  {section}")
+        for action, key, desc in entries:
+            label = action_label(action, key) if action else key
+            first, *rest = textwrap.wrap(desc, desc_w)
+            lines.append(f"    {label:<{HELP_KEY_W}}{first}")
+            lines.extend(f"    {'':<{HELP_KEY_W}}{r}" for r in rest)
+        lines.append("")
+    lines.append("Notes live in the directory set in ~/.config/notoj/config.")
+    return "\n".join(lines) + "\n"
+
+
+HELP = build_help()
+
+NOTES_DIR = ""
+TRASH_DIR = ""
+STATE_FILE = ""
+REVIEW_FILE = ""
+TITLE_MAX = 72
+
+# Open loops: notes tagged with this are surfaced in resurface mode (gr).
+LOOP_TAG = "loop"
+# Quick-snooze horizon, in days: "not this review, show me again soon." Unlike a
+# spaced-repetition ladder this does NOT grow — an open loop's natural cadence is
+# something only you know, so explicit scheduling (S) sets longer horizons.
+SNOOZE_DAYS = 7
+
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+
+LRM = "\u200e"
 
 # ----------------------------
 # Time utils
@@ -2127,24 +2174,31 @@ def help_rows(width):
     """KEYMAP flattened for the ? overlay: (kind, key, text) rows — section
     headers, key entries (wrapped to `width`, continuation lines carry an
     empty key), and blank separators between sections."""
-    key_w = max(disp_width(k) for _, entries in KEYMAP for k, _ in entries) + 3
+    key_w = _help_key_w()
     desc_w = max(20, width - 2 - key_w - 1)
     rows = []
     for section, entries in KEYMAP:
         if rows:
             rows.append(("blank", "", ""))
         rows.append(("section", "", section))
-        for key, desc in entries:
+        for action, key, desc in entries:
+            label = action_label(action, key) if action else key
             for j, part in enumerate(textwrap.wrap(desc, desc_w)):
-                rows.append(("entry", key if j == 0 else "", part))
+                rows.append(("entry", label if j == 0 else "", part))
     return rows
+
+
+def _help_key_w():
+    """Width of the key column in the help screens, using effective bindings."""
+    return max(disp_width(action_label(a, k) if a else k)
+               for _, entries in KEYMAP for a, k, _ in entries) + 3
 
 
 def help_view(stdscr):
     """In-app key reference (?): KEYMAP in a scrollable full-width overlay,
     keys colored apart from their meanings, descriptions wrapped to the live
     terminal width. Nav keys scroll; any other key closes it."""
-    key_w = max(disp_width(k) for _, entries in KEYMAP for k, _ in entries) + 3
+    key_w = _help_key_w()
     vs = {"w": None, "rows": []}
 
     def rows_now():
@@ -2965,22 +3019,43 @@ def confirm_screen(stdscr, lines):
 _footer_band = False   # set in init_colors when the terminal can tint the bar
 
 
+_COLOR_NAMES = {"black": 0, "red": 1, "green": 2, "yellow": 3, "blue": 4,
+                "magenta": 5, "cyan": 6, "white": 7, "default": -1, "none": -1}
+
+
+def _cfg_color(key, default):
+    """Resolve a `color.*` config value to a curses color number: a name
+    (red/green/…/default) or a 0-255 palette index. Falls back to `default`."""
+    v = config_get(key)
+    if not v:
+        return default
+    v = v.strip().lower()
+    if v in _COLOR_NAMES:
+        return _COLOR_NAMES[v]
+    if v.lstrip("-").isdigit():
+        n = int(v)
+        if -1 <= n < max(curses.COLORS, 16):
+            return n
+    return default
+
+
 def init_colors():
     global _footer_band
     curses.start_color()
     curses.use_default_colors()
 
     amber = 214 if curses.COLORS >= 256 else curses.COLOR_YELLOW
-    curses.init_pair(1, amber, -1)                # amber (titles, recent dates)
-    curses.init_pair(2, curses.COLOR_RED, -1)     # dates
-    curses.init_pair(3, curses.COLOR_GREEN, -1)   # tags
-    curses.init_pair(4, curses.COLOR_CYAN, -1)    # preview
-    curses.init_pair(5, curses.COLOR_GREEN, -1)   # search match
+    # accent = titles, recent dates, markdown headers
+    curses.init_pair(1, _cfg_color("color.accent", amber), -1)
+    curses.init_pair(2, _cfg_color("color.date", curses.COLOR_RED), -1)
+    curses.init_pair(3, _cfg_color("color.tag", curses.COLOR_GREEN), -1)
+    curses.init_pair(4, _cfg_color("color.preview", curses.COLOR_CYAN), -1)
+    curses.init_pair(5, _cfg_color("color.match", curses.COLOR_GREEN), -1)
 
     # Footer status bar: default fg over a gray band, distinct enough to read
     # as the screen's bottom edge so every row above it can hold content.
     if curses.COLORS >= 256:
-        curses.init_pair(10, -1, 239)
+        curses.init_pair(10, -1, _cfg_color("color.footer_bg", 239))
         _footer_band = True
 
 
@@ -3551,7 +3626,7 @@ def run(stdscr):
     git_init()
     curses.curs_set(0)
     init_colors()
-    keymap = load_keymap()   # optional `key.<action>` rebindings (empty if none)
+    KEY = build_key_dispatch()   # {action: keycode}, with config rebindings
     stdscr.timeout(2000)
     if hasattr(curses, "set_escdelay"):
         # Keep bare ESC snappy (default is up to 1s) and bound the window in
@@ -3747,12 +3822,6 @@ def run(stdscr):
         else:
             state["_eof_spins"] = 0
 
-        # Optional key remap (`key.<action>` config). Command context only —
-        # never while typing into the search / tag / schedule input fields.
-        if k != -1 and not state["tag_mode"] and not state["sched_mode"] \
-                and not state["search_mode"]:
-            k = keymap.get(k, k)
-
         # ----------------------------
         # Quit
         # ----------------------------
@@ -3869,7 +3938,7 @@ def run(stdscr):
         # Quit
         # ----------------------------
 
-        elif k == ord("q") and not state["search_mode"]:
+        elif key_matches(k, KEY["quit"]) and not state["search_mode"]:
             if 0 <= state["cur"] < len(filtered):
                 save_cursor(filtered[state["cur"]]["path"])
             break
@@ -3878,10 +3947,10 @@ def run(stdscr):
         # Open note
         # ----------------------------
 
-        elif k in [10, 13] and filtered and not state["search_mode"]:
+        elif key_matches(k, KEY["open"]) and filtered and not state["search_mode"]:
             open_selected(filtered[state["cur"]])
 
-        elif k == ord("e") and filtered and not state["search_mode"]:
+        elif key_matches(k, KEY["open_end"]) and filtered and not state["search_mode"]:
             open_selected(filtered[state["cur"]], end=True)
 
         # ----------------------------
@@ -4058,7 +4127,7 @@ def run(stdscr):
         # Enter search mode
         # ----------------------------
 
-        elif k == ord("/"):
+        elif key_matches(k, KEY["search"]):
             # `/` filters the current view (notes, trash, duplicates, or loops);
             # it no longer drops you out of the special views. Searching selects
             # the relevance sort (best matches first) until you pick another.
@@ -4138,7 +4207,7 @@ def run(stdscr):
         # Trash note
         # ----------------------------
 
-        elif k == ord("d") and filtered and not state["trash_mode"]:
+        elif key_matches(k, KEY["trash"]) and filtered and not state["trash_mode"]:
             cur = state["cur"]
             note = filtered[cur]
             orig = note["path"]
@@ -4152,7 +4221,7 @@ def run(stdscr):
         # Resurface actions: snooze / mark done
         # ----------------------------
 
-        elif k == ord("z") and state["review_mode"] and filtered:
+        elif key_matches(k, KEY["snooze"]) and state["review_mode"] and filtered:
             note = filtered[state["cur"]]
             nid = note["id"]
             before = state["_review"].get(nid)
@@ -4163,11 +4232,11 @@ def run(stdscr):
             refresh_notes()
             state["p_scroll"] = 0
 
-        elif k == ord("S") and state["review_mode"] and filtered:
+        elif key_matches(k, KEY["schedule"]) and state["review_mode"] and filtered:
             state["sched_mode"] = True
             state["sched_input"] = ""
 
-        elif k == ord("x") and state["review_mode"] and filtered:
+        elif key_matches(k, KEY["loop_done"]) and state["review_mode"] and filtered:
             note = filtered[state["cur"]]
             mod_ts = note.get("modificationDate")
             if remove_tag(note["path"], LOOP_TAG):
@@ -4180,11 +4249,11 @@ def run(stdscr):
         # Tag note ( # to enter tags, . to repeat last addition )
         # ----------------------------
 
-        elif k == ord("#") and filtered and not state["trash_mode"]:
+        elif key_matches(k, KEY["tag"]) and filtered and not state["trash_mode"]:
             state["tag_mode"] = True
             state["tag_input"] = ""
 
-        elif k == ord(".") and filtered and state["_last_tags"] and not state["trash_mode"]:
+        elif key_matches(k, KEY["tag_repeat"]) and filtered and state["_last_tags"] and not state["trash_mode"]:
             note = filtered[state["cur"]]
             new_tags = parse_tag_input(state["_last_tags"])
             mod_ts = note.get("modificationDate")
@@ -4202,7 +4271,7 @@ def run(stdscr):
         # all -> each single tag; T = browse all tags )
         # ----------------------------
 
-        elif k == ord("t") and filtered and not state["trash_mode"]:
+        elif key_matches(k, KEY["tag_filter"]) and filtered and not state["trash_mode"]:
             note = filtered[state["cur"]]
             ntags = list(note.get("tags") or [])
             if ntags:
@@ -4227,13 +4296,13 @@ def run(stdscr):
             if cur_path:
                 state["_restore_path"] = cur_path   # keep selection if it still matches
 
-        elif k == ord("?"):
+        elif key_matches(k, KEY["help"]):
             if help_view(stdscr) is MODAL_QUIT:
                 if filtered and 0 <= state["cur"] < len(filtered):
                     save_cursor(filtered[state["cur"]]["path"])
                 break
 
-        elif k == ord("b") and filtered and not state["trash_mode"]:
+        elif key_matches(k, KEY["backlinks"]) and filtered and not state["trash_mode"]:
             sel = backlinks_view(stdscr, notes, filtered[state["cur"]])
             if sel is MODAL_QUIT:
                 if 0 <= state["cur"] < len(filtered):
@@ -4253,7 +4322,7 @@ def run(stdscr):
                 state["p_scroll"] = 0
                 state["_restore_path"] = sel
 
-        elif k == ord("T") and not state["trash_mode"]:
+        elif key_matches(k, KEY["tag_browse"]) and not state["trash_mode"]:
             sel = tags_view(stdscr, notes, ui=state["_tags_ui"])
             if sel is MODAL_QUIT:
                 if filtered and 0 <= state["cur"] < len(filtered):
@@ -4275,7 +4344,7 @@ def run(stdscr):
         # Sort mode
         # ----------------------------
 
-        elif k == ord("s"):
+        elif key_matches(k, KEY["sort"]):
             if state["sort"] in SORTS:
                 idx = SORTS.index(state["sort"])
                 state["sort"] = SORTS[(idx + 1) % len(SORTS)]
@@ -4283,12 +4352,12 @@ def run(stdscr):
                 state["sort"] = SORTS[0]
 
         # reverse sort
-        elif k == ord("r"):
+        elif key_matches(k, KEY["sort_reverse"]):
             state["rev"] = not state["rev"]
 
         # undo: reverse most-recent recorded action (trash, loop-close, edit,
         # tag, or defer — snooze/schedule)
-        elif k == ord("u"):
+        elif key_matches(k, KEY["undo"]):
             if state["trash_mode"] and filtered and 0 <= state["cur"] < len(filtered):
                 restore_note(filtered[state["cur"]])
                 refresh_notes()
@@ -4302,8 +4371,8 @@ def run(stdscr):
                     state["_restore_path"] = focus
                 state["p_scroll"] = 0
 
-        # redo: re-apply most-recently-undone action (Ctrl-R)
-        elif k == 18:
+        # redo: re-apply most-recently-undone action (Ctrl-R by default)
+        elif key_matches(k, KEY["redo"]):
             if state["_redo"]:
                 act = state["_redo"].pop()
                 focus = redo_action(act, state["_review"])
@@ -4314,7 +4383,7 @@ def run(stdscr):
                 state["p_scroll"] = 0
 
         # new note
-        elif k == ord("n"):
+        elif key_matches(k, KEY["new"]):
             dest = new_note()
             refresh_notes()
             state["cur"] = 0
@@ -4324,7 +4393,7 @@ def run(stdscr):
                 state["_restore_path"] = dest
 
         # resolve conflict
-        elif k == ord("c"):
+        elif key_matches(k, KEY["conflict"]):
             conflicts = find_conflicts()
             if conflicts:
                 original, conflict = conflicts[0]
@@ -4332,11 +4401,11 @@ def run(stdscr):
                 refresh_notes()
 
         # history
-        elif k == ord("h") and filtered:
+        elif key_matches(k, KEY["hist_diff"]) and filtered:
             open_hist_last(filtered[state["cur"]])
             refresh_notes()
 
-        elif k == ord("H") and filtered:
+        elif key_matches(k, KEY["hist_browse"]) and filtered:
             hist_view(stdscr, filtered[state["cur"]])
             refresh_notes()
 
