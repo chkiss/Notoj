@@ -3125,11 +3125,12 @@ def clip_to_width(s, max_w):
     return s
 
 
-# --- Arabic display shaping (prototype) -------------------------------------
-# Terminals shape contiguous runs, but curses writes cell-by-cell, so Arabic
-# shows isolated. We pre-shape to presentation forms here (display-only; the
-# file on disk is never touched). Ligatures OFF keeps it 1 char -> 1 form so
-# column widths are unchanged. Bidi is left to the terminal (VTE).
+# --- Arabic-script display shaping ------------------------------------------
+# Terminals shape contiguous runs, but curses writes cell-by-cell, so any
+# Arabic-script text (Arabic, Urdu, Persian, Pashto, …) shows isolated. We
+# pre-shape to presentation forms here (display-only; the file on disk is
+# never touched). Ligatures OFF keeps it 1 char -> 1 form so column widths are
+# unchanged. Bidi is left to the terminal (VTE).
 try:
     import arabic_reshaper as _ar
     _reshaper = _ar.ArabicReshaper(configuration={
@@ -3138,11 +3139,18 @@ try:
     })
 
     def _reshape(s):
-        if not config_bool("reshape_arabic", True):
+        # Arabic *script*, not just the Arabic language: the same cursive
+        # joining covers Urdu, Persian/Farsi, Pashto, Sindhi, Uyghur, Kurdish
+        # (Sorani), etc. Trigger ranges: Arabic, Arabic Supplement, Arabic
+        # Extended-A/B, and the two presentation-form blocks. Config key:
+        # reshape_arabic_script (old name reshape_arabic still honored).
+        if not config_bool("reshape_arabic_script",
+                           config_bool("reshape_arabic", True)):
             return s
         for ch in s:
             o = ord(ch)
             if (0x600 <= o <= 0x6ff or 0x750 <= o <= 0x77f
+                    or 0x870 <= o <= 0x8ff
                     or 0xfb50 <= o <= 0xfdff or 0xfe70 <= o <= 0xfeff):
                 return _reshaper.reshape(s)
         return s
@@ -3222,13 +3230,31 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens)
 MD_ITALIC = getattr(curses, "A_ITALIC", curses.A_UNDERLINE)
 MD_STRIKE = "̶"
 MD_HEADER = re.compile(r"(#{1,6})\s+(.*)$")
-MD_INLINE = re.compile(
-    r"(?P<code>`[^`]+`)"
-    r"|(?P<bi>\*\*\*[^*]+?\*\*\*)"
-    r"|(?P<b>\*\*[^*]+?\*\*)"
-    r"|(?P<s>~~[^~]+?~~)"
-    r"|(?P<i>\*[^*\s][^*]*?\*)"
-)
+
+_md_inline_re = None
+
+
+def _md_inline_pattern():
+    """Compiled inline-markdown regex, assembled from config (cached). Asterisk
+    emphasis is on by default; underscore emphasis is off by default so
+    snake_case (_) and __dunder__ (__) identifiers aren't accidentally styled.
+    `code` and ~~strike~~ are always on (no false-positive risk)."""
+    global _md_inline_re
+    if _md_inline_re is None:
+        ast = config_bool("markdown_asterisk", True)
+        parts = [r"(?P<code>`[^`]+`)"]
+        if ast:
+            parts.append(r"(?P<bi>\*\*\*[^*]+?\*\*\*)")
+            parts.append(r"(?P<b>\*\*[^*]+?\*\*)")
+        if config_bool("markdown_underscore_bold", False):
+            parts.append(r"(?P<bu>__[^_]+?__)")
+        parts.append(r"(?P<s>~~[^~]+?~~)")
+        if ast:
+            parts.append(r"(?P<i>\*[^*\s][^*]*?\*)")
+        if config_bool("markdown_underscore_italic", False):
+            parts.append(r"(?P<iu>_[^_\s][^_]*?_)")
+        _md_inline_re = re.compile("|".join(parts))
+    return _md_inline_re
 
 
 def _md_entries(raw, base_attr):
@@ -3241,7 +3267,7 @@ def _md_entries(raw, base_attr):
         return [(c, c, a) for c in m.group(2)]
     out = []
     pos = 0
-    for mt in MD_INLINE.finditer(raw):
+    for mt in _md_inline_pattern().finditer(raw):
         if mt.start() > pos:
             out += [(c, c, base_attr) for c in raw[pos:mt.start()]]
         g, s = mt.lastgroup, mt.group()
@@ -3250,11 +3276,11 @@ def _md_entries(raw, base_attr):
             inner, a = s[1:-1], base_attr | curses.A_REVERSE
         elif g == "bi":
             inner, a = s[3:-3], base_attr | curses.A_BOLD | MD_ITALIC
-        elif g == "b":
+        elif g in ("b", "bu"):           # **bold** or __bold__
             inner, a = s[2:-2], base_attr | curses.A_BOLD
         elif g == "s":
             inner, a, strike = s[2:-2], base_attr, True
-        else:
+        else:                            # i (*italic*) or iu (_italic_)
             inner, a = s[1:-1], base_attr | MD_ITALIC
         out += [(c, (c + MD_STRIKE) if strike else c, a) for c in inner]
         pos = mt.end()
