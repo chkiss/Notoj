@@ -7,6 +7,7 @@ import os
 import glob
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2163,7 +2164,7 @@ def resolve_conflict(original, conflict):
     if os.path.exists(original):
         subprocess.call(["vimdiff", original, conflict])
     else:
-        subprocess.call(["vim", conflict])
+        subprocess.call(vim_cmd() + [conflict])
         if os.path.exists(conflict):
             os.rename(conflict, original)
             conflict = None
@@ -2380,6 +2381,54 @@ endif
 _vim_helper_path = None
 
 
+_tag_editors = None
+
+
+def load_tag_editors():
+    """Parse `tag_editor.<tag> = <command>` lines from the notoj config into a
+    {tag: command} map, letting a note open in a custom editor/terminal based
+    on its tags. Example config line:
+
+        tag_editor.arabic = mlvim
+
+    opens any note tagged `arabic` in mlterm (where Arabic letters connect
+    cursively — gnome-terminal/VTE can't, it locks every glyph to a fixed
+    cell). The mapped command receives the usual vim args (sourced helper,
+    cursor position, file path) appended, so it must be a vim launcher that
+    forwards "$@" to vim. Cached after first read."""
+    global _tag_editors
+    if _tag_editors is None:
+        _tag_editors = {}
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("tag_editor.") and "=" in line:
+                        key, val = line.split("=", 1)
+                        tag = key[len("tag_editor."):].strip().lower()
+                        cmd = val.strip()
+                        if tag and cmd:
+                            _tag_editors[tag] = cmd
+        except FileNotFoundError:
+            pass
+    return _tag_editors
+
+
+def vim_cmd(note=None):
+    """Editor command for a spawned session. If the note carries a tag mapped
+    in the config's `tag_editor.<tag>` entries, use that command (e.g. tag
+    `arabic` -> `mlvim`). Otherwise fall back to $NOTOJ_VIM, then plain `vim`.
+    shlex-split so multi-word commands work."""
+    if note is not None:
+        editors = load_tag_editors()
+        if editors:
+            for tag in (note.get("tags") or []):
+                cmd = editors.get(str(tag).strip().lower())
+                if cmd:
+                    return shlex.split(cmd)
+    return shlex.split(os.environ.get("NOTOJ_VIM", "").strip() or "vim")
+
+
 def vim_source_args():
     """Materialize the embedded notoj vimscript to a temp file (once per run)
     and return the -c args that source it, giving spawned Vim sessions
@@ -2464,7 +2513,7 @@ def open_note(n, end=False, search=None):
         except Exception:
             before = None
     src = vim_source_args()
-    cmd = ["vim"] + src + _vim_position_args(src, end, search)
+    cmd = vim_cmd(n) + src + _vim_position_args(src, end, search)
     cmd.append(path)
     subprocess.call(cmd)
     if os.path.exists(path) and os.path.getmtime(path) != mtime_before:
@@ -2491,7 +2540,7 @@ def edit_trash_note(n, end=False, search=None):
         return None
     mtime_before = os.path.getmtime(path)
     src = vim_source_args()
-    cmd = ["vim"] + src + _vim_position_args(src, end, search)
+    cmd = vim_cmd(n) + src + _vim_position_args(src, end, search)
     cmd.append(path)
     suspend_curses()
     subprocess.call(cmd)
@@ -2742,7 +2791,7 @@ def new_note():
         f.write(frontmatter + "\n")
 
     suspend_curses()
-    subprocess.call(["vim"] + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
+    subprocess.call(vim_cmd() + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
     return finalize_new_note(tmp_path)
 
 
@@ -2763,7 +2812,7 @@ def new_note_with_title(title_text):
         f.write(frontmatter + "\n" + title_text + "\n\n")
 
     suspend_curses()
-    subprocess.call(["vim"] + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
+    subprocess.call(vim_cmd() + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
     return finalize_new_note(tmp_path)
 
 
@@ -2923,6 +2972,30 @@ def clip_to_width(s, max_w):
     return s
 
 
+# --- Arabic display shaping (prototype) -------------------------------------
+# Terminals shape contiguous runs, but curses writes cell-by-cell, so Arabic
+# shows isolated. We pre-shape to presentation forms here (display-only; the
+# file on disk is never touched). Ligatures OFF keeps it 1 char -> 1 form so
+# column widths are unchanged. Bidi is left to the terminal (VTE).
+try:
+    import arabic_reshaper as _ar
+    _reshaper = _ar.ArabicReshaper(configuration={
+        'delete_harakat': False,
+        'support_ligatures': False,
+    })
+
+    def _reshape(s):
+        for ch in s:
+            o = ord(ch)
+            if (0x600 <= o <= 0x6ff or 0x750 <= o <= 0x77f
+                    or 0xfb50 <= o <= 0xfdff or 0xfe70 <= o <= 0xfeff):
+                return _reshaper.reshape(s)
+        return s
+except Exception:
+    def _reshape(s):
+        return s
+
+
 def addnstr_w(win, y, x, text, max_w, attr=0):
     """Display-width-aware addnstr: the single place every pane draws dynamic
     text through. Clips `text` to max_w *columns* (not characters) so wide
@@ -2932,8 +3005,9 @@ def addnstr_w(win, y, x, text, max_w, attr=0):
     text = clip_to_width(text, max_w)
     if not text:
         return
+    disp = _reshape(text)
     try:
-        win.addnstr(y, x, text, len(text), attr)
+        win.addnstr(y, x, disp, len(disp), attr)
     except curses.error:
         pass
 
@@ -4101,8 +4175,19 @@ def load_notes_dir():
 
 def save_notes_dir(path):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    # Preserve any other config lines (e.g. tag_editor.* rules); only replace
+    # the notes_dir line.
+    lines = []
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            lines = [ln for ln in f if not ln.strip().startswith("notes_dir=")]
+    except FileNotFoundError:
+        pass
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.append(f"notes_dir={path}\n")
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        f.write(f"notes_dir={path}\n")
+        f.writelines(lines)
 
 
 def prompt_notes_dir(current=None):
