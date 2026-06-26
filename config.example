@@ -87,6 +87,20 @@
 #   color.footer_bg = 239      # footer status-bar band (256-color only)
 
 # ===========================================================================
+# Undo
+# ===========================================================================
+# Persist the undo/redo stacks across sessions. Default: true. When on, u and
+# Ctrl-r reach back into edits/trashes/tags from previous runs, not just the
+# current session. The journal is an append-only file kept LOCAL to this
+# machine (~/.local/state/notoj/<id>/undo.jsonl, or $XDG_STATE_HOME) — it is
+# never written into the synced notes tree, so each machine has its own.
+# Crossing out of the current session (or into a change made by another running
+# notoj) prompts for confirmation first. An edit whose note changed underneath
+# it (e.g. edited on your phone since) is skipped rather than overwritten. Set
+# to false for the old behavior: undo lives only as long as the session.
+# undo.persist=true
+
+# ===========================================================================
 # Key remapping
 # ===========================================================================
 # Rebind a single-key action: key.<action> = <key>. A <key> is one character,

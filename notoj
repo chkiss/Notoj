@@ -2,6 +2,8 @@
 import atexit
 import collections
 import curses
+import fcntl
+import hashlib
 import locale
 import os
 import glob
@@ -271,6 +273,9 @@ NOTES_DIR = ""
 TRASH_DIR = ""
 STATE_FILE = ""
 REVIEW_FILE = ""
+UNDO_LOG = ""        # local append-only undo journal; set in __main__
+SESSION_ID = ""      # "<pid>-<launch-ts>", stamped on each persisted action
+STALE = object()     # undo/redo sentinel: the note changed under the action
 TITLE_MAX = 72
 
 # Open loops: notes tagged with this are surfaced in resurface mode (gr).
@@ -1784,6 +1789,179 @@ def atomic_write(path, text):
 
 
 # ----------------------------
+# Undo-stack persistence
+# ----------------------------
+#
+# The undo/redo stacks survive across sessions via an append-only JSON-lines
+# journal, local to this machine and keyed by notes dir. It must NEVER live in
+# the synced notes tree: O_APPEND atomicity doesn't hold over Syncthing/NFS.
+#
+# Each line is one event — an action ("act"), an "undo"/"redo" navigation, or a
+# "session" launch/quit marker. Replaying the events reconstructs the exact
+# undo/redo state (an action clears redo; undo moves undo's top to redo; redo
+# moves it back), so the live stacks and the journal never diverge.
+#
+# Appends are written as a single os.write of one newline-terminated line,
+# which O_APPEND keeps atomic between concurrent writers. They take only a
+# SHARED lock on a stable .lock file; the rare launch-time compaction (which
+# rewrites the journal) takes it EXCLUSIVELY, so a rewrite can never race an
+# append and lose it.
+
+UNDO_LOG_CAP = 500   # live undo entries kept when the journal is compacted
+
+
+def undo_log_path():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    key = hashlib.sha1(NOTES_DIR.encode("utf-8")).hexdigest()[:12]
+    return os.path.join(base, "notoj", key, "undo.jsonl")
+
+
+def undo_persist_on():
+    return bool(UNDO_LOG) and config_bool("undo.persist", True)
+
+
+def _undo_lock(flag):
+    """Take `flag` (LOCK_SH/LOCK_EX) on the journal's stable lock file. Returns
+    the locked fd, or None when locking is unavailable."""
+    try:
+        lfd = os.open(UNDO_LOG + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(lfd, flag)
+    except OSError:
+        os.close(lfd)
+        return None
+    return lfd
+
+
+def _undo_unlock(lfd):
+    try:
+        fcntl.flock(lfd, fcntl.LOCK_UN)
+    finally:
+        os.close(lfd)
+
+
+def log_event(rec):
+    """Append one event to the undo journal (no-op when persistence is off)."""
+    if not undo_persist_on():
+        return
+    line = (json.dumps(rec, separators=(",", ":")) + "\n").encode("utf-8")
+    lfd = _undo_lock(fcntl.LOCK_SH)
+    if lfd is None:
+        return
+    try:
+        fd = os.open(UNDO_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, line)   # one write() == one atomic append under O_APPEND
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+    finally:
+        _undo_unlock(lfd)
+
+
+def _read_undo_log():
+    try:
+        with open(UNDO_LOG, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    recs = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            recs.append(json.loads(line))
+        except ValueError:
+            # A half-written trailing line from a crash mid-append: skip it.
+            continue
+    return recs
+
+
+def replay_log(recs):
+    """Reconstruct (undo, redo) stacks from journal events, mirroring the live
+    record/undo/redo semantics."""
+    undo, redo = [], []
+    for rec in recs:
+        t = rec.get("t")
+        if t == "act":
+            act = rec.get("act")
+            if act:
+                undo.append(act)
+                redo.clear()
+        elif t == "undo":
+            if undo:
+                redo.append(undo.pop())
+        elif t == "redo":
+            if redo:
+                undo.append(redo.pop())
+        # "session" markers carry no stack effect.
+    return undo, redo
+
+
+def load_undo():
+    """Seed the undo/redo stacks from the journal — empty when persistence is
+    off or no journal exists yet."""
+    if not undo_persist_on():
+        return [], []
+    return replay_log(_read_undo_log())
+
+
+def compact_log():
+    """When the journal has grown large, rewrite it down to the last
+    UNDO_LOG_CAP live undo entries. Exclusive-locked so no append races the
+    rewrite. The persisted redo stack is dropped — a redo across a compaction
+    isn't worth the event-ordering bookkeeping. Best called once at launch."""
+    if not undo_persist_on():
+        return
+    lfd = _undo_lock(fcntl.LOCK_EX)
+    if lfd is None:
+        return
+    try:
+        recs = _read_undo_log()
+        if len(recs) <= UNDO_LOG_CAP * 4:
+            return
+        undo, _redo = replay_log(recs)
+        undo = undo[-UNDO_LOG_CAP:]
+        lines = [json.dumps({"t": "act", "act": a}, separators=(",", ":"))
+                 for a in undo]
+        body = "\n".join(lines) + ("\n" if lines else "")
+        tmp = UNDO_LOG + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.replace(tmp, UNDO_LOG)
+    except OSError:
+        pass
+    finally:
+        _undo_unlock(lfd)
+
+
+def session_alive(sess):
+    """True if `sess` ("<pid>-<ts>") names a process still running on this
+    machine. Used only to word the cross-session prompt (a live other instance
+    vs. a finished previous session); pid reuse can at worst mislabel the
+    wording, never the action."""
+    try:
+        pid = int(str(sess).split("-", 1)[0])
+    except (ValueError, AttributeError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+# ----------------------------
 # Git snapshot helpers
 # ----------------------------
 
@@ -2669,7 +2847,12 @@ def open_note(n, end=False, search=None):
             except Exception:
                 after = None
             if after is not None and after != before:
-                return {"kind": "edit", "path": final, "before": before, "after": after}
+                try:
+                    mtime = os.path.getmtime(final)
+                except OSError:
+                    mtime = None
+                return {"kind": "edit", "path": final, "before": before,
+                        "after": after, "mtime": mtime}
     return None
 
 
@@ -2766,9 +2949,28 @@ def rename_to_title(path):
     return candidate
 
 
+# An external edit (another machine over Syncthing, Markor on the phone) bumps
+# the file's mtime; notoj's own post-edit normalization preserves it (os.utime).
+# So an mtime drift beyond a second means the note changed under a stored edit
+# act — replaying it would clobber that newer content, so we skip instead. The
+# guard errs toward skipping: a false skip just declines an undo, never
+# overwrites. Edit acts only; trash/loop/tags/defer apply safely as-is.
+STALE_EPS = 1.0   # seconds; absorbs the sub-second mtime truncation a normalize
+
+
+def _edit_stale(act):
+    if act.get("mtime") is None:
+        return False
+    try:
+        return abs(os.path.getmtime(act["path"]) - act["mtime"]) > STALE_EPS
+    except OSError:
+        return True   # file gone — can't apply the edit
+
+
 def undo_action(act, review=None):
     """Reverse a recorded destructive action (mutating act with live paths so a
-    later redo stays consistent). Returns the path to focus afterward, if any.
+    later redo stays consistent). Returns the path to focus afterward, or the
+    STALE sentinel when an edit's note changed underneath it.
 
     `review` is the live resurface dict; it is required to undo a "defer" action
     — snooze (z) or schedule (S) — (other kinds ignore it)."""
@@ -2793,8 +2995,14 @@ def undo_action(act, review=None):
             git_commit(f"reopen loop: {_stem(act['path'])}")
         return act["path"]
     if kind == "edit":
+        if _edit_stale(act):
+            return STALE
         atomic_write(act["path"], act["before"])
         act["path"] = rename_to_title(act["path"])
+        try:
+            act["mtime"] = os.path.getmtime(act["path"])
+        except OSError:
+            pass
         git_commit(f"undo edit: {_stem(act['path'])}")
         return act["path"]
     if kind == "tags":
@@ -2831,8 +3039,14 @@ def redo_action(act, review=None):
             git_commit(f"close loop: {_stem(act['path'])}")
         return act["path"]
     if kind == "edit":
+        if _edit_stale(act):
+            return STALE
         atomic_write(act["path"], act["after"])
         act["path"] = rename_to_title(act["path"])
+        try:
+            act["mtime"] = os.path.getmtime(act["path"])
+        except OSError:
+            pass
         git_commit(f"redo edit: {_stem(act['path'])}")
         return act["path"]
     if kind == "tags":
@@ -3644,6 +3858,16 @@ def draw(stdscr, notes, state):
         pass
     addnstr_w(stdscr, h - 1, 0, footer, w - 1, footer_attr())
 
+    # A transient prompt/warning (cross-session undo, stale-skip) takes over the
+    # footer row in amber until the next keystroke resolves or dismisses it.
+    if state.get("_flash"):
+        try:
+            stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
+        except curses.error:
+            pass
+        addnstr_w(stdscr, h - 1, 0, state["_flash"], w - 1,
+                  curses.color_pair(1) | curses.A_BOLD)
+
     if state["search_mode"] or state.get("tag_mode") or state.get("sched_mode"):
         if state.get("tag_mode"):
             cursor_col = min(len(TAG_PROMPT) + len(state["tag_input"]), w - 1)
@@ -3685,6 +3909,12 @@ def run(stdscr):
         # which an ESC+letter is gathered as a Meta/Alt chord in the filter.
         curses.set_escdelay(25)
 
+    # Restore the undo/redo stacks from previous sessions, trimming the journal
+    # first if it has grown large, then mark this session's start.
+    compact_log()
+    _undo0, _redo0 = load_undo()
+    log_event({"t": "session", "ev": "launch", "sess": SESSION_ID})
+
     state = {
         "cur": 0,
         "off": 0,
@@ -3708,8 +3938,10 @@ def run(stdscr):
         "sched_input": "",
         "_review": load_review(),
         "_loops_due": 0,
-        "_undo": [],
-        "_redo": [],
+        "_undo": _undo0,
+        "_redo": _redo0,
+        "_flash": None,         # transient amber status line (prompts/warnings)
+        "_xsess_armed": None,   # ("undo"|"redo", sess) while a cross-session prompt waits
         "_hist_path": None,
         "_hist_count": 0,
         "_hist_dirty": False,
@@ -3751,10 +3983,59 @@ def run(stdscr):
 
     def record(act):
         """Push a fresh destructive action onto the undo stack; a new action
-        invalidates the redo stack (standard undo/redo semantics)."""
+        invalidates the redo stack (standard undo/redo semantics) and is
+        journaled so it survives across sessions."""
         if act:
+            act["sess"] = SESSION_ID
             state["_undo"].append(act)
             state["_redo"] = []
+            log_event({"t": "act", "sess": SESSION_ID, "act": act})
+
+    def undo_step():
+        """Apply the top undo act. A stale note (changed underneath an edit) is
+        skipped with a flash, leaving the stacks untouched."""
+        act = state["_undo"][-1]
+        focus = undo_action(act, state["_review"])
+        if focus is STALE:
+            state["_flash"] = "note changed elsewhere since this edit — undo skipped"
+            return
+        state["_undo"].pop()
+        state["_redo"].append(act)
+        log_event({"t": "undo", "sess": SESSION_ID})
+        refresh_notes()
+        if focus:
+            state["_restore_path"] = focus
+        state["p_scroll"] = 0
+
+    def redo_step():
+        act = state["_redo"][-1]
+        focus = redo_action(act, state["_review"])
+        if focus is STALE:
+            state["_flash"] = "note changed elsewhere since this edit — redo skipped"
+            return
+        state["_redo"].pop()
+        state["_undo"].append(act)
+        log_event({"t": "redo", "sess": SESSION_ID})
+        refresh_notes()
+        if focus:
+            state["_restore_path"] = focus
+        state["p_scroll"] = 0
+
+    def xsess_prompt(direction, sess):
+        """Amber confirmation shown when undo/redo is about to cross out of this
+        session into another's changes — worded by whether that session is a
+        still-running instance or a finished previous one."""
+        if session_alive(sess):
+            return (f"next change is from another running notoj — {direction} it "
+                    f"anyway? y to confirm, any other key cancels")
+        return (f"already at the oldest change of this session — {direction} from "
+                f"a previous session? y/u to continue, any other key cancels")
+
+    def xsess_step(direction):
+        if direction == "undo" and state["_undo"]:
+            undo_step()
+        elif direction == "redo" and state["_redo"]:
+            redo_step()
 
     def open_selected(note, end=False):
         """Open `note` in Vim. An active search query is carried into Vim so the
@@ -3873,6 +4154,22 @@ def run(stdscr):
                 break
         else:
             state["_eof_spins"] = 0
+
+        # Cross-session undo/redo prompt is armed: this keystroke either
+        # confirms (y, or pressing the same undo/redo key again) or cancels
+        # (anything else). Either way it is consumed here.
+        if state["_xsess_armed"] is not None and k != -1:
+            direction, _sess = state["_xsess_armed"]
+            state["_xsess_armed"] = None
+            state["_flash"] = None
+            if k in (ord("y"), ord("Y")) or key_matches(k, KEY[direction]):
+                xsess_step(direction)
+            continue
+
+        # Any real keystroke dismisses a lingering one-shot flash before it runs
+        # its own action (the armed-prompt case above already returned).
+        if k != -1:
+            state["_flash"] = None
 
         # ----------------------------
         # Quit
@@ -4416,24 +4713,26 @@ def run(stdscr):
                 refresh_notes()
                 state["cur"] = max(0, state["cur"] - 1)
             elif state["_undo"]:
-                act = state["_undo"].pop()
-                focus = undo_action(act, state["_review"])
-                state["_redo"].append(act)
-                refresh_notes()
-                if focus:
-                    state["_restore_path"] = focus
-                state["p_scroll"] = 0
+                nxt = state["_undo"][-1]
+                foreign = nxt.get("sess") and nxt["sess"] != SESSION_ID
+                if foreign and state["_xsess_armed"] != ("undo", nxt["sess"]):
+                    state["_xsess_armed"] = ("undo", nxt["sess"])
+                    state["_flash"] = xsess_prompt("undo", nxt["sess"])
+                else:
+                    state["_xsess_armed"] = None
+                    undo_step()
 
         # redo: re-apply most-recently-undone action (Ctrl-R by default)
         elif key_matches(k, KEY["redo"]):
             if state["_redo"]:
-                act = state["_redo"].pop()
-                focus = redo_action(act, state["_review"])
-                state["_undo"].append(act)
-                refresh_notes()
-                if focus:
-                    state["_restore_path"] = focus
-                state["p_scroll"] = 0
+                nxt = state["_redo"][-1]
+                foreign = nxt.get("sess") and nxt["sess"] != SESSION_ID
+                if foreign and state["_xsess_armed"] != ("redo", nxt["sess"]):
+                    state["_xsess_armed"] = ("redo", nxt["sess"])
+                    state["_flash"] = xsess_prompt("redo", nxt["sess"])
+                else:
+                    state["_xsess_armed"] = None
+                    redo_step()
 
         # new note
         elif key_matches(k, KEY["new"]):
@@ -4547,9 +4846,20 @@ if __name__ == "__main__":
     REVIEW_FILE = os.path.join(NOTES_DIR, ".notoj_review.json")
     os.environ["NOTOJ_NOTES_DIR"] = NOTES_DIR
 
+    # Undo journal: local to this machine (NEVER the synced tree), keyed by
+    # notes dir; session id stamps each persisted action with its origin.
+    UNDO_LOG = undo_log_path()
+    SESSION_ID = f"{os.getpid()}-{int(time.time())}"
+    if config_bool("undo.persist", True):
+        try:
+            os.makedirs(os.path.dirname(UNDO_LOG), exist_ok=True)
+        except OSError:
+            pass
+
     offer_simplenote_import(NOTES_DIR)
 
     try:
         curses.wrapper(run)
     finally:
         set_cursor_style(0)  # don't leave a blinking block in the shell
+        log_event({"t": "session", "ev": "quit", "sess": SESSION_ID})

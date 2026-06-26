@@ -41,9 +41,9 @@ to import a Simplenote JSON export. Neither prompt appears again.
 `notes_dir` you can set the editor (`default_editor`, or per-tag
 `tag_editor.<tag>` — e.g. open `#arabic` notes in mlterm, `#hindi` in a GUI
 editor), toggle preview markdown rendering and Arabic-script reshaping, pick
-colors (`color.*`), and remap any key (`key.<action>`, including the `g_`
-chords). [`config.example`](config.example) documents every option with its
-default.
+colors (`color.*`), keep the undo history across sessions (`undo.persist`, on
+by default), and remap any key (`key.<action>`, including the `g_` chords).
+[`config.example`](config.example) documents every option with its default.
 
 ## Using notoj
 
@@ -61,8 +61,9 @@ full keybinding reference. The essentials:
   (notes whose `[[wikilinks]]` or `[text](note.md)` links point at the
   selected note — the same links Vim's `gf` follows). ESC steps back.
 - `h`/`H` diff or browse a note's git history; `u`/`Ctrl-r` undo/redo
-  trashes, loop-closes, tag additions, and edits; `?` shows the full key
-  reference in-app.
+  trashes, loop-closes, tag additions, and edits — and, with `undo.persist`
+  on (the default), across sessions too, prompting before it reaches into a
+  previous session's changes; `?` shows the full key reference in-app.
 
 ## Note format
 

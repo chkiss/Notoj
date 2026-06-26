@@ -24,6 +24,10 @@ curses_stub.KEY_UP = 259
 curses_stub.KEY_NPAGE = 338
 curses_stub.KEY_PPAGE = 339
 curses_stub.KEY_BACKSPACE = 263
+# Video-attribute constants referenced at module load (and inside draw code).
+for _i, _attr in enumerate(("A_NORMAL", "A_BOLD", "A_UNDERLINE", "A_REVERSE",
+                            "A_DIM", "A_ITALIC")):
+    setattr(curses_stub, _attr, 1 << _i)
 sys.modules.setdefault("curses", curses_stub)
 
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -2956,7 +2960,7 @@ class TestKeymap(unittest.TestCase):
         for section, entries in notoj.KEYMAP:
             self.assertTrue(section)
             self.assertTrue(entries)
-            for key, desc in entries:
+            for _action, key, desc in entries:
                 self.assertTrue(key, (section, desc))
                 self.assertTrue(desc, (section, key))
 
@@ -2966,7 +2970,7 @@ class TestKeymap(unittest.TestCase):
         flat = " ".join(notoj.build_help(width=80).split())
         for section, entries in notoj.KEYMAP:
             self.assertIn(" ".join(section.split()), flat)
-            for key, desc in entries:
+            for _action, key, desc in entries:
                 self.assertIn(key, flat)
                 self.assertIn(" ".join(desc.split()), flat)
 
@@ -3173,6 +3177,105 @@ class VimSearchIntegrationTests(unittest.TestCase):
         reg, line, _ = self._run(body, pat)
         self.assertEqual(reg, pat)
         self.assertEqual(line, 2)         # line holding the start of the phrase
+
+
+class TestUndoPersistence(unittest.TestCase):
+    def setUp(self):
+        self._saved_log = notoj.UNDO_LOG
+        self._saved_sess = notoj.SESSION_ID
+        self._d = tempfile.mkdtemp()
+        notoj.UNDO_LOG = os.path.join(self._d, "undo.jsonl")
+        notoj.SESSION_ID = "111-1000"
+
+    def tearDown(self):
+        notoj.UNDO_LOG = self._saved_log
+        notoj.SESSION_ID = self._saved_sess
+        shutil.rmtree(self._d, ignore_errors=True)
+
+    def _act(self, name, sess="111-1000"):
+        return {"kind": "edit", "path": f"/n/{name}.md",
+                "before": "a", "after": "b", "sess": sess}
+
+    def test_replay_reconstructs_stacks(self):
+        a, b = self._act("a"), self._act("b")
+        recs = [
+            {"t": "session", "ev": "launch"},
+            {"t": "act", "act": a},
+            {"t": "act", "act": b},
+            {"t": "undo"},                 # b -> redo
+        ]
+        undo, redo = notoj.replay_log(recs)
+        self.assertEqual(undo, [a])
+        self.assertEqual(redo, [b])
+
+    def test_action_clears_redo(self):
+        a, b, c = self._act("a"), self._act("b"), self._act("c")
+        recs = [{"t": "act", "act": a}, {"t": "act", "act": b},
+                {"t": "undo"}, {"t": "act", "act": c}]
+        undo, redo = notoj.replay_log(recs)
+        self.assertEqual(undo, [a, c])
+        self.assertEqual(redo, [])         # the new action invalidated redo
+
+    def test_journal_roundtrip(self):
+        a, b = self._act("a"), self._act("b")
+        notoj.log_event({"t": "act", "act": a})
+        notoj.log_event({"t": "act", "act": b})
+        notoj.log_event({"t": "undo"})
+        undo, redo = notoj.load_undo()
+        self.assertEqual(undo, [a])
+        self.assertEqual(redo, [b])
+
+    def test_persist_off_when_no_log(self):
+        notoj.UNDO_LOG = ""
+        self.assertFalse(notoj.undo_persist_on())
+        notoj.log_event({"t": "act", "act": self._act("a")})   # no-op, no crash
+        self.assertEqual(notoj.load_undo(), ([], []))
+
+    def test_torn_trailing_line_ignored(self):
+        notoj.log_event({"t": "act", "act": self._act("a")})
+        with open(notoj.UNDO_LOG, "a", encoding="utf-8") as f:
+            f.write('{"t": "act", "act": {"kin')   # crash mid-append, no newline
+        undo, _redo = notoj.load_undo()
+        self.assertEqual(len(undo), 1)             # the good line still loads
+
+    def test_compact_trims_to_cap(self):
+        old_cap = notoj.UNDO_LOG_CAP
+        notoj.UNDO_LOG_CAP = 5
+        try:
+            for i in range(40):
+                notoj.log_event({"t": "act", "act": self._act(str(i))})
+            with open(notoj.UNDO_LOG) as fh:
+                before_lines = len(fh.read().splitlines())
+            notoj.compact_log()
+            with open(notoj.UNDO_LOG) as fh:
+                after_lines = len(fh.read().splitlines())
+            self.assertLess(after_lines, before_lines)
+            undo, redo = notoj.load_undo()
+            self.assertEqual(len(undo), 5)
+            self.assertEqual(undo[-1]["path"], "/n/39.md")   # newest survives
+            self.assertEqual(redo, [])
+        finally:
+            notoj.UNDO_LOG_CAP = old_cap
+
+    def test_edit_stale_guard(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", dir=self._d,
+                                         delete=False) as f:
+            p = f.name
+            f.write("hi")
+        os.utime(p, (1000.0, 1000.0))
+        fresh = {"kind": "edit", "path": p, "mtime": 1000.0}
+        self.assertFalse(notoj._edit_stale(fresh))        # mtime matches
+        os.utime(p, (5000.0, 5000.0))                     # external edit
+        self.assertTrue(notoj._edit_stale(fresh))
+        gone = {"kind": "edit", "path": p + ".nope", "mtime": 1000.0}
+        self.assertTrue(notoj._edit_stale(gone))          # missing file
+        no_mtime = {"kind": "edit", "path": p}            # legacy act, no stamp
+        self.assertFalse(notoj._edit_stale(no_mtime))
+
+    def test_session_alive(self):
+        self.assertTrue(notoj.session_alive(f"{os.getpid()}-1000"))
+        self.assertFalse(notoj.session_alive("999999999-1000"))
+        self.assertFalse(notoj.session_alive("garbage"))
 
 
 if __name__ == "__main__":
