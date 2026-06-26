@@ -2460,6 +2460,17 @@ def load_tag_editors():
     return editors
 
 
+def is_vimlike(cmd):
+    """Whether the editor command takes Vim's `-c` args. notoj appends Vim-only
+    options (sourcing the gf helper, cursor placement, startinsert); a non-Vim
+    editor (emacs/gedit/nano) would mistake those for filenames, so they're
+    only added for Vim-family editors. mlvim matches via the substring."""
+    if not cmd:
+        return False
+    base = os.path.basename(cmd[0]).lower()
+    return "vim" in base or base in ("vi", "view", "ex", "nvi")
+
+
 def vim_cmd(note=None):
     """Editor command for a spawned session, resolved in order: a `tag_editor`
     entry matching one of the note's tags (e.g. `arabic` -> `mlvim`), then
@@ -2560,8 +2571,11 @@ def open_note(n, end=False, search=None):
                 before = f.read()
         except Exception:
             before = None
-    src = vim_source_args()
-    cmd = vim_cmd(n) + src + _vim_position_args(src, end, search)
+    ed = vim_cmd(n)
+    cmd = list(ed)
+    if is_vimlike(ed):
+        src = vim_source_args()
+        cmd += src + _vim_position_args(src, end, search)
     cmd.append(path)
     subprocess.call(cmd)
     if os.path.exists(path) and os.path.getmtime(path) != mtime_before:
@@ -2587,8 +2601,11 @@ def edit_trash_note(n, end=False, search=None):
     if not os.path.exists(path):
         return None
     mtime_before = os.path.getmtime(path)
-    src = vim_source_args()
-    cmd = vim_cmd(n) + src + _vim_position_args(src, end, search)
+    ed = vim_cmd(n)
+    cmd = list(ed)
+    if is_vimlike(ed):
+        src = vim_source_args()
+        cmd += src + _vim_position_args(src, end, search)
     cmd.append(path)
     suspend_curses()
     subprocess.call(cmd)
@@ -2839,7 +2856,12 @@ def new_note():
         f.write(frontmatter + "\n")
 
     suspend_curses()
-    subprocess.call(vim_cmd() + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
+    ed = vim_cmd()
+    cmd = list(ed)
+    if is_vimlike(ed):
+        cmd += vim_source_args() + ["-c", "normal G", "-c", "startinsert"]
+    cmd.append(tmp_path)
+    subprocess.call(cmd)
     return finalize_new_note(tmp_path)
 
 
@@ -2860,7 +2882,12 @@ def new_note_with_title(title_text):
         f.write(frontmatter + "\n" + title_text + "\n\n")
 
     suspend_curses()
-    subprocess.call(vim_cmd() + vim_source_args() + ["-c", "normal G", "-c", "startinsert", tmp_path])
+    ed = vim_cmd()
+    cmd = list(ed)
+    if is_vimlike(ed):
+        cmd += vim_source_args() + ["-c", "normal G", "-c", "startinsert"]
+    cmd.append(tmp_path)
+    subprocess.call(cmd)
     return finalize_new_note(tmp_path)
 
 
