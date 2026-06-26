@@ -33,9 +33,17 @@ to import a Simplenote JSON export. Neither prompt appears again.
 
 | Path | Purpose |
 |---|---|
-| `~/.config/notoj/config` | `notes_dir=...` — where your notes live |
+| `~/.config/notoj/config` | `notes_dir` plus optional editor, display, color and key-remap settings — see [`config.example`](config.example) |
 | `~/.config/notoj/omdb_key` | OMDb API key for `update_ratings.py` (or env `OMDB_API_KEY`) |
 | `NOTOJ_NOTES_DIR` (env) | Overrides the notes dir for the companion scripts |
+
+`~/.config/notoj/config` is plain `key = value` lines (`#` comments). Beyond
+`notes_dir` you can set the editor (`default_editor`, or per-tag
+`tag_editor.<tag>` — e.g. open `#arabic` notes in mlterm, `#hindi` in a GUI
+editor), toggle preview markdown rendering and Arabic-script reshaping, pick
+colors (`color.*`), and remap any key (`key.<action>`, including the `g_`
+chords). [`config.example`](config.example) documents every option with its
+default.
 
 ## Using notoj
 

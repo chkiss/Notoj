@@ -1,0 +1,102 @@
+# notoj config — copy to ~/.config/notoj/config and uncomment what you want.
+# Simple `key = value` lines. Blank lines and lines starting with '#' are
+# ignored. Booleans accept true/false/yes/no/on/off/1/0.
+#
+# notes_dir is set for you on first run (notoj prompts and saves it). Every
+# other setting below is OPTIONAL and shown with its default.
+
+# Where notes live (normally written by notoj on first run).
+# notes_dir=~/notes
+
+# ===========================================================================
+# Editor
+# ===========================================================================
+# Editor for opening/creating notes. Resolution order: a matching tag_editor
+# rule, then $NOTOJ_VIM, then default_editor, then plain `vim`. The file path
+# is appended; vim-family editors (vim/nvim/gvim/mlvim/vi) also receive
+# notoj's gf note-link helper + cursor args, other editors get only the path.
+#   default_editor = vim
+#   default_editor = nvim
+#   default_editor = emacs -nw            # terminal emacs (evil-mode via your init)
+#   default_editor = gedit --new-window -w  # GUI; --new-window -w opens a
+#                                         # separate window and blocks so the
+#                                         # edit is captured (else picked up on
+#                                         # the next 2s external-change scan)
+# default_editor=vim
+
+# Per-tag editor override: notes carrying <tag> open with <command>.
+# Format: tag_editor.<tag> = <command>  (command must forward "$@" to/accept a
+# file path). Use this to give a script its own editor/terminal:
+#
+#   tag_editor.arabic = mlvim             # mlterm window where Arabic letters
+#                                         # connect cursively. gnome-terminal/
+#                                         # VTE can't — it locks every glyph to
+#                                         # a fixed cell — so Arabic-script
+#                                         # notes route to mlterm (mlvim wrapper
+#                                         # ships in ~/.local/bin).
+#
+# Complex scripts (Indic, Syriac, …) can't be shaped in a terminal grid at
+# all — they need a HarfBuzz-backed GUI editor. Route them per-tag:
+#   tag_editor.hindi  = gvim -f                 # GUI vim; -f blocks
+#   tag_editor.syriac = gedit --new-window -w   # (needs a Syriac font, e.g.
+#                                               #  Noto Sans Syriac)
+#   tag_editor.draft  = gedit --new-window -w
+
+# ===========================================================================
+# Display
+# ===========================================================================
+# Render light markdown in the preview pane. Master switch. Default: true.
+# `code` (backticks), ~~strike~~ and # headers are always on under this.
+# render_markdown=true
+# Emphasis is opt-in per marker so code-ish text isn't mangled:
+#   markdown_asterisk          *italic* **bold** ***both***   default: true
+#   markdown_underscore_italic _italic_   (off avoids styling snake_case)  default: false
+#   markdown_underscore_bold   __bold__   (off avoids styling __dunder__)  default: false
+# markdown_asterisk=true
+# markdown_underscore_italic=false
+# markdown_underscore_bold=false
+
+# Pre-shape ARABIC-SCRIPT text to presentation forms in the TUI (list +
+# preview) so it isn't fully isolated. Covers every Arabic-script language —
+# Arabic, Urdu, Persian, Pashto, Sindhi, Uyghur, Kurdish, … Display-only, and
+# SEPARATE from the editor (see tag_editor.arabic). Arabic is the only script
+# this works for; Indic/Syriac/etc. have no presentation forms to swap to and
+# need a GUI editor instead. Default: true.
+# reshape_arabic=true
+
+# Max width (columns) of the left list panel; extra width goes to the preview.
+# Default: 80.
+# list_max_w=80
+
+# ---- Colors ----
+# Names: black red green yellow blue magenta cyan white default — or a 0-255
+# palette index on 256-color terminals.
+#   color.accent    = yellow   # titles, recent dates, markdown headers
+#   color.date      = red      # older dates
+#   color.tag       = green    # tags
+#   color.preview   = cyan     # preview body
+#   color.match     = green    # search-match highlight
+#   color.footer_bg = 239      # footer status-bar band (256-color only)
+
+# ===========================================================================
+# Key remapping
+# ===========================================================================
+# Rebind a single-key action: key.<action> = <key>. A <key> is one character,
+# a name (enter / tab / space / esc), or Ctrl-<letter>. This is a TRUE remap —
+# the default key stops working unless you also bind it somewhere. The ? screen
+# and --help reflect whatever you set. Pick keys that don't collide (first
+# match in dispatch order wins). Actions, grouped as on the ? screen:
+#   Notes:    open(Enter)  open_end(e)  new(n)  trash(d)  undo(u)  redo(Ctrl-r)
+#   Search:   search(/)
+#   Sorting:  sort(s)  sort_reverse(r)
+#   Tags:     tag(#)  tag_repeat(.)  tag_filter(t)  tag_browse(T)
+#   Loops:    snooze(z)  schedule(S)  loop_done(x)
+#   Views:    backlinks(b)  help(?)
+#   Other:    hist_diff(h)  hist_browse(H)  conflict(c)  quit(q)
+# Two-key chords rebind to another TWO-key chord (value = the two characters):
+#   Chords:   goto_top(gg)  dups_view(gd)  trash_view(gt)  resurface(gr)
+# Don't bind a single-key action to a chord's first key (the chord wins).
+# Examples:
+#   key.quit = Q
+#   key.new = i
+#   key.resurface = gl     # use 'g l' instead of 'g r' to open loops
