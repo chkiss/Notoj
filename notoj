@@ -3997,7 +3997,7 @@ def run(stdscr):
         act = state["_undo"][-1]
         focus = undo_action(act, state["_review"])
         if focus is STALE:
-            state["_flash"] = "note changed elsewhere since this edit — undo skipped"
+            state["_flash"] = "undo skipped — note changed elsewhere since this edit"
             return
         state["_undo"].pop()
         state["_redo"].append(act)
@@ -4011,7 +4011,7 @@ def run(stdscr):
         act = state["_redo"][-1]
         focus = redo_action(act, state["_review"])
         if focus is STALE:
-            state["_flash"] = "note changed elsewhere since this edit — redo skipped"
+            state["_flash"] = "redo skipped — note changed elsewhere since this edit"
             return
         state["_redo"].pop()
         state["_undo"].append(act)
@@ -4024,12 +4024,14 @@ def run(stdscr):
     def xsess_prompt(direction, sess):
         """Amber confirmation shown when undo/redo is about to cross out of this
         session into another's changes — worded by whether that session is a
-        still-running instance or a finished previous one."""
-        if session_alive(sess):
-            return (f"next change is from another running notoj — {direction} it "
-                    f"anyway? y to confirm, any other key cancels")
-        return (f"already at the oldest change of this session — {direction} from "
-                f"a previous session? y/u to continue, any other key cancels")
+        still-running instance or a finished previous one. The actionable keys
+        lead so they survive truncation on a narrow terminal (the line is
+        clipped, never scrolled). "press again" covers both the undo (u) and
+        redo (Ctrl-r) keys without naming a remappable binding, and matches the
+        resolver, which confirms on y or the same key and cancels on any other."""
+        where = ("another running notoj's change" if session_alive(sess)
+                 else "a previous session's change")
+        return f"press again or y to {direction}, any other key cancels  ·  {where}"
 
     def xsess_step(direction):
         if direction == "undo" and state["_undo"]:
