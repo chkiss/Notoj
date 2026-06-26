@@ -152,6 +152,65 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 LRM = "\u200e"
 
 # ----------------------------
+# Config (~/.config/notoj/config) \u2014 simple `key = value` lines, # comments.
+# ----------------------------
+
+_config_cache = None
+
+
+def _read_config():
+    """Parse the config file into a {key: value} dict (cached). Lines are
+    `key = value`; blank lines and those starting with `#` are ignored."""
+    global _config_cache
+    if _config_cache is None:
+        _config_cache = {}
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if not s or s.startswith("#") or "=" not in s:
+                        continue
+                    k, v = s.split("=", 1)
+                    _config_cache[k.strip()] = v.strip()
+        except FileNotFoundError:
+            pass
+    return _config_cache
+
+
+def config_get(key, default=None):
+    v = _read_config().get(key)
+    return default if v is None else v
+
+
+def config_bool(key, default=False):
+    v = config_get(key)
+    return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Single-key actions the user may rebind via `key.<action> = <char>`; the value
+# is the keycode the built-in dispatch already checks for. Multi-key chords
+# (gg/gt/gd/gr) and Enter are intentionally not remappable.
+REMAPPABLE = {
+    "new": ord("n"), "search": ord("/"), "sort": ord("s"),
+    "sort_reverse": ord("r"), "edit_end": ord("e"), "tag": ord("#"),
+    "tag_filter": ord("t"), "tag_browse": ord("T"), "backlinks": ord("b"),
+    "trash": ord("d"), "undo": ord("u"), "redo": 18, "help": ord("?"),
+    "quit": ord("q"),
+}
+
+
+def load_keymap():
+    """Build a {pressed_keycode: canonical_keycode} map from `key.<action>`
+    config lines, so a custom key also triggers a built-in action. Only
+    single printable keys; the action's default key keeps working too."""
+    km = {}
+    for action, canon in REMAPPABLE.items():
+        v = config_get("key." + action)
+        if v and len(v.strip()) == 1:
+            km[ord(v.strip())] = canon
+    return km
+
+# ----------------------------
 # Time utils
 # ----------------------------
 
@@ -2381,13 +2440,9 @@ endif
 _vim_helper_path = None
 
 
-_tag_editors = None
-
-
 def load_tag_editors():
-    """Parse `tag_editor.<tag> = <command>` lines from the notoj config into a
-    {tag: command} map, letting a note open in a custom editor/terminal based
-    on its tags. Example config line:
+    """{tag: command} from `tag_editor.<tag> = <command>` config lines, letting
+    a note open in a custom editor/terminal based on its tags. Example:
 
         tag_editor.arabic = mlvim
 
@@ -2395,30 +2450,21 @@ def load_tag_editors():
     cursively — gnome-terminal/VTE can't, it locks every glyph to a fixed
     cell). The mapped command receives the usual vim args (sourced helper,
     cursor position, file path) appended, so it must be a vim launcher that
-    forwards "$@" to vim. Cached after first read."""
-    global _tag_editors
-    if _tag_editors is None:
-        _tag_editors = {}
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("tag_editor.") and "=" in line:
-                        key, val = line.split("=", 1)
-                        tag = key[len("tag_editor."):].strip().lower()
-                        cmd = val.strip()
-                        if tag and cmd:
-                            _tag_editors[tag] = cmd
-        except FileNotFoundError:
-            pass
-    return _tag_editors
+    forwards "$@" to vim."""
+    editors = {}
+    for key, val in _read_config().items():
+        if key.startswith("tag_editor.") and val:
+            tag = key[len("tag_editor."):].strip().lower()
+            if tag:
+                editors[tag] = val
+    return editors
 
 
 def vim_cmd(note=None):
-    """Editor command for a spawned session. If the note carries a tag mapped
-    in the config's `tag_editor.<tag>` entries, use that command (e.g. tag
-    `arabic` -> `mlvim`). Otherwise fall back to $NOTOJ_VIM, then plain `vim`.
-    shlex-split so multi-word commands work."""
+    """Editor command for a spawned session, resolved in order: a `tag_editor`
+    entry matching one of the note's tags (e.g. `arabic` -> `mlvim`), then
+    $NOTOJ_VIM, then the `default_editor` config, then plain `vim`. shlex-split
+    so multi-word commands work."""
     if note is not None:
         editors = load_tag_editors()
         if editors:
@@ -2426,7 +2472,9 @@ def vim_cmd(note=None):
                 cmd = editors.get(str(tag).strip().lower())
                 if cmd:
                     return shlex.split(cmd)
-    return shlex.split(os.environ.get("NOTOJ_VIM", "").strip() or "vim")
+    return shlex.split(os.environ.get("NOTOJ_VIM", "").strip()
+                       or config_get("default_editor", "").strip()
+                       or "vim")
 
 
 def vim_source_args():
@@ -2827,7 +2875,10 @@ SORTS = ["title", "created", "modified"]
 
 MIN_W_ERROR   = 20   # below this: show error, refuse to draw
 MIN_PREVIEW_W = 20   # collapse preview when it would be narrower than this
-LIST_MAX_W    = 80   # cap list panel here; extra space goes to preview
+try:
+    LIST_MAX_W = int(config_get("list_max_w") or 80)  # cap list panel; rest -> preview
+except ValueError:
+    LIST_MAX_W = 80
 # List columns: title (0, 28w) | 2sp | date (30, 16w) | 1sp | ago (47) | 2sp | tags
 COL_DATE = 30
 COL_AGO  = 47
@@ -2985,6 +3036,8 @@ try:
     })
 
     def _reshape(s):
+        if not config_bool("reshape_arabic", True):
+            return s
         for ch in s:
             o = ord(ch)
             if (0x600 <= o <= 0x6ff or 0x750 <= o <= 0x77f
@@ -3053,6 +3106,95 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens)
         col += w
         rem -= w
         pos = mi + len(tok)
+
+
+# --- Markdown preview styling -----------------------------------------------
+# Light inline rendering for the preview pane (display-only — the file is never
+# touched). Markers are dropped; the spanned text takes a curses attribute:
+#   # Heading   -> bold + amber        **bold** / ***both***  -> bold (+italic)
+#   *italic*    -> italic              `code`                 -> reverse video
+#   ~~strike~~  -> combining overlay (real strikethrough; curses has no attr)
+# Only asterisk emphasis is honored (not _underscores_) so snake_case and
+# __dunder__ identifiers in code/text aren't accidentally styled. curses
+# A_ITALIC is recent; fall back to underline where it's absent.
+MD_ITALIC = getattr(curses, "A_ITALIC", curses.A_UNDERLINE)
+MD_STRIKE = "̶"
+MD_HEADER = re.compile(r"(#{1,6})\s+(.*)$")
+MD_INLINE = re.compile(
+    r"(?P<code>`[^`]+`)"
+    r"|(?P<bi>\*\*\*[^*]+?\*\*\*)"
+    r"|(?P<b>\*\*[^*]+?\*\*)"
+    r"|(?P<s>~~[^~]+?~~)"
+    r"|(?P<i>\*[^*\s][^*]*?\*)"
+)
+
+
+def _md_entries(raw, base_attr):
+    """Parse one preview line into [(logical_char, draw_string, attr)]. The
+    logical char drives token-search matching and width; the draw string is
+    what's painted (identical, except struck chars carry a combining overlay)."""
+    m = MD_HEADER.match(raw)
+    if m:
+        a = base_attr | curses.A_BOLD | curses.color_pair(1)
+        return [(c, c, a) for c in m.group(2)]
+    out = []
+    pos = 0
+    for mt in MD_INLINE.finditer(raw):
+        if mt.start() > pos:
+            out += [(c, c, base_attr) for c in raw[pos:mt.start()]]
+        g, s = mt.lastgroup, mt.group()
+        strike = False
+        if g == "code":
+            inner, a = s[1:-1], base_attr | curses.A_REVERSE
+        elif g == "bi":
+            inner, a = s[3:-3], base_attr | curses.A_BOLD | MD_ITALIC
+        elif g == "b":
+            inner, a = s[2:-2], base_attr | curses.A_BOLD
+        elif g == "s":
+            inner, a, strike = s[2:-2], base_attr, True
+        else:
+            inner, a = s[1:-1], base_attr | MD_ITALIC
+        out += [(c, (c + MD_STRIKE) if strike else c, a) for c in inner]
+        pos = mt.end()
+    if pos < len(raw):
+        out += [(c, c, base_attr) for c in raw[pos:]]
+    return out
+
+
+def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi_attr, tokens):
+    """Like draw_line_highlighted but renders inline markdown; token matches
+    still win, overriding the markdown attribute on the matched run."""
+    entries = _md_entries(raw, base_attr)
+    if not entries:
+        return
+    if tokens:
+        logical = "".join(e[0] for e in entries).lower()
+        hot = [False] * len(entries)
+        for tok in tokens:
+            if not tok:
+                continue
+            start = 0
+            while True:
+                idx = logical.find(tok, start)
+                if idx == -1:
+                    break
+                for j in range(idx, idx + len(tok)):
+                    hot[j] = True
+                start = idx + len(tok)
+        entries = [(e[0], e[1], hi_attr if hot[k] else e[2])
+                   for k, e in enumerate(entries)]
+    col, rem, i, n = x, max_w, 0, len(entries)
+    while i < n and rem > 0:
+        attr = entries[i][2]
+        j = i
+        while j < n and entries[j][2] == attr:
+            j += 1
+        seg = "".join(e[1] for e in entries[i:j])
+        addnstr_w(stdscr, y, col, seg, rem, attr)
+        w = disp_width(seg)
+        col += w
+        rem -= w
+        i = j
 
 
 # ----------------------------
@@ -3286,13 +3428,16 @@ def draw(stdscr, notes, state):
 
             start = state["p_scroll"]
             end = start + h - 2
+            render_md = config_bool("render_markdown", True)
 
             for i, line in enumerate(lines[start:end]):
                 if i >= h - 2:
                     break
 
                 safe = line.expandtabs(4).replace("\n", "")
-                draw_line_highlighted(
+                draw_body = (draw_markdown_line if render_md
+                            else draw_line_highlighted)
+                draw_body(
                     stdscr, i + 1, mid + 1, safe, preview_w,
                     curses.color_pair(4),
                     curses.color_pair(5) | curses.A_BOLD,
@@ -3379,6 +3524,7 @@ def run(stdscr):
     git_init()
     curses.curs_set(0)
     init_colors()
+    keymap = load_keymap()   # optional `key.<action>` rebindings (empty if none)
     stdscr.timeout(2000)
     if hasattr(curses, "set_escdelay"):
         # Keep bare ESC snappy (default is up to 1s) and bound the window in
@@ -3573,6 +3719,12 @@ def run(stdscr):
                 break
         else:
             state["_eof_spins"] = 0
+
+        # Optional key remap (`key.<action>` config). Command context only —
+        # never while typing into the search / tag / schedule input fields.
+        if k != -1 and not state["tag_mode"] and not state["sched_mode"] \
+                and not state["search_mode"]:
+            k = keymap.get(k, k)
 
         # ----------------------------
         # Quit
@@ -4163,17 +4315,12 @@ def run(stdscr):
 
 
 def load_notes_dir():
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("notes_dir="):
-                    return os.path.expanduser(line.split("=", 1)[1].strip())
-    except FileNotFoundError:
-        pass
-    return None
+    v = config_get("notes_dir")
+    return os.path.expanduser(v) if v else None
 
 
 def save_notes_dir(path):
+    global _config_cache
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     # Preserve any other config lines (e.g. tag_editor.* rules); only replace
     # the notes_dir line.
@@ -4188,6 +4335,7 @@ def save_notes_dir(path):
     lines.append(f"notes_dir={path}\n")
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         f.writelines(lines)
+    _config_cache = None   # written file differs from any cached parse
 
 
 def prompt_notes_dir(current=None):
