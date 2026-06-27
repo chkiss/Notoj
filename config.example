@@ -97,7 +97,7 @@
 # than edges — the extra is "older than the last edge". A short color list
 # reuses its last entry. Defaults (256-color only):
 #   date_gradient       = 1h,3h,6h,12h,1d,1w,1mo,1y
-#   color.date_gradient = 230,223,216,209,208,173,167,102,240
+#   color.date_gradient = 230,223,40,10,11,208,202,102,240
 
 # ===========================================================================
 # Undo

@@ -3320,7 +3320,7 @@ def _cfg_color(key, default):
 # (the extra is the "older than the last edge" bucket). Both override via
 # config (date_gradient / color.date_gradient); 256-color terminals only.
 DATE_GRADIENT_SPANS = "1h,3h,6h,12h,1d,1w,1mo,1y"
-DATE_GRADIENT_COLORS = "230,223,216,209,208,173,167,102,240"
+DATE_GRADIENT_COLORS = "230,223,40,10,11,208,202,102,240"
 DATE_RECENT_SECS = 3600     # fallback "recent" cut-off without a 256-color ramp
 
 _date_gradient = None       # [(max_age_secs | None, attr), …] ascending; built in init_colors
