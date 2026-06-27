@@ -733,6 +733,22 @@ def suspend_curses():
     curses.endwin()
 
 
+def launch(cmd):
+    """Run an interactive external command (the editor, vimdiff) after
+    suspend_curses(). Returns True, or False if the program isn't installed —
+    recording its name in launch.missing so the caller can report it on the
+    status bar instead of crashing out of the TUI with the screen suspended."""
+    try:
+        subprocess.call(cmd)
+        return True
+    except (FileNotFoundError, PermissionError) as e:
+        launch.missing = f"{cmd[0]}: {e.strerror}" if cmd else "editor not found"
+        return False
+
+
+launch.missing = None
+
+
 def file_snapshot(directory):
     """Map of path -> (mtime, size). Size is included so writes that preserve
     mtime on purpose — tagging from the list keeps the modified date — are
@@ -2047,7 +2063,7 @@ def open_vimdiff_at(path, commit_hash):
         tmp = f.name
     try:
         suspend_curses()
-        subprocess.call(["vimdiff", tmp, path])
+        launch(["vimdiff", tmp, path])
     finally:
         os.unlink(tmp)
 
@@ -2060,8 +2076,9 @@ def open_hist_last(n):
     )
     hashes = [h for h in r.stdout.strip().splitlines() if h]
     if len(hashes) < 2:
-        return
+        return False
     open_vimdiff_at(n["path"], hashes[1])
+    return True
 
 
 MODAL_QUIT = object()
@@ -2480,9 +2497,11 @@ def resolve_conflict(original, conflict):
                    cwd=NOTES_DIR, capture_output=True)
     suspend_curses()
     if os.path.exists(original):
-        subprocess.call(["vimdiff", original, conflict])
+        if not launch(["vimdiff", original, conflict]):
+            return   # editor missing — leave both files for a later retry
     else:
-        subprocess.call(vim_cmd() + [conflict])
+        if not launch(vim_cmd() + [conflict]):
+            return
         if os.path.exists(conflict):
             os.rename(conflict, original)
             conflict = None
@@ -2836,7 +2855,7 @@ def open_note(n, end=False, search=None):
         src = vim_source_args()
         cmd += src + _vim_position_args(src, end, search)
     cmd.append(path)
-    subprocess.call(cmd)
+    launch(cmd)   # a missing editor leaves mtime unchanged → no restore below
     if os.path.exists(path) and os.path.getmtime(path) != mtime_before:
         final = check_rename(n) or path
         git_commit(f"edit: {title(n)}")
@@ -2872,7 +2891,7 @@ def edit_trash_note(n, end=False, search=None):
         cmd += src + _vim_position_args(src, end, search)
     cmd.append(path)
     suspend_curses()
-    subprocess.call(cmd)
+    launch(cmd)   # a missing editor leaves mtime unchanged → returns None below
     if not os.path.exists(path) or os.path.getmtime(path) == mtime_before:
         return None
     restored = do_restore(path, os.path.join(NOTES_DIR, os.path.basename(path)))
@@ -3156,7 +3175,12 @@ def new_note():
     if is_vimlike(ed):
         cmd += vim_source_args() + ["-c", "normal G", "-c", "startinsert"]
     cmd.append(tmp_path)
-    subprocess.call(cmd)
+    if not launch(cmd):
+        try:
+            os.remove(tmp_path)   # editor missing — don't leave a stub note
+        except OSError:
+            pass
+        return None
     return finalize_new_note(tmp_path)
 
 
@@ -3182,7 +3206,12 @@ def new_note_with_title(title_text):
     if is_vimlike(ed):
         cmd += vim_source_args() + ["-c", "normal G", "-c", "startinsert"]
     cmd.append(tmp_path)
-    subprocess.call(cmd)
+    if not launch(cmd):
+        try:
+            os.remove(tmp_path)   # editor missing — don't leave a stub note
+        except OSError:
+            pass
+        return None
     return finalize_new_note(tmp_path)
 
 
@@ -4191,6 +4220,14 @@ def run(stdscr):
         h, w = stdscr.getmaxyx()
         clamp_scroll(state, filtered, h)
 
+        # An editor/vimdiff launch failed because the program isn't installed:
+        # surface it on the bar (the launch was swallowed, not crashed). Checked
+        # here, before the draw, so it shows even when the triggering handler
+        # ended in `continue` (e.g. creating a note from the search box).
+        if launch.missing:
+            push_msg(f"can't launch {launch.missing} — check default_editor / tag_editor")
+            launch.missing = None
+
         # The status bar only rotates when its pooled messages can't all fit on
         # one line at the current width; when they fit they're shown whole and
         # statically (no rotation, no fast-poll).
@@ -4806,6 +4843,8 @@ def run(stdscr):
                 else:
                     state["_xsess_armed"] = None
                     undo_step()
+            elif not state["trash_mode"]:
+                push_msg("nothing to undo")
 
         # redo: re-apply most-recently-undone action (Ctrl-R by default)
         elif key_matches(k, KEY["redo"]):
@@ -4817,6 +4856,8 @@ def run(stdscr):
                 else:
                     state["_xsess_armed"] = None
                     redo_step()
+            else:
+                push_msg("nothing to redo")
 
         # new note
         elif key_matches(k, KEY["new"]):
@@ -4835,10 +4876,13 @@ def run(stdscr):
                 original, conflict = conflicts[0]
                 resolve_conflict(original, conflict)
                 refresh_notes()
+            else:
+                push_msg("no conflicts to resolve")
 
         # history
         elif key_matches(k, KEY["hist_diff"]) and filtered:
-            open_hist_last(filtered[state["cur"]])
+            if not open_hist_last(filtered[state["cur"]]):
+                push_msg("no earlier version of this note")
             refresh_notes()
 
         elif key_matches(k, KEY["hist_browse"]) and filtered:

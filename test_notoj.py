@@ -3310,5 +3310,24 @@ class TestPoolMsg(unittest.TestCase):
                          "(2/2) b")
 
 
+class TestLaunch(unittest.TestCase):
+    def setUp(self):
+        notoj.launch.missing = None
+
+    def test_success_returns_true_and_clears_nothing(self):
+        self.assertTrue(notoj.launch(["true"]))
+        self.assertIsNone(notoj.launch.missing)
+
+    def test_missing_program_returns_false_and_records_name(self):
+        self.assertFalse(notoj.launch(["notoj-no-such-editor-xyz"]))
+        self.assertIn("notoj-no-such-editor-xyz", notoj.launch.missing)
+
+    def test_nonzero_exit_is_not_a_launch_failure(self):
+        # The program ran (exit 1); that's the editor's business, not a missing
+        # binary — launch reports success so no false "can't launch" message.
+        self.assertTrue(notoj.launch(["false"]))
+        self.assertIsNone(notoj.launch.missing)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
