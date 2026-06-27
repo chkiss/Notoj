@@ -3858,10 +3858,15 @@ def draw(stdscr, notes, state):
     else:
         tokens = q_str.lower().split() if q_str else []
 
+    # When sorted by creation date, the date and (age) columns track
+    # creationDate instead of modificationDate — forward and reverse alike, with
+    # the same format and recency color.
+    date_field = "creationDate" if state.get("sort") == "created" else "modificationDate"
+
     # Tags align in one column, 2 spaces past the widest date+relative-date
     # among the rows on screen (not the whole list), and appear as soon as a
     # single column of them fits.
-    ago_strs = [f"({ago(n.get('modificationDate'))})" for n in visible]
+    ago_strs = [f"({ago(n.get(date_field))})" for n in visible]
     if show_ago:
         block_end = COL_AGO + max((len(a) for a in ago_strs), default=0)
     else:
@@ -3877,7 +3882,7 @@ def draw(stdscr, notes, state):
         y = i + 1
 
         attr_title = curses.color_pair(1)
-        attr_date = date_attr(n.get("modificationDate"), now_ts)
+        attr_date = date_attr(n.get(date_field), now_ts)
         attr_tag = curses.color_pair(3)
 
         selected = (i == state["cur"] - state["off"])
@@ -3900,7 +3905,7 @@ def draw(stdscr, notes, state):
                 pass
 
         if show_date:
-            m = fmt(n.get("modificationDate"))
+            m = fmt(n.get(date_field))
             # +1 budget so the zero-width LRM doesn't clip the last char.
             stdscr.addnstr(y, COL_DATE, LRM + m, min(1 + len(m), list_w - COL_DATE), attr_date)
 
