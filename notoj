@@ -3258,6 +3258,7 @@ def confirm_screen(stdscr, lines):
 
 
 _footer_band = False   # set in init_colors when the terminal can tint the bar
+_message_band = False  # set in init_colors when the status/alert bar can be tinted
 
 
 _COLOR_NAMES = {"black": 0, "red": 1, "green": 2, "yellow": 3, "blue": 4,
@@ -3281,13 +3282,14 @@ def _cfg_color(key, default):
 
 
 def init_colors():
-    global _footer_band
+    global _footer_band, _message_band
     curses.start_color()
     curses.use_default_colors()
 
     amber = 214 if curses.COLORS >= 256 else curses.COLOR_YELLOW
+    accent = _cfg_color("color.accent", amber)
     # accent = titles, recent dates, markdown headers
-    curses.init_pair(1, _cfg_color("color.accent", amber), -1)
+    curses.init_pair(1, accent, -1)
     curses.init_pair(2, _cfg_color("color.date", curses.COLOR_RED), -1)
     curses.init_pair(3, _cfg_color("color.tag", curses.COLOR_GREEN), -1)
     curses.init_pair(4, _cfg_color("color.preview", curses.COLOR_CYAN), -1)
@@ -3296,8 +3298,18 @@ def init_colors():
     # Footer status bar: default fg over a gray band, distinct enough to read
     # as the screen's bottom edge so every row above it can hold content.
     if curses.COLORS >= 256:
-        curses.init_pair(10, -1, _cfg_color("color.footer_bg", 239))
+        footer_bg = _cfg_color("color.footer_bg", 239)
+        curses.init_pair(10, -1, footer_bg)
         _footer_band = True
+
+        # Status / alert message bar (cross-session undo prompts, stale-skip
+        # notices). Default is the inverse of the title look — the accent and
+        # footer-band colors swapped, so amber text on default becomes default
+        # text on an amber band — a clear highlighted alert. Both ends override.
+        msg_fg = _cfg_color("color.message_fg", footer_bg)
+        msg_bg = _cfg_color("color.message_bg", accent)
+        curses.init_pair(11, msg_fg, msg_bg)
+        _message_band = True
 
 
 def footer_attr():
@@ -3306,6 +3318,15 @@ def footer_attr():
     if _footer_band:
         return curses.color_pair(10)
     return curses.A_REVERSE
+
+
+def message_attr():
+    """Attr for the status/alert message bar — an amber band with the inverse
+    text by default (see init_colors), set via color.message_fg/_bg; reverse
+    video without 256 colors so it still stands apart from the footer."""
+    if _message_band:
+        return curses.color_pair(11) | curses.A_BOLD
+    return curses.A_REVERSE | curses.A_BOLD
 
 
 def fit_hints(segments, width):
@@ -3885,12 +3906,12 @@ def draw(stdscr, notes, state):
     # footer row in amber until the next keystroke resolves or dismisses it.
     msg = pool_msg(state, w - 1)
     if msg:
+        attr = message_attr()
         try:
-            stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
+            stdscr.hline(h - 1, 0, ord(" ") | attr, w)
         except curses.error:
             pass
-        addnstr_w(stdscr, h - 1, 0, msg, w - 1,
-                  curses.color_pair(1) | curses.A_BOLD)
+        addnstr_w(stdscr, h - 1, 0, msg, w - 1, attr)
 
     if state["search_mode"] or state.get("tag_mode") or state.get("sched_mode"):
         if state.get("tag_mode"):

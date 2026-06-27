@@ -85,6 +85,12 @@
 #   color.preview   = cyan     # preview body
 #   color.match     = green    # search-match highlight
 #   color.footer_bg = 239      # footer status-bar band (256-color only)
+# Status/alert bar — the amber band that shows cross-session undo prompts and
+# stale-skip notices. Defaults to the inverse of the title look (the accent
+# and footer-band colors swapped: default-fg text on an amber band). Override
+# either end (256-color only):
+#   color.message_fg = 239     # alert-bar text  (default: color.footer_bg)
+#   color.message_bg = 214     # alert-bar band  (default: color.accent)
 
 # ===========================================================================
 # Undo
