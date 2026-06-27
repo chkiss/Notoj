@@ -91,6 +91,13 @@
 # either end (256-color only):
 #   color.message_fg = 239     # alert-bar text  (default: color.footer_bg)
 #   color.message_bg = 214     # alert-bar band  (default: color.accent)
+# Modified-date recency gradient — the date and (age) columns fade from
+# warm/bright (just edited) to dim grey (old). date_gradient is the bucket
+# edges, ascending (units h d w mo y); color.date_gradient is one MORE color
+# than edges — the extra is "older than the last edge". A short color list
+# reuses its last entry. Defaults (256-color only):
+#   date_gradient       = 1h,3h,6h,12h,1d,1w,1mo,1y
+#   color.date_gradient = 230,223,216,209,208,173,167,102,240
 
 # ===========================================================================
 # Undo

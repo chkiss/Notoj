@@ -3294,10 +3294,9 @@ _COLOR_NAMES = {"black": 0, "red": 1, "green": 2, "yellow": 3, "blue": 4,
                 "magenta": 5, "cyan": 6, "white": 7, "default": -1, "none": -1}
 
 
-def _cfg_color(key, default):
-    """Resolve a `color.*` config value to a curses color number: a name
-    (red/green/…/default) or a 0-255 palette index. Falls back to `default`."""
-    v = config_get(key)
+def _color_value(v, default):
+    """Resolve a color token — a name (red/green/…/default) or a 0-255 palette
+    index — to a curses color number. Falls back to `default`."""
     if not v:
         return default
     v = v.strip().lower()
@@ -3310,8 +3309,38 @@ def _cfg_color(key, default):
     return default
 
 
+def _cfg_color(key, default):
+    """Resolve a `color.*` config value to a curses color number."""
+    return _color_value(config_get(key), default)
+
+
+# Modified-date recency gradient: the date / relative-date columns fade from
+# warm-bright (just edited) to dim grey (old). DATE_GRADIENT_SPANS are the
+# bucket edges, ascending; DATE_GRADIENT_COLORS holds one MORE than the edges
+# (the extra is the "older than the last edge" bucket). Both override via
+# config (date_gradient / color.date_gradient); 256-color terminals only.
+DATE_GRADIENT_SPANS = "1h,3h,6h,12h,1d,1w,1mo,1y"
+DATE_GRADIENT_COLORS = "230,223,216,209,208,173,167,102,240"
+DATE_RECENT_SECS = 3600     # fallback "recent" cut-off without a 256-color ramp
+
+_date_gradient = None       # [(max_age_secs | None, attr), …] ascending; built in init_colors
+
+
+def parse_span(s):
+    """A recency-bucket duration in seconds, or None. Units: h(our), d(ay),
+    w(eek), mo(nth)=30d, y(ear)=365d — e.g. '1h', '12h', '3d', '2w', '1mo'."""
+    m = re.fullmatch(r'\s*(\d+(?:\.\d+)?)\s*'
+                     r'(h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks'
+                     r'|mo|mon|month|months|y|yr|year|years)\s*',
+                     (s or "").lower())
+    if not m:
+        return None
+    secs = {"h": 3600, "d": 86400, "w": 604800, "m": 2592000, "y": 31536000}
+    return float(m.group(1)) * secs[m.group(2)[0]]   # only 'month' starts with m
+
+
 def init_colors():
-    global _footer_band, _message_band
+    global _footer_band, _message_band, _date_gradient
     curses.start_color()
     curses.use_default_colors()
 
@@ -3340,6 +3369,22 @@ def init_colors():
         curses.init_pair(11, msg_fg, msg_bg)
         _message_band = True
 
+        # Modified-date recency gradient. One bucket per edge plus a final
+        # "older" bucket, so len(colors) should be len(spans)+1; a short color
+        # list reuses its last entry, a long one is truncated.
+        spans = sorted({s for s in (parse_span(t) for t in
+                        config_get("date_gradient", DATE_GRADIENT_SPANS).split(",")) if s})
+        cols = [c for c in (c.strip() for c in
+                config_get("color.date_gradient", DATE_GRADIENT_COLORS).split(",")) if c]
+        if not cols:
+            cols = DATE_GRADIENT_COLORS.split(",")
+        gradient = []
+        for i in range(len(spans) + 1):
+            curses.init_pair(20 + i, _color_value(cols[min(i, len(cols) - 1)], 240), -1)
+            gradient.append((spans[i] if i < len(spans) else None,
+                             curses.color_pair(20 + i)))
+        _date_gradient = gradient
+
 
 def footer_attr():
     """Attr for the footer bar (row h-1): gray band, or reverse video — the
@@ -3356,6 +3401,20 @@ def message_attr():
     if _message_band:
         return curses.color_pair(11) | curses.A_BOLD
     return curses.A_REVERSE | curses.A_BOLD
+
+
+def date_attr(ts, now):
+    """Curses attr for a modification timestamp, from the recency gradient
+    (warm/bright = fresh → dim grey = old). Falls back to the binary
+    accent/date colors where the 256-color gradient isn't available."""
+    if not _date_gradient:
+        recent = ts and (now - float(ts)) < DATE_RECENT_SECS
+        return curses.color_pair(1) if recent else curses.color_pair(2)
+    age = now - float(ts or 0)
+    for thresh, attr in _date_gradient:
+        if thresh is None or age < thresh:
+            return attr
+    return _date_gradient[-1][1]
 
 
 def fit_hints(segments, width):
@@ -3813,11 +3872,12 @@ def draw(stdscr, notes, state):
     # LEFT PANE
     # ----------------------------
 
+    now_ts = datetime.now().timestamp()
     for i, n in enumerate(visible):
         y = i + 1
 
         attr_title = curses.color_pair(1)
-        attr_date = curses.color_pair(1) if is_recent(n) else curses.color_pair(2)
+        attr_date = date_attr(n.get("modificationDate"), now_ts)
         attr_tag = curses.color_pair(3)
 
         selected = (i == state["cur"] - state["off"])

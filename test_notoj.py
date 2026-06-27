@@ -28,6 +28,7 @@ curses_stub.KEY_BACKSPACE = 263
 for _i, _attr in enumerate(("A_NORMAL", "A_BOLD", "A_UNDERLINE", "A_REVERSE",
                             "A_DIM", "A_ITALIC")):
     setattr(curses_stub, _attr, 1 << _i)
+curses_stub.color_pair = lambda n: n << 8   # distinct int per pair, for | attrs
 sys.modules.setdefault("curses", curses_stub)
 
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -3327,6 +3328,52 @@ class TestLaunch(unittest.TestCase):
         # binary — launch reports success so no false "can't launch" message.
         self.assertTrue(notoj.launch(["false"]))
         self.assertIsNone(notoj.launch.missing)
+
+
+class TestParseSpan(unittest.TestCase):
+    def test_units(self):
+        self.assertEqual(notoj.parse_span("1h"), 3600)
+        self.assertEqual(notoj.parse_span("12h"), 12 * 3600)
+        self.assertEqual(notoj.parse_span("1d"), 86400)
+        self.assertEqual(notoj.parse_span("1w"), 7 * 86400)
+        self.assertEqual(notoj.parse_span("1mo"), 30 * 86400)
+        self.assertEqual(notoj.parse_span("1y"), 365 * 86400)
+
+    def test_spellings_and_whitespace(self):
+        self.assertEqual(notoj.parse_span(" 3 days "), 3 * 86400)
+        self.assertEqual(notoj.parse_span("2weeks"), 14 * 86400)
+        self.assertEqual(notoj.parse_span("6 hours"), 6 * 3600)
+
+    def test_default_spans_all_parse_and_ascend(self):
+        secs = [notoj.parse_span(t) for t in notoj.DATE_GRADIENT_SPANS.split(",")]
+        self.assertNotIn(None, secs)
+        self.assertEqual(secs, sorted(secs))
+        # one more default color than there are edges (the "older" bucket)
+        self.assertEqual(len(notoj.DATE_GRADIENT_COLORS.split(",")), len(secs) + 1)
+
+    def test_bad_input(self):
+        for bad in ("", "abc", "5", "1m", "h"):   # bare number / minutes / unitless
+            self.assertIsNone(notoj.parse_span(bad))
+
+
+class TestDateAttr(unittest.TestCase):
+    def test_picks_bucket_by_age(self):
+        # sentinel attrs so we can assert which bucket was chosen
+        notoj._date_gradient = [(3600, "fresh"), (86400, "day"), (None, "old")]
+        try:
+            now = 1_000_000.0
+            self.assertEqual(notoj.date_attr(now - 60, now), "fresh")     # 1 min
+            self.assertEqual(notoj.date_attr(now - 7200, now), "day")     # 2 h
+            self.assertEqual(notoj.date_attr(now - 200000, now), "old")   # >1 day
+            self.assertEqual(notoj.date_attr(0, now), "old")             # undated
+        finally:
+            notoj._date_gradient = None
+
+    def test_fallback_without_gradient(self):
+        notoj._date_gradient = None
+        now = 1_000_000.0
+        self.assertEqual(notoj.date_attr(now - 60, now), curses_stub.color_pair(1))
+        self.assertEqual(notoj.date_attr(now - 99999, now), curses_stub.color_pair(2))
 
 
 if __name__ == "__main__":
