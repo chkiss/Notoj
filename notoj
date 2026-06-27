@@ -3657,6 +3657,22 @@ def clamp_scroll(state, filtered, height):
 # Drawing
 # ----------------------------
 
+MSG_ROTATE_SECS = 1.6   # how long each pooled status message shows before the
+                        # one-line bar rotates to the next (only when n > 1)
+
+
+def pool_msg(state):
+    """Render the status bar from its message pool: a lone message shows bare;
+    two or more get an (i/n) prefix and are cycled one at a time (rotation
+    happens on the idle tick) so nothing is truncated or wrapped off the line."""
+    pool = state.get("_msg_pool") or []
+    if not pool:
+        return None
+    i = state.get("_msg_idx", 0) % len(pool)
+    prefix = f"({i + 1}/{len(pool)}) " if len(pool) > 1 else ""
+    return prefix + pool[i]
+
+
 def draw(stdscr, notes, state):
     stdscr.erase()
 
@@ -3860,12 +3876,13 @@ def draw(stdscr, notes, state):
 
     # A transient prompt/warning (cross-session undo, stale-skip) takes over the
     # footer row in amber until the next keystroke resolves or dismisses it.
-    if state.get("_flash"):
+    msg = pool_msg(state)
+    if msg:
         try:
             stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
         except curses.error:
             pass
-        addnstr_w(stdscr, h - 1, 0, state["_flash"], w - 1,
+        addnstr_w(stdscr, h - 1, 0, msg, w - 1,
                   curses.color_pair(1) | curses.A_BOLD)
 
     if state["search_mode"] or state.get("tag_mode") or state.get("sched_mode"):
@@ -3940,7 +3957,12 @@ def run(stdscr):
         "_loops_due": 0,
         "_undo": _undo0,
         "_redo": _redo0,
-        "_flash": None,         # transient amber status line (prompts/warnings)
+        # One-line amber status bar. Distinct messages for the current action
+        # are pooled (deduped) and rotated through the single line with an
+        # (i/n) counter rather than truncated or wrapped — see pool_msg().
+        "_msg_pool": [],
+        "_msg_idx": 0,
+        "_msg_rot": 0.0,        # monotonic time of the last rotation
         "_xsess_armed": None,   # ("undo"|"redo", sess) while a cross-session prompt waits
         "_hist_path": None,
         "_hist_count": 0,
@@ -3981,6 +4003,20 @@ def run(stdscr):
         if state["dup_mode"] is not None:
             state["dup_mode"] = state["_dups"]
 
+    def push_msg(*texts):
+        """Add status line(s) to the bar's pool for the current action, deduped.
+        Several distinct messages share the one line and rotate (see pool_msg)
+        rather than overwrite each other or overflow — so a long prompt is split
+        into parts that cycle, never truncated."""
+        for text in texts:
+            if text and text not in state["_msg_pool"]:
+                state["_msg_pool"].append(text)
+        state["_msg_rot"] = time.monotonic()   # show the new message a full beat
+
+    def clear_msgs():
+        state["_msg_pool"] = []
+        state["_msg_idx"] = 0
+
     def record(act):
         """Push a fresh destructive action onto the undo stack; a new action
         invalidates the redo stack (standard undo/redo semantics) and is
@@ -3993,11 +4029,11 @@ def run(stdscr):
 
     def undo_step():
         """Apply the top undo act. A stale note (changed underneath an edit) is
-        skipped with a flash, leaving the stacks untouched."""
+        skipped with a message, leaving the stacks untouched."""
         act = state["_undo"][-1]
         focus = undo_action(act, state["_review"])
         if focus is STALE:
-            state["_flash"] = "undo skipped — note changed elsewhere since this edit"
+            push_msg("undo skipped — note changed elsewhere since this edit")
             return
         state["_undo"].pop()
         state["_redo"].append(act)
@@ -4011,7 +4047,7 @@ def run(stdscr):
         act = state["_redo"][-1]
         focus = redo_action(act, state["_review"])
         if focus is STALE:
-            state["_flash"] = "redo skipped — note changed elsewhere since this edit"
+            push_msg("redo skipped — note changed elsewhere since this edit")
             return
         state["_redo"].pop()
         state["_undo"].append(act)
@@ -4021,17 +4057,22 @@ def run(stdscr):
             state["_restore_path"] = focus
         state["p_scroll"] = 0
 
-    def xsess_prompt(direction, sess):
-        """Amber confirmation shown when undo/redo is about to cross out of this
-        session into another's changes — worded by whether that session is a
-        still-running instance or a finished previous one. The actionable keys
-        lead so they survive truncation on a narrow terminal (the line is
-        clipped, never scrolled). "press again" covers both the undo (u) and
-        redo (Ctrl-r) keys without naming a remappable binding, and matches the
-        resolver, which confirms on y or the same key and cancels on any other."""
-        where = ("another running notoj's change" if session_alive(sess)
-                 else "a previous session's change")
-        return f"press again or y to {direction}, any other key cancels  ·  {where}"
+    def xsess_arm(direction, sess):
+        """Arm the cross-session confirmation and pool its message. The prompt is
+        pushed as two parts — the situation and the controls — so on a narrow
+        terminal they rotate through the bar instead of the single long line
+        being clipped. Worded by whether the other session is a still-running
+        instance or a finished previous one."""
+        state["_xsess_armed"] = (direction, sess)
+        clear_msgs()
+        if session_alive(sess):
+            push_msg(f"next change is from another running notoj — {direction} "
+                     f"it anyway?",
+                     "y to confirm, any other key cancels")
+        else:
+            push_msg(f"already at the oldest change of this session — {direction} "
+                     f"from a previous session?",
+                     "y/u to continue, any other key cancels")
 
     def xsess_step(direction):
         if direction == "undo" and state["_undo"]:
@@ -4138,9 +4179,11 @@ def run(stdscr):
 
         draw(stdscr, filtered, state)
 
-        # Poll quickly only while a history lookup is pending (so the hint
-        # appears soon after you stop); otherwise idle at the slow scan cadence.
-        stdscr.timeout(120 if state["_hist_dirty"] else 2000)
+        # Poll quickly while a history lookup is pending (so the hint appears
+        # soon after you stop) or while several status messages are rotating
+        # through the bar; otherwise idle at the slow scan cadence.
+        stdscr.timeout(120 if state["_hist_dirty"]
+                       else (400 if len(state["_msg_pool"]) > 1 else 2000))
         t_wait = time.monotonic()
         k = stdscr.getch()
 
@@ -4163,21 +4206,29 @@ def run(stdscr):
         if state["_xsess_armed"] is not None and k != -1:
             direction, _sess = state["_xsess_armed"]
             state["_xsess_armed"] = None
-            state["_flash"] = None
+            clear_msgs()
             if k in (ord("y"), ord("Y")) or key_matches(k, KEY[direction]):
                 xsess_step(direction)
             continue
 
-        # Any real keystroke dismisses a lingering one-shot flash before it runs
-        # its own action (the armed-prompt case above already returned).
+        # Any real keystroke starts a new action: clear the pooled messages from
+        # the previous one before this key runs (the armed-prompt case above
+        # already returned).
         if k != -1:
-            state["_flash"] = None
+            clear_msgs()
 
         # ----------------------------
         # Quit
         # ----------------------------
 
         if k == -1:
+            # Rotate the status bar to the next pooled message once its beat
+            # elapses, wrapping around (only matters when more than one).
+            pool = state["_msg_pool"]
+            if len(pool) > 1 and time.monotonic() - state["_msg_rot"] >= MSG_ROTATE_SECS:
+                state["_msg_idx"] = (state["_msg_idx"] + 1) % len(pool)
+                state["_msg_rot"] = time.monotonic()
+
             # Settled on a note: now safe to compute its history count (cached).
             if state["_hist_dirty"]:
                 state["_hist_dirty"] = False
@@ -4718,8 +4769,7 @@ def run(stdscr):
                 nxt = state["_undo"][-1]
                 foreign = nxt.get("sess") and nxt["sess"] != SESSION_ID
                 if foreign and state["_xsess_armed"] != ("undo", nxt["sess"]):
-                    state["_xsess_armed"] = ("undo", nxt["sess"])
-                    state["_flash"] = xsess_prompt("undo", nxt["sess"])
+                    xsess_arm("undo", nxt["sess"])
                 else:
                     state["_xsess_armed"] = None
                     undo_step()
@@ -4730,8 +4780,7 @@ def run(stdscr):
                 nxt = state["_redo"][-1]
                 foreign = nxt.get("sess") and nxt["sess"] != SESSION_ID
                 if foreign and state["_xsess_armed"] != ("redo", nxt["sess"]):
-                    state["_xsess_armed"] = ("redo", nxt["sess"])
-                    state["_flash"] = xsess_prompt("redo", nxt["sess"])
+                    xsess_arm("redo", nxt["sess"])
                 else:
                     state["_xsess_armed"] = None
                     redo_step()

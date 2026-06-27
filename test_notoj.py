@@ -3278,5 +3278,28 @@ class TestUndoPersistence(unittest.TestCase):
         self.assertFalse(notoj.session_alive("garbage"))
 
 
+class TestPoolMsg(unittest.TestCase):
+    def test_empty(self):
+        self.assertIsNone(notoj.pool_msg({"_msg_pool": [], "_msg_idx": 0}))
+        self.assertIsNone(notoj.pool_msg({}))
+
+    def test_single_message_is_bare(self):
+        self.assertEqual(notoj.pool_msg({"_msg_pool": ["hello"], "_msg_idx": 0}),
+                         "hello")
+
+    def test_multiple_get_counter_prefix(self):
+        pool = ["one", "two", "three"]
+        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 0}),
+                         "(1/3) one")
+        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 2}),
+                         "(3/3) three")
+
+    def test_idx_wraps(self):
+        pool = ["a", "b"]
+        # idx past the end wraps via modulo (rotation never indexes out of range)
+        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 3}),
+                         "(2/2) b")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
