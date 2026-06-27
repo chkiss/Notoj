@@ -3658,19 +3658,26 @@ def clamp_scroll(state, filtered, height):
 # ----------------------------
 
 MSG_ROTATE_SECS = 1.6   # how long each pooled status message shows before the
-                        # one-line bar rotates to the next (only when n > 1)
+                        # one-line bar rotates to the next (only when rotating)
+MSG_JOIN = "  ·  "      # separator when the whole pool fits on one line
 
 
-def pool_msg(state):
-    """Render the status bar from its message pool: a lone message shows bare;
-    two or more get an (i/n) prefix and are cycled one at a time (rotation
-    happens on the idle tick) so nothing is truncated or wrapped off the line."""
+def pool_msg(state, width=None):
+    """Render the status bar from its message pool. When the messages all fit
+    on the line they are shown whole, joined on one row with no counter. Only
+    when that would overflow `width` do they fall back to cycling one at a time
+    with an (i/n) prefix (rotation happens on the idle tick) — so nothing is
+    ever truncated or wrapped off the line. A lone message always shows bare."""
     pool = state.get("_msg_pool") or []
     if not pool:
         return None
+    if len(pool) == 1:
+        return pool[0]
+    joined = MSG_JOIN.join(pool)
+    if width is None or disp_width(joined) <= width:
+        return joined
     i = state.get("_msg_idx", 0) % len(pool)
-    prefix = f"({i + 1}/{len(pool)}) " if len(pool) > 1 else ""
-    return prefix + pool[i]
+    return f"({i + 1}/{len(pool)}) {pool[i]}"
 
 
 def draw(stdscr, notes, state):
@@ -3876,7 +3883,7 @@ def draw(stdscr, notes, state):
 
     # A transient prompt/warning (cross-session undo, stale-skip) takes over the
     # footer row in amber until the next keystroke resolves or dismisses it.
-    msg = pool_msg(state)
+    msg = pool_msg(state, w - 1)
     if msg:
         try:
             stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
@@ -4160,8 +4167,14 @@ def run(stdscr):
             else:
                 state["cur"] = 0
 
-        h, _ = stdscr.getmaxyx()
+        h, w = stdscr.getmaxyx()
         clamp_scroll(state, filtered, h)
+
+        # The status bar only rotates when its pooled messages can't all fit on
+        # one line at the current width; when they fit they're shown whole and
+        # statically (no rotation, no fast-poll).
+        _pool = state["_msg_pool"]
+        rotating = len(_pool) > 1 and disp_width(MSG_JOIN.join(_pool)) > (w - 1)
 
         # History (the "h/H hist" hint) is a ~100ms `git log --follow`, so don't
         # run it while moving — it would stall j/k. Use the cached count if we
@@ -4183,7 +4196,7 @@ def run(stdscr):
         # soon after you stop) or while several status messages are rotating
         # through the bar; otherwise idle at the slow scan cadence.
         stdscr.timeout(120 if state["_hist_dirty"]
-                       else (400 if len(state["_msg_pool"]) > 1 else 2000))
+                       else (400 if rotating else 2000))
         t_wait = time.monotonic()
         k = stdscr.getch()
 
@@ -4223,10 +4236,9 @@ def run(stdscr):
 
         if k == -1:
             # Rotate the status bar to the next pooled message once its beat
-            # elapses, wrapping around (only matters when more than one).
-            pool = state["_msg_pool"]
-            if len(pool) > 1 and time.monotonic() - state["_msg_rot"] >= MSG_ROTATE_SECS:
-                state["_msg_idx"] = (state["_msg_idx"] + 1) % len(pool)
+            # elapses, wrapping around (only while it can't be shown whole).
+            if rotating and time.monotonic() - state["_msg_rot"] >= MSG_ROTATE_SECS:
+                state["_msg_idx"] = (state["_msg_idx"] + 1) % len(state["_msg_pool"])
                 state["_msg_rot"] = time.monotonic()
 
             # Settled on a note: now safe to compute its history count (cached).

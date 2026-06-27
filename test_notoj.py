@@ -3287,17 +3287,26 @@ class TestPoolMsg(unittest.TestCase):
         self.assertEqual(notoj.pool_msg({"_msg_pool": ["hello"], "_msg_idx": 0}),
                          "hello")
 
-    def test_multiple_get_counter_prefix(self):
+    def test_joined_whole_when_it_fits(self):
         pool = ["one", "two", "three"]
-        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 0}),
+        # Plenty of width: shown whole on one line, joined, no counter.
+        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 0}, 80),
+                         "one" + notoj.MSG_JOIN + "two" + notoj.MSG_JOIN + "three")
+        # No width given: also whole (the loop passes a width; this is a guard).
+        self.assertNotIn("(1/3)", notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 0}))
+
+    def test_rotates_with_counter_when_too_narrow(self):
+        pool = ["one", "two", "three"]
+        # Width too small for the joined form: fall back to (i/n) rotation.
+        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 0}, 8),
                          "(1/3) one")
-        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 2}),
+        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 2}, 8),
                          "(3/3) three")
 
     def test_idx_wraps(self):
         pool = ["a", "b"]
         # idx past the end wraps via modulo (rotation never indexes out of range)
-        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 3}),
+        self.assertEqual(notoj.pool_msg({"_msg_pool": pool, "_msg_idx": 3}, 1),
                          "(2/2) b")
 
 
