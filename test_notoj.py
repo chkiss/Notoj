@@ -24,6 +24,10 @@ curses_stub.KEY_UP = 259
 curses_stub.KEY_NPAGE = 338
 curses_stub.KEY_PPAGE = 339
 curses_stub.KEY_BACKSPACE = 263
+curses_stub.KEY_LEFT = 260
+curses_stub.KEY_RIGHT = 261
+curses_stub.KEY_HOME = 262
+curses_stub.KEY_END = 360
 # Video-attribute constants referenced at module load (and inside draw code).
 for _i, _attr in enumerate(("A_NORMAL", "A_BOLD", "A_UNDERLINE", "A_REVERSE",
                             "A_DIM", "A_ITALIC")):
@@ -847,6 +851,138 @@ class TestWordBoundary(unittest.TestCase):
     def test_forward_from_end_is_len(self):
         s = "abc"
         self.assertEqual(notoj.word_boundary(s, len(s), forward=True), len(s))
+
+
+# ---------------------------------------------------------------------------
+# EditBuffer — the one readline field behind every text input
+# ---------------------------------------------------------------------------
+
+def _feed(queued=()):
+    """Zero-arg getch stand-in: queued ints in order, then -1 (idle)."""
+    q = list(queued)
+    return lambda: q.pop(0) if q else -1
+
+
+class TestEditBuffer(unittest.TestCase):
+    def buf(self, text, pos=None):
+        b = notoj.EditBuffer(text)
+        if pos is not None:
+            b.pos = pos
+        return b
+
+    def test_insert_ascii(self):
+        b = self.buf("")
+        self.assertEqual(b.handle_key(ord("h"), _feed()), "changed")
+        self.assertEqual(b.handle_key(ord("i"), _feed()), "changed")
+        self.assertEqual((b.text, b.pos), ("hi", 2))
+
+    def test_insert_mid_string(self):
+        b = self.buf("hd", pos=1)
+        b.handle_key(ord("a"), _feed())
+        self.assertEqual((b.text, b.pos), ("had", 2))
+
+    def test_insert_utf8_multibyte(self):
+        ch = "ب"
+        lead, cont = ch.encode("utf-8")
+        b = self.buf("")
+        self.assertEqual(b.handle_key(lead, _feed([cont])), "changed")
+        self.assertEqual(b.text, ch)
+
+    def test_backspace_mid_string(self):
+        b = self.buf("abc", pos=2)
+        self.assertEqual(b.handle_key(127, _feed()), "changed")
+        self.assertEqual((b.text, b.pos), ("ac", 1))
+
+    def test_backspace_at_start_moves_only(self):
+        b = self.buf("abc", pos=0)
+        self.assertEqual(b.handle_key(127, _feed()), "moved")
+        self.assertEqual(b.text, "abc")
+
+    def test_ctrl_d_deletes_under_cursor(self):
+        b = self.buf("abc", pos=1)
+        self.assertEqual(b.handle_key(4, _feed()), "changed")
+        self.assertEqual((b.text, b.pos), ("ac", 1))
+
+    def test_ctrl_w_deletes_word_back(self):
+        b = self.buf("hello world")
+        self.assertEqual(b.handle_key(23, _feed()), "changed")
+        self.assertEqual((b.text, b.pos), ("hello ", 6))
+
+    def test_ctrl_u_deletes_to_start(self):
+        b = self.buf("hello world", pos=6)
+        self.assertEqual(b.handle_key(21, _feed()), "changed")
+        self.assertEqual((b.text, b.pos), ("world", 0))
+
+    def test_ctrl_k_deletes_to_end(self):
+        b = self.buf("hello world", pos=5)
+        self.assertEqual(b.handle_key(11, _feed()), "changed")
+        self.assertEqual((b.text, b.pos), ("hello", 5))
+
+    def test_cursor_motions(self):
+        b = self.buf("abc")
+        b.handle_key(curses_stub.KEY_LEFT, _feed())
+        self.assertEqual(b.pos, 2)
+        b.handle_key(1, _feed())      # Ctrl-a / Home
+        self.assertEqual(b.pos, 0)
+        b.handle_key(6, _feed())      # Ctrl-f / →
+        self.assertEqual(b.pos, 1)
+        b.handle_key(5, _feed())      # Ctrl-e / End
+        self.assertEqual(b.pos, 3)
+
+    def test_alt_b_f_word_motions(self):
+        b = self.buf("hello world")
+        self.assertEqual(b.handle_key(27, _feed(), peek=_feed([ord("b")])), "moved")
+        self.assertEqual(b.pos, 6)
+        self.assertEqual(b.handle_key(27, _feed(), peek=_feed([ord("f")])), "moved")
+        self.assertEqual(b.pos, 11)
+
+    def test_alt_d_deletes_word_ahead(self):
+        b = self.buf("hello world", pos=6)
+        self.assertEqual(b.handle_key(27, _feed(), peek=_feed([ord("d")])), "changed")
+        self.assertEqual(b.text, "hello ")
+
+    def test_alt_backspace_deletes_word_back(self):
+        b = self.buf("hello world")
+        self.assertEqual(b.handle_key(27, _feed(), peek=_feed([127])), "changed")
+        self.assertEqual((b.text, b.pos), ("hello ", 6))
+
+    def test_bare_esc_cancels(self):
+        b = self.buf("abc")
+        self.assertEqual(b.handle_key(27, _feed(), peek=_feed()), "cancel")
+
+    def test_enter_submits(self):
+        self.assertEqual(self.buf("abc").handle_key(10, _feed()), "submit")
+        self.assertEqual(self.buf("abc").handle_key(13, _feed()), "submit")
+
+    def test_unconsumed_key_returns_none(self):
+        # Up/Down aren't editing keys: the caller navigates its list on them.
+        b = self.buf("abc")
+        self.assertIsNone(b.handle_key(curses_stub.KEY_UP, _feed()))
+        self.assertIsNone(b.handle_key(curses_stub.KEY_DOWN, _feed()))
+        self.assertEqual(b.text, "abc")
+
+
+class TestFilterIndices(unittest.TestCase):
+    ITEMS = ["alpha", "beta", "alphabet", "gamma"]
+
+    @staticmethod
+    def match(it, ql):
+        return ql in it.lower()
+
+    def test_empty_query_is_identity(self):
+        self.assertEqual(notoj.filter_indices(self.ITEMS, self.match, ""),
+                         [0, 1, 2, 3])
+
+    def test_filtered_positions_map_to_originals(self):
+        idx = notoj.filter_indices(self.ITEMS, self.match, "alpha")
+        self.assertEqual(idx, [0, 2])
+        self.assertEqual([self.ITEMS[i] for i in idx], ["alpha", "alphabet"])
+
+    def test_case_insensitive(self):
+        self.assertEqual(notoj.filter_indices(self.ITEMS, self.match, "BETA"), [1])
+
+    def test_no_match_empty(self):
+        self.assertEqual(notoj.filter_indices(self.ITEMS, self.match, "zzz"), [])
 
 
 # ---------------------------------------------------------------------------

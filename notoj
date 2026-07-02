@@ -3782,22 +3782,28 @@ NAV_KEYS = {ord("j"), ord("k"), ord("G"),
             4, 21, 6, 2}   # Ctrl-d, Ctrl-u, Ctrl-f, Ctrl-b
 
 
-def typed_char(stdscr, k):
+def typed_char_getch(getch, k):
     """The text a printable keypress contributes to an input field, or None if
     `k` isn't printable. getch() delivers a multibyte UTF-8 character one byte
     at a time, so a lead byte (0xC0..0xF7) pulls its continuation bytes and the
     whole codepoint is decoded — that's what lets Arabic, accents and emoji be
-    typed into the search / tag / schedule fields."""
+    typed into the search / tag / schedule fields. `getch` is a zero-arg
+    callable so EditBuffer (and tests) can supply input without a screen."""
     if 32 <= k <= 126:
         return chr(k)
     if 0xC0 <= k <= 0xF7:
         extra = 1 + (k >= 0xE0) + (k >= 0xF0)   # bytes that follow the lead
-        buf = bytes([k] + [stdscr.getch() & 0xFF for _ in range(extra)])
+        buf = bytes([k] + [getch() & 0xFF for _ in range(extra)])
         try:
             return buf.decode("utf-8")
         except UnicodeDecodeError:
             return None
     return None
+
+
+def typed_char(stdscr, k):
+    """typed_char_getch bound to a curses screen (the historical interface)."""
+    return typed_char_getch(stdscr.getch, k)
 
 
 def word_boundary(s, pos, forward):
@@ -3818,6 +3824,121 @@ def word_boundary(s, pos, forward):
         while i > 0 and not s[i - 1].isspace():
             i -= 1
     return i
+
+
+class EditBuffer:
+    """One readline-style single-line text field for every input in the app —
+    the note search, the modal views' "/" filter, and the tag / schedule
+    prompts — so editing behaves identically everywhere and a new input is a
+    few lines, not a re-implementation.
+
+    State is `text` plus an insertion cursor `pos`. handle_key(k, getch, peek)
+    consumes one keypress and returns:
+      "submit"   Enter
+      "cancel"   bare ESC (no Meta follow-up)
+      "changed"  text mutated (callers re-filter / reset their list)
+      "moved"    only the cursor moved
+      None       key not ours (caller decides: nav, mode keys, ...)
+
+    `getch` is a zero-arg callable supplying the bytes after a UTF-8 lead;
+    `peek` (defaults to getch) supplies the ESC follow-up byte and should
+    return -1 when nothing is pending — curses callers wrap a short
+    timeout around stdscr.getch, tests feed lists. Curses-free by design."""
+
+    def __init__(self, text=""):
+        self.text = text
+        self.pos = len(text)
+
+    def handle_key(self, k, getch, peek=None):
+        q, p = self.text, self.pos
+
+        if k == 27:  # ESC — bare ESC cancels; ESC+letter is a Meta (Alt) chord.
+            nxt = (peek or getch)()
+            if nxt in (ord("b"), ord("B")):        # Alt-b — back one word
+                self.pos = word_boundary(q, p, forward=False)
+                return "moved"
+            if nxt in (ord("f"), ord("F")):        # Alt-f — forward one word
+                self.pos = word_boundary(q, p, forward=True)
+                return "moved"
+            if nxt in (ord("d"), ord("D")):        # Alt-d — delete word ahead
+                end = word_boundary(q, p, forward=True)
+                if end > p:
+                    self.text = q[:p] + q[end:]
+                    return "changed"
+                return "moved"
+            if nxt in (curses.KEY_BACKSPACE, 127, 8):  # Alt-⌫ — delete word back
+                start = word_boundary(q, p, forward=False)
+                if start < p:
+                    self.text = q[:start] + q[p:]
+                    self.pos = start
+                    return "changed"
+                return "moved"
+            # Nothing followed (-1) = bare ESC. A stray non-Meta key is
+            # dropped; ESC's cancel takes precedence.
+            return "cancel"
+
+        if k in (10, 13):
+            return "submit"
+
+        if k in (curses.KEY_LEFT, 2):              # ← / Ctrl-b
+            self.pos = max(0, p - 1)
+            return "moved"
+        if k in (curses.KEY_RIGHT, 6):             # → / Ctrl-f
+            self.pos = min(len(q), p + 1)
+            return "moved"
+        if k in (curses.KEY_HOME, 1):              # Home / Ctrl-a
+            self.pos = 0
+            return "moved"
+        if k in (curses.KEY_END, 5):               # End / Ctrl-e
+            self.pos = len(q)
+            return "moved"
+
+        if k in (curses.KEY_BACKSPACE, 127, 8):    # ⌫ — delete char before cursor
+            if p > 0:
+                self.text = q[:p - 1] + q[p:]
+                self.pos = p - 1
+                return "changed"
+            return "moved"
+        if k == 4:                                 # Ctrl-d — delete char under cursor
+            if p < len(q):
+                self.text = q[:p] + q[p + 1:]
+                return "changed"
+            return "moved"
+        if k == 23:                                # Ctrl-w — delete word back
+            start = word_boundary(q, p, forward=False)
+            if start < p:
+                self.text = q[:start] + q[p:]
+                self.pos = start
+                return "changed"
+            return "moved"
+        if k == 21:                                # Ctrl-u — delete to line start
+            if p > 0:
+                self.text = q[p:]
+                self.pos = 0
+                return "changed"
+            return "moved"
+        if k == 11:                                # Ctrl-k — delete to line end
+            if p < len(q):
+                self.text = q[:p]
+                return "changed"
+            return "moved"
+
+        ch = typed_char_getch(getch, k)
+        if ch:
+            self.text = q[:p] + ch + q[p:]
+            self.pos = p + len(ch)
+            return "changed"
+        return None
+
+
+def filter_indices(items, match, q):
+    """Positions in `items` whose element matches the lowercased query — the
+    index map behind every "/" list filter, so a filtered cursor position
+    can always be traced back to the original item. Empty query = identity."""
+    ql = q.lower()
+    if not ql:
+        return list(range(len(items)))
+    return [i for i, it in enumerate(items) if match(it, ql)]
 
 
 def nav_delta(k, page_h):
