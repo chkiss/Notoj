@@ -3894,15 +3894,16 @@ def draw(stdscr, notes, state):
 
         hi_title = curses.color_pair(5) | (curses.A_REVERSE if selected else 0)
         title_w = min(28, list_w)
+        # Fill the whole title column with the row's attribute first so the
+        # focus highlight always spans the full column, regardless of any
+        # drift between computed and actual on-screen glyph width (e.g.
+        # Unicode "Ambiguous"-width characters like em dash).
+        try:
+            stdscr.addnstr(y, 0, " " * title_w, title_w, attr_title)
+        except curses.error:
+            pass
         t_clip = clip_to_width(t, title_w)
         draw_line_highlighted(stdscr, y, 0, t_clip, title_w, attr_title, hi_title, tokens)
-        drawn_w = disp_width(t_clip)
-        pad = title_w - drawn_w
-        if pad > 0:
-            try:
-                stdscr.addnstr(y, drawn_w, " " * pad, pad, attr_title)
-            except curses.error:
-                pass
 
         if show_date:
             m = fmt(n.get(date_field))
