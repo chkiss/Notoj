@@ -4268,10 +4268,18 @@ def draw(stdscr, notes, state):
         addnstr_w(stdscr, h - 1, 0, msg, w - 1, attr)
 
     if state["search_mode"] or state.get("tag_mode") or state.get("sched_mode"):
+        def buf_pos(key):
+            # Insertion-cursor column within a prompt's text: the EditBuffer's
+            # pos when its text is current, else end-of-text (buffer not yet
+            # created, or the mirror was reset elsewhere).
+            buf = state.get("_buf_" + key)
+            ok = buf is not None and buf.text == state[key]
+            return buf.pos if ok else len(state[key])
+
         if state.get("tag_mode"):
-            cursor_col = min(len(TAG_PROMPT) + len(state["tag_input"]), w - 1)
+            cursor_col = min(len(TAG_PROMPT) + buf_pos("tag_input"), w - 1)
         elif state.get("sched_mode"):
-            cursor_col = min(len(SCHED_PROMPT) + len(state["sched_input"]), w - 1)
+            cursor_col = min(len(SCHED_PROMPT) + buf_pos("sched_input"), w - 1)
         else:
             # Place the cursor right after the query in the live "filter:" field,
             # wherever it sits in this view's header (notes / trash / dup / loops).
@@ -4486,6 +4494,23 @@ def run(stdscr):
     last_scan = time.monotonic()   # throttles the external-change / conflict scan
     SCAN_EVERY = 2.0
 
+    def esc_peek():
+        # ESC follow-up byte for EditBuffer's Alt chords: a real Alt-key sends
+        # ESC and the letter back-to-back, so it's already buffered after
+        # set_escdelay; look with a short window (the loop resets the timeout
+        # each iteration).
+        stdscr.timeout(25)
+        return stdscr.getch()
+
+    def prompt_buf(state, key):
+        # The EditBuffer behind a prompt (search / tag / schedule), stored in
+        # state and re-created whenever the mirrored text was reset elsewhere,
+        # so external `state[key] = ""` resets keep working unchanged.
+        buf = state.get("_buf_" + key)
+        if buf is None or buf.text != state[key]:
+            buf = state["_buf_" + key] = EditBuffer(state[key])
+        return buf
+
     while True:
         # Pick up terminal resizes live: ncurses won't refresh getmaxyx() on
         # its own between key presses, so poll the real size and resize when it
@@ -4669,11 +4694,15 @@ def run(stdscr):
         # ----------------------------
 
         elif state["tag_mode"]:
-            if k == 27:  # ESC — cancel
+            buf = prompt_buf(state, "tag_input")
+            r = buf.handle_key(k, stdscr.getch, esc_peek)
+            state["tag_input"] = buf.text
+
+            if r == "cancel":
                 state["tag_mode"] = False
                 state["tag_input"] = ""
 
-            elif k in [10, 13]:  # Enter — apply
+            elif r == "submit":
                 if filtered and 0 <= state["cur"] < len(filtered):
                     note = filtered[state["cur"]]
                     new_tags = parse_tag_input(state["tag_input"])
@@ -4689,14 +4718,6 @@ def run(stdscr):
                 state["tag_mode"] = False
                 state["tag_input"] = ""
 
-            elif k in [curses.KEY_BACKSPACE, 127, 8]:
-                state["tag_input"] = state["tag_input"][:-1]
-
-            else:
-                ch = typed_char(stdscr, k)
-                if ch:
-                    state["tag_input"] += ch
-
             continue
 
         # ----------------------------
@@ -4704,11 +4725,15 @@ def run(stdscr):
         # ----------------------------
 
         elif state["sched_mode"]:
-            if k == 27:  # ESC — cancel
+            buf = prompt_buf(state, "sched_input")
+            r = buf.handle_key(k, stdscr.getch, esc_peek)
+            state["sched_input"] = buf.text
+
+            if r == "cancel":
                 state["sched_mode"] = False
                 state["sched_input"] = ""
 
-            elif k in [10, 13]:  # Enter — apply
+            elif r == "submit":
                 if filtered and 0 <= state["cur"] < len(filtered):
                     note = filtered[state["cur"]]
                     due = parse_when(state["sched_input"])
@@ -4722,14 +4747,6 @@ def run(stdscr):
                         refresh_notes()
                 state["sched_mode"] = False
                 state["sched_input"] = ""
-
-            elif k in [curses.KEY_BACKSPACE, 127, 8]:
-                state["sched_input"] = state["sched_input"][:-1]
-
-            else:
-                ch = typed_char(stdscr, k)
-                if ch:
-                    state["sched_input"] += ch
 
             continue
 
@@ -4804,10 +4821,7 @@ def run(stdscr):
             # truth for the rest of the app (draw, order_notes, external
             # resets), mirrored from the buffer after each key. Sync in first,
             # in case q was reset elsewhere since the last keypress.
-            buf = state.get("_qbuf")
-            if buf is None or buf.text != state["q"]:
-                buf = state["_qbuf"] = EditBuffer(state["q"])
-                buf.pos = min(state.get("q_pos", len(buf.text)), len(buf.text))
+            buf = prompt_buf(state, "q")
 
             if k == curses.KEY_DOWN:
                 state["cur"] += 1
@@ -4818,15 +4832,7 @@ def run(stdscr):
                 state["p_scroll"] = 0
                 continue
 
-            def peek():
-                # ESC follow-up byte for Alt chords: a real Alt-key sends ESC
-                # and the letter back-to-back, so it's already buffered after
-                # set_escdelay; look with a short window (the loop resets the
-                # timeout next iteration).
-                stdscr.timeout(25)
-                return stdscr.getch()
-
-            r = buf.handle_key(k, stdscr.getch, peek)
+            r = buf.handle_key(k, stdscr.getch, esc_peek)
             state["q"] = buf.text
             state["q_pos"] = buf.pos
 
