@@ -82,6 +82,11 @@
 #   stored    leave as written in the file
 # tag_display_order=freq
 
+# Lines PgDn/PgUp scroll a preview pane (notes body, history diff, tag /
+# backlink previews — one knob for all). "page" scrolls a full pane height;
+# a positive integer scrolls that many lines. Default: page.
+preview_scroll = page
+
 # Max width (columns) of the left list panel; extra width goes to the preview.
 # Default: 80.
 # list_max_w=80

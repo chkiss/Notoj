@@ -2157,6 +2157,14 @@ def modal_list(stdscr, view):
       cur                                -> initial cursor index (default 0)
       search                             -> {"items": fn, "match": fn}: give
                                             the view a "/" filter (see below)
+      preview_lines(sel)                 -> total line count of the preview
+                                            for original index `sel`; when
+                                            present the scaffold owns PgDn/
+                                            PgUp preview scrolling (offset in
+                                            st["p_off"], step from the
+                                            preview_scroll config, reset on
+                                            selection change, passed to
+                                            draw_preview as its last arg)
 
     st is {"cur", "off", "page_h", "sel"}; on_key may move the cursor through
     it. st["sel"] is the selected index into the view's ORIGINAL list — equal
@@ -2171,9 +2179,11 @@ def modal_list(stdscr, view):
     forwarded to on_key with st["sel"] valid so the view's select action
     works unchanged on a filtered list. Full readline editing comes with the
     buffer. Adding search to a view is one dict entry."""
-    st = {"cur": view.get("cur", 0), "off": 0, "page_h": 1, "sel": 0}
+    st = {"cur": view.get("cur", 0), "off": 0, "page_h": 1, "sel": 0,
+          "p_off": 0}
     on_key = view["on_key"]
     search = view.get("search")
+    preview_lines = view.get("preview_lines")
     sq = None     # EditBuffer while the "/" filter is open, else None
     idx = None    # filtered positions into search["items"]() (None = no filter)
 
@@ -2254,8 +2264,12 @@ def modal_list(stdscr, view):
             if view.get("draw_preview") and (idx is None or idx):
                 for y in range(1, h - 1):
                     stdscr.addch(y, list_w, curses.ACS_VLINE)
-                view["draw_preview"](stdscr, list_w + 1, w - list_w - 2,
-                                     page_h, st["sel"])
+                if preview_lines:
+                    view["draw_preview"](stdscr, list_w + 1, w - list_w - 2,
+                                         page_h, st["sel"], st["p_off"])
+                else:
+                    view["draw_preview"](stdscr, list_w + 1, w - list_w - 2,
+                                         page_h, st["sel"])
 
             try:
                 stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
@@ -2309,7 +2323,7 @@ def modal_list(stdscr, view):
                     # A filter change lands the cursor on a (possibly) new
                     # item; state-based previews (history's diff) reload via
                     # on_move, exactly as a nav move would.
-                    st["cur"] = st["off"] = 0
+                    st["cur"] = st["off"] = st["p_off"] = 0
                     st["sel"] = orig(0) if count_f() else 0
                     if st["sel"] != prev_sel and count_f() and view.get("on_move"):
                         view["on_move"](st)
@@ -2335,6 +2349,20 @@ def modal_list(stdscr, view):
                     continue
                 # r is None: not an editing key — fall through to nav below.
 
+        # Scaffold preview scrolling: PgDn/PgUp page the preview pane (step
+        # from the preview_scroll config), clamped to its content. Works
+        # mid-search too — these keys fall through the EditBuffer above.
+        if not narrow and preview_lines and k in (curses.KEY_NPAGE,
+                                                  curses.KEY_PPAGE):
+            total = preview_lines(st["sel"]) if count_f() else 0
+            step = preview_scroll_step(st["page_h"])
+            if k == curses.KEY_NPAGE:
+                st["p_off"] = min(st["p_off"] + step,
+                                  max(0, total - st["page_h"]))
+            else:
+                st["p_off"] = max(0, st["p_off"] - step)
+            continue
+
         # While the "/" filter is open, j/k/G/g are letters (the EditBuffer
         # consumed them above if printable); only non-typable nav keys move.
         cap = sq is not None
@@ -2352,8 +2380,10 @@ def modal_list(stdscr, view):
                     st["cur"] += d
             clamp_list(st, count_f(), st["page_h"])
             st["sel"] = orig(st["cur"]) if count_f() else 0
-            if st["cur"] != prev and view.get("on_move"):
-                view["on_move"](st)
+            if st["cur"] != prev:
+                st["p_off"] = 0
+                if view.get("on_move"):
+                    view["on_move"](st)
         else:
             # While searching, only keys the EditBuffer declined get here —
             # function keys like PgUp/PgDn (hist diff scroll) work mid-filter.
@@ -2367,11 +2397,10 @@ def hist_view(stdscr, n):
     if not commits:
         return
 
-    vs = {"diff": [], "d_scroll": 0}
+    vs = {"diff": []}
 
     def load_diff(cur):
         vs["diff"] = get_diff_lines(n["path"], commits[cur]["hash"])
-        vs["d_scroll"] = 0
 
     load_diff(0)
 
@@ -2383,12 +2412,12 @@ def hist_view(stdscr, n):
         date_str = datetime.fromtimestamp(c["ts"]).strftime("%m-%d %H:%M")
         addnstr_w(scr, y, 0, f"{date_str} {c['msg']}", list_w - 1, attr)
 
-    def draw_preview(scr, x0, pw, ph, cur):
+    def draw_preview(scr, x0, pw, ph, cur, off):
         diff = vs["diff"]
         if not diff:
             addnstr_w(scr, 1, x0, "(no changes vs current)", pw, curses.A_DIM)
             return
-        for i, line in enumerate(diff[vs["d_scroll"]:vs["d_scroll"] + ph]):
+        for i, line in enumerate(diff[off:off + ph]):
             if line.startswith("+") and not line.startswith("+++"):
                 attr = curses.color_pair(3)
             elif line.startswith("-") and not line.startswith("---"):
@@ -2405,11 +2434,6 @@ def hist_view(stdscr, n):
         if k in (10, 13):
             open_vimdiff_at(n["path"], commits[st["sel"]]["hash"])
             stdscr.refresh()
-        elif k == curses.KEY_NPAGE:
-            vs["d_scroll"] = min(vs["d_scroll"] + st["page_h"],
-                                 max(0, len(vs["diff"]) - st["page_h"]))
-        elif k == curses.KEY_PPAGE:
-            vs["d_scroll"] = max(0, vs["d_scroll"] - st["page_h"])
         return None
 
     def match(c, ql):
@@ -2419,6 +2443,7 @@ def hist_view(stdscr, n):
     modal_list(stdscr, {
         "count": lambda: len(commits),
         "search": {"items": lambda: commits, "match": match},
+        "preview_lines": lambda sel: len(vs["diff"]),
         "header": lambda w: f"history: {title(n)}",
         "footer": lambda: ("j/k select  / search  PgDn/PgUp scroll diff  "
                            "⮐ vimdiff  q back"),
@@ -2457,14 +2482,16 @@ def tags_view(stdscr, notes, focus=None, ui=None):
         addnstr_w(scr, y, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
                   list_w - 1, attr)
 
-    def draw_preview(scr, x0, pw, ph, cur):
-        sel_tag = vs["items"][cur][0]
+    def tagged_for(sel):
         # Filtering every note by the selected tag is too costly to redo on
         # each j/k; it only changes when the selection does.
-        tagged = frame_cache(
+        sel_tag = vs["items"][sel][0]
+        return frame_cache(
             vs.setdefault("_prev", {}), sel_tag,
             lambda: sort_notes(filter_by_tags(notes, [sel_tag]), "modified", True))
-        for i, m in enumerate(tagged[:ph]):
+
+    def draw_preview(scr, x0, pw, ph, cur, off):
+        for i, m in enumerate(tagged_for(cur)[off:off + ph]):
             line = f"{title(m)}  ({ago(m.get('modificationDate'))})"
             addnstr_w(scr, i + 1, x0, line, pw, curses.color_pair(4))
 
@@ -2495,6 +2522,7 @@ def tags_view(stdscr, notes, focus=None, ui=None):
         "count": lambda: len(vs["items"]),
         "search": {"items": lambda: vs["items"],
                    "match": lambda it, ql: ql in it[0].lower()},
+        "preview_lines": lambda sel: len(tagged_for(sel)),
         "header": lambda w: (f"tags ({len(vs['items'])})  "
                              f"sort:{TAG_SORTS[vs['mode_i']]}"),
         "footer": lambda: ("j/k select  / search  s sort  "
@@ -2523,15 +2551,17 @@ def backlinks_view(stdscr, notes, note):
         addnstr_w(scr, y, 0, f"{title(m)}  ({ago(m.get('modificationDate'))})",
                   list_w - 1, attr)
 
-    def draw_preview(scr, x0, pw, ph, cur):
+    def hits_for(sel):
+        # Scanning the source note for referencing lines only changes with the
+        # selection, so cache it rather than re-scan on every scroll step.
+        return frame_cache(prev_cache, sel,
+                           lambda: linking_lines(content(links[sel]), fname))
+
+    def draw_preview(scr, x0, pw, ph, cur, off):
         if not links:
             addnstr_w(scr, 1, x0, "(no notes link to this one)", pw, curses.A_DIM)
             return
-        # Scanning the source note for referencing lines only changes with the
-        # selection, so cache it rather than re-scan on every scroll step.
-        hits = frame_cache(prev_cache, cur,
-                           lambda: linking_lines(content(links[cur]), fname))
-        for i, line in enumerate(hits[:ph]):
+        for i, line in enumerate(hits_for(cur)[off:off + ph]):
             draw_line_highlighted(
                 scr, i + 1, x0, line.expandtabs(4).strip(), pw,
                 curses.color_pair(4),
@@ -2552,6 +2582,7 @@ def backlinks_view(stdscr, notes, note):
         "count": lambda: len(links),
         "search": {"items": lambda: links,
                    "match": lambda m, ql: ql in title(m).lower()},
+        "preview_lines": lambda sel: len(hits_for(sel)) if links else 0,
         "header": lambda w: f"backlinks: {title(note)} ({len(links)})",
         "footer": lambda: "j/k select  / search  ⮐ go to note  ESC back  q quit",
         "draw_row": draw_row,
@@ -4023,6 +4054,17 @@ def filter_indices(items, match, q):
     return [i for i, it in enumerate(items) if match(it, ql)]
 
 
+def preview_scroll_step(page_h):
+    """Lines PgDn/PgUp move a preview pane, from the `preview_scroll` config:
+    "page" (default) scrolls a full pane height; a positive integer scrolls
+    that many lines. One knob for every preview — notes body, history diff,
+    tag / backlink previews."""
+    v = (config_get("preview_scroll", "page") or "page").strip().lower()
+    if v.isdigit() and int(v) > 0:
+        return int(v)
+    return max(1, page_h)
+
+
 def nav_delta(k, page_h):
     """Decode a list-motion key into a cursor delta (or NAV_BOTTOM, or None
     for non-motion keys). One decoder for every list surface, so a new
@@ -4970,10 +5012,11 @@ def run(stdscr):
         # ----------------------------
 
         elif k == curses.KEY_NPAGE:
-            state["p_scroll"] += 5
+            state["p_scroll"] += preview_scroll_step(h - 2)
 
         elif k == curses.KEY_PPAGE:
-            state["p_scroll"] = max(0, state["p_scroll"] - 5)
+            state["p_scroll"] = max(0, state["p_scroll"]
+                                    - preview_scroll_step(h - 2))
 
         # ----------------------------
         # Trash note
