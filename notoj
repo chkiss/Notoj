@@ -755,6 +755,27 @@ def set_cursor_style(code):
         pass
 
 
+def show_input_cursor(stdscr, col, row=0):
+    """Park a blinking-block terminal cursor at the insertion point of a text
+    field — the one routine behind the main filter bar, the modal "/" search,
+    and the tag/schedule prompts, so every input shows its cursor the same
+    way."""
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
+    stdscr.move(row, col)
+    stdscr.refresh()
+    set_cursor_style(1)  # blinking block (DECSCUSR)
+
+
+def hide_input_cursor(stdscr):
+    """No text field active: hide the terminal cursor, restore its style."""
+    curses.curs_set(0)
+    set_cursor_style(0)  # restore terminal default
+    stdscr.refresh()
+
+
 def suspend_curses():
     """Leave curses to shell out (e.g. to $EDITOR).
 
@@ -2217,7 +2238,11 @@ def modal_list(stdscr, view):
             except curses.error:
                 pass
             head = view["header"](w)
+            q_col = None
             if sq is not None:
+                # Insertion point within the header's "/query" field, for the
+                # visible cursor below (same look as the main filter bar).
+                q_col = min(len(head) + 3 + sq.pos, w - 2)
                 head += f"  /{sq.text}  ({n_rows})"
             addnstr_w(stdscr, 0, 0, head, w - 1,
                       curses.A_BOLD | curses.A_UNDERLINE)
@@ -2239,6 +2264,11 @@ def modal_list(stdscr, view):
             foot = ("type to filter  ⮐ select  ESC clear search"
                     if sq is not None else view["footer"]())
             addnstr_w(stdscr, h - 1, 0, foot, w - 1, footer_attr())
+
+            if q_col is not None:
+                show_input_cursor(stdscr, q_col)
+            else:
+                hide_input_cursor(stdscr)
 
         stdscr.refresh()
         t_wait = time.monotonic()
@@ -2557,7 +2587,9 @@ def _help_key_w():
 def help_view(stdscr):
     """In-app key reference (?): KEYMAP in a scrollable full-width overlay,
     keys colored apart from their meanings, descriptions wrapped to the live
-    terminal width. Nav keys scroll; any other key closes it."""
+    terminal width. Nav keys scroll, "/" searches the entries (key labels and
+    descriptions; section headers drop out while filtering), ⮐/ESC closes,
+    q quits."""
     key_w = _help_key_w()
     vs = {"w": None, "rows": []}
 
@@ -2590,11 +2622,18 @@ def help_view(stdscr):
 
     return modal_list(stdscr, {
         "count": lambda: len(rows_now()),
+        "search": {"items": rows_now,
+                   # Only key entries are searchable; section headers and
+                   # blank separators drop out of a filtered list.
+                   "match": lambda r, ql: r[0] == "entry" and (
+                       ql in r[1].lower() or ql in r[2].lower())},
         "header": lambda w: "notoj keys",
-        "footer": lambda: "j/k scroll  q quit  any other key closes",
+        "footer": lambda: "j/k scroll  / search  ⮐/ESC close  q quit",
         "draw_row": draw_row,
-        # q quits the app (like everywhere); any other non-nav key closes.
-        "on_key": lambda k, st: (MODAL_QUIT,) if k == ord("q") else (None,),
+        # q quits the app (like everywhere); Enter/ESC close the overlay.
+        # (No more any-key-closes: "/" now has a meaning here.)
+        "on_key": lambda k, st: ((MODAL_QUIT,) if k == ord("q")
+                                 else (None,) if k in (27, 10, 13) else None),
     })
 
 
@@ -4287,17 +4326,9 @@ def draw(stdscr, notes, state):
             base_col = anchor + len("filter:") if anchor >= 0 else 0
             q_pos = min(state.get("q_pos", len(state["q"])), len(state["q"]))
             cursor_col = min(base_col + q_pos, w - 1)
-        try:
-            curses.curs_set(1)
-        except curses.error:
-            pass
-        stdscr.move(0, cursor_col)
-        stdscr.refresh()
-        set_cursor_style(1)  # blinking block (DECSCUSR)
+        show_input_cursor(stdscr, cursor_col)
     else:
-        curses.curs_set(0)
-        set_cursor_style(0)  # restore terminal default
-        stdscr.refresh()
+        hide_input_cursor(stdscr)
 
 
 # ----------------------------
