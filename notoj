@@ -2178,7 +2178,9 @@ def modal_list(stdscr, view):
     (n)", bare ESC clears the filter (it never exits the view), and Enter is
     forwarded to on_key with st["sel"] valid so the view's select action
     works unchanged on a filtered list. Full readline editing comes with the
-    buffer. Adding search to a view is one dict entry."""
+    buffer. Adding search to a view is one dict entry. Searchable views'
+    draw_row receives the lowercased live query as an extra trailing arg
+    ("" outside search) so rows can highlight the match."""
     st = {"cur": view.get("cur", 0), "off": 0, "page_h": 1, "sel": 0,
           "p_off": 0}
     on_key = view["on_key"]
@@ -2249,17 +2251,31 @@ def modal_list(stdscr, view):
                 pass
             head = view["header"](w)
             q_col = None
+            q_x = None
             if sq is not None:
-                # Insertion point within the header's "/query" field, for the
-                # visible cursor below (same look as the main filter bar).
-                q_col = min(len(head) + 3 + sq.pos, w - 2)
+                # Query field starts after 'header  /'; columns by display
+                # width so wide glyphs in the header (note titles) don't
+                # skew the cursor or the accent overdraw.
+                q_x = disp_width(head) + 3
+                q_col = min(q_x + sq.pos, w - 2)
                 head += f"  /{sq.text}  ({n_rows})"
             addnstr_w(stdscr, 0, 0, head, w - 1,
                       curses.A_BOLD | curses.A_UNDERLINE)
+            if sq is not None and q_x < w - 1:
+                # The query itself in the accent color, like the main
+                # filter bar's value.
+                addnstr_w(stdscr, 0, q_x, sq.text, w - 1 - q_x,
+                          curses.color_pair(1)
+                          | curses.A_BOLD | curses.A_UNDERLINE)
 
+            ql = sq.text.lower() if sq is not None else ""
             for i in range(st["off"], min(n_rows, st["off"] + page_h)):
-                view["draw_row"](stdscr, i - st["off"] + 1, orig(i),
-                                 i == st["cur"], list_w)
+                if search is not None:
+                    view["draw_row"](stdscr, i - st["off"] + 1, orig(i),
+                                     i == st["cur"], list_w, ql)
+                else:
+                    view["draw_row"](stdscr, i - st["off"] + 1, orig(i),
+                                     i == st["cur"], list_w)
 
             if view.get("draw_preview") and (idx is None or idx):
                 for y in range(1, h - 1):
@@ -2404,13 +2420,21 @@ def hist_view(stdscr, n):
 
     load_diff(0)
 
-    def draw_row(scr, y, i, selected, list_w):
+    def draw_row(scr, y, i, selected, list_w, q=""):
         c = commits[i]
-        attr = curses.color_pair(1) | curses.A_BOLD
-        if selected:
-            attr |= curses.A_REVERSE
+        base = curses.A_REVERSE if selected else 0
         date_str = datetime.fromtimestamp(c["ts"]).strftime("%m-%d %H:%M")
-        addnstr_w(scr, y, 0, f"{date_str} {c['msg']}", list_w - 1, attr)
+        # Commit date through the same recency gradient as the notes list:
+        # fresh edits warm, old ones fading to grey.
+        addnstr_w(scr, y, 0, date_str, list_w - 1,
+                  date_attr(c["ts"], datetime.now().timestamp()) | base)
+        dw = disp_width(date_str) + 1
+        if dw < list_w - 1:
+            draw_line_highlighted(
+                scr, y, dw, c["msg"], list_w - 1 - dw,
+                curses.color_pair(1) | curses.A_BOLD | base,
+                curses.color_pair(5) | curses.A_BOLD | base,
+                [q] if q else [])
 
     def draw_preview(scr, x0, pw, ph, cur, off):
         diff = vs["diff"]
@@ -2474,13 +2498,13 @@ def tags_view(stdscr, notes, focus=None, ui=None):
                 cur0 = i
                 break
 
-    def draw_row(scr, y, i, selected, list_w):
+    def draw_row(scr, y, i, selected, list_w, q=""):
         tag, count, last = vs["items"][i]
-        attr = curses.color_pair(3)
-        if selected:
-            attr |= curses.A_REVERSE
-        addnstr_w(scr, y, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
-                  list_w - 1, attr)
+        base = curses.A_REVERSE if selected else 0
+        draw_line_highlighted(
+            scr, y, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
+            list_w - 1, curses.color_pair(3) | base,
+            curses.color_pair(5) | curses.A_BOLD | base, [q] if q else [])
 
     def tagged_for(sel):
         # Filtering every note by the selected tag is too costly to redo on
@@ -2491,9 +2515,17 @@ def tags_view(stdscr, notes, focus=None, ui=None):
             lambda: sort_notes(filter_by_tags(notes, [sel_tag]), "modified", True))
 
     def draw_preview(scr, x0, pw, ph, cur, off):
+        # A miniature notes list: same title color and date recency gradient
+        # as the main list, so the pane reads as "these notes".
+        now_ts = datetime.now().timestamp()
         for i, m in enumerate(tagged_for(cur)[off:off + ph]):
-            line = f"{title(m)}  ({ago(m.get('modificationDate'))})"
-            addnstr_w(scr, i + 1, x0, line, pw, curses.color_pair(4))
+            t = title(m)
+            addnstr_w(scr, i + 1, x0, t, pw, curses.color_pair(1))
+            tw = disp_width(t) + 2
+            if tw < pw:
+                ts = m.get("modificationDate")
+                addnstr_w(scr, i + 1, x0 + tw, f"({ago(ts)})", pw - tw,
+                          date_attr(ts, now_ts))
 
     def on_key(k, st):
         if k == 27:
@@ -2543,13 +2575,19 @@ def backlinks_view(stdscr, notes, note):
     hi_token = title(note).lower()
     prev_cache = {}   # memoizes the preview scan across redraws (see frame_cache)
 
-    def draw_row(scr, y, i, selected, list_w):
+    def draw_row(scr, y, i, selected, list_w, q=""):
         m = links[i]
         attr = curses.color_pair(1)
-        if selected:
-            attr |= curses.A_REVERSE
-        addnstr_w(scr, y, 0, f"{title(m)}  ({ago(m.get('modificationDate'))})",
-                  list_w - 1, attr)
+        base = curses.A_REVERSE if selected else 0
+        t = title(m)
+        draw_line_highlighted(scr, y, 0, t, list_w - 1, attr | base,
+                              curses.color_pair(5) | curses.A_BOLD | base,
+                              [q] if q else [])
+        tw = disp_width(t) + 2
+        if tw < list_w - 1:
+            ts = m.get("modificationDate")
+            addnstr_w(scr, y, tw, f"({ago(ts)})", list_w - 1 - tw,
+                      date_attr(ts, datetime.now().timestamp()) | base)
 
     def hits_for(sel):
         # Scanning the source note for referencing lines only changes with the
@@ -2638,7 +2676,7 @@ def help_view(stdscr):
             vs["rows"] = help_rows(w)
         return vs["rows"]
 
-    def draw_row(scr, y, i, selected, list_w):
+    def draw_row(scr, y, i, selected, list_w, q=""):
         rows = rows_now()
         if i >= len(rows):
             return
@@ -2646,15 +2684,18 @@ def help_view(stdscr):
         if kind == "blank":
             return
         base = curses.A_REVERSE if selected else 0
+        hi = curses.color_pair(5) | curses.A_BOLD | base
+        toks = [q] if q else []
         if kind == "section":
             addnstr_w(scr, y, 0, text, list_w - 1, curses.A_BOLD | base)
         else:
             # Pad the key field by display width so wide keys (←/→, ↑/↓, ⌫)
             # don't shove the description column out of alignment.
             key_field = key + " " * max(0, key_w - disp_width(key))
-            addnstr_w(scr, y, 2, key_field, max(1, list_w - 3),
-                      curses.color_pair(3) | base)
-            addnstr_w(scr, y, 2 + key_w, text, max(1, list_w - 3 - key_w), base)
+            draw_line_highlighted(scr, y, 2, key_field, max(1, list_w - 3),
+                                  curses.color_pair(3) | base, hi, toks)
+            draw_line_highlighted(scr, y, 2 + key_w, text,
+                                  max(1, list_w - 3 - key_w), base, hi, toks)
 
     return modal_list(stdscr, {
         "count": lambda: len(rows_now()),
@@ -4214,6 +4255,16 @@ def draw(stdscr, notes, state):
     except curses.error:
         pass
     addnstr_w(stdscr, 0, 0, header, w - 1, curses.A_UNDERLINE)
+
+    if state["q"] or state.get("search_mode"):
+        # The live filter value in the accent color, same as the modal "/"
+        # searches, so the two filter fields read as one feature.
+        anchor = header.find("filter:")
+        if anchor >= 0 and state["q"]:
+            q_x = disp_width(header[:anchor + len("filter:")])
+            if q_x < w - 1:
+                addnstr_w(stdscr, 0, q_x, state["q"], w - 1 - q_x,
+                          curses.color_pair(1) | curses.A_UNDERLINE)
 
     if state.get("tagf") is not None:
         # Recolor the header's tag tokens so they read like the tags column:
