@@ -2606,6 +2606,10 @@ def help_rows(width):
             label = action_label(action, key) if action else key
             for j, part in enumerate(textwrap.wrap(desc, desc_w)):
                 rows.append(("entry", label if j == 0 else "", part))
+    rows.append(("blank", "", ""))
+    for part in textwrap.wrap("Key remapping and other configuration "
+                              f"settings at {CONFIG_FILE}", max(20, width - 1)):
+        rows.append(("section", "", part))
     return rows
 
 
@@ -2619,8 +2623,9 @@ def help_view(stdscr):
     """In-app key reference (?): KEYMAP in a scrollable full-width overlay,
     keys colored apart from their meanings, descriptions wrapped to the live
     terminal width. Nav keys scroll, "/" searches the entries (key labels and
-    descriptions; section headers drop out while filtering), ⮐/ESC closes,
-    q quits."""
+    descriptions; section headers drop out while filtering), ? toggles the
+    overlay closed (ESC too), q quits. A trailer line points at the config
+    file for remapping."""
     key_w = _help_key_w()
     vs = {"w": None, "rows": []}
 
@@ -2659,12 +2664,13 @@ def help_view(stdscr):
                    "match": lambda r, ql: r[0] == "entry" and (
                        ql in r[1].lower() or ql in r[2].lower())},
         "header": lambda w: "notoj keys",
-        "footer": lambda: "j/k scroll  / search  ⮐/ESC close  q quit",
+        "footer": lambda: "j/k scroll  / search  ?/ESC close  q quit",
         "draw_row": draw_row,
-        # q quits the app (like everywhere); Enter/ESC close the overlay.
-        # (No more any-key-closes: "/" now has a meaning here.)
+        # q quits the app (like everywhere); the key that opened the overlay
+        # ("?") toggles it closed, as does ESC. Enter is a no-op — it means
+        # "select" in every other view, and there's nothing to select here.
         "on_key": lambda k, st: ((MODAL_QUIT,) if k == ord("q")
-                                 else (None,) if k in (27, 10, 13) else None),
+                                 else (None,) if k in (27, ord("?")) else None),
     })
 
 

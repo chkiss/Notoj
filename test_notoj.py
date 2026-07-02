@@ -3146,8 +3146,13 @@ class TestKeymap(unittest.TestCase):
     def test_help_rows_flatten_and_wrap(self):
         rows = notoj.help_rows(80)
         kinds = [r[0] for r in rows]
-        self.assertEqual(kinds.count("section"), len(notoj.KEYMAP))
-        self.assertEqual(kinds.count("blank"), len(notoj.KEYMAP) - 1)
+        # KEYMAP sections plus the config-pointer trailer (section-styled,
+        # may wrap to several rows on narrow widths).
+        self.assertGreaterEqual(kinds.count("section"), len(notoj.KEYMAP) + 1)
+        self.assertEqual(kinds.count("blank"), len(notoj.KEYMAP))
+        # the trailer names the config file
+        self.assertIn(notoj.CONFIG_FILE,
+                      " ".join(r[2] for r in rows if r[0] == "section"))
         # continuation rows exist and carry an empty key
         self.assertTrue(any(r[0] == "entry" and r[1] == "" for r in rows))
         # every entry row's text is non-empty
