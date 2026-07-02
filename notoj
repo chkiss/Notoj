@@ -2139,6 +2139,11 @@ def modal_list(stdscr, view):
     Returns the value from on_key's closing tuple."""
     st = {"cur": view.get("cur", 0), "off": 0, "page_h": 1}
     on_key = view["on_key"]
+    # A view is "capturing" while it owns a text field (e.g. the tags view's /
+    # filter). Then j/k/G/g are letters to type, not nav — only the non-typable
+    # nav keys (arrows, Ctrl-d/u/f/b) still move the cursor; everything else
+    # goes to on_key.
+    capturing = view.get("capturing")
     eof_spins = 0
     # Tick twice a second rather than blocking: a resize is only guaranteed
     # to be noticed by the size poll below (SIGWINCH may surface as
@@ -2220,7 +2225,9 @@ def modal_list(stdscr, view):
             continue
         eof_spins = 0
 
-        if not narrow and (k in NAV_KEYS or k == ord("g")):
+        cap = bool(capturing and capturing())
+        nav_ok = (NAV_KEYS - {ord("j"), ord("k"), ord("G")}) if cap else NAV_KEYS
+        if not narrow and (k in nav_ok or (k == ord("g") and not cap)):
             prev = st["cur"]
             if k == ord("g"):
                 if stdscr.getch() == ord("g"):
@@ -2311,15 +2318,29 @@ def tags_view(stdscr, notes, focus=None, ui=None):
     stats = tag_stats(notes)
     if not stats:
         return None
-    vs = {"mode_i": (ui or {}).get("mode_i", 0)}
-    vs["items"] = sort_tag_stats(stats, TAG_SORTS[vs["mode_i"]])
+    # vs["q"] is None outside search and a (possibly empty) string while the "/"
+    # filter is open — same live, type-to-narrow feel as the note search.
+    vs = {"mode_i": (ui or {}).get("mode_i", 0), "q": None}
+    # Count column width is fixed to the widest count overall so the "#tag"
+    # column doesn't jump around as the filter narrows the list.
+    count_w = max((len(str(c)) for c, _ in stats.values()), default=1)
+
+    def apply_view():
+        """Rebuild vs["items"] from the current sort, then narrow by the search
+        query (case-insensitive substring) when one is active."""
+        items = sort_tag_stats(stats, TAG_SORTS[vs["mode_i"]])
+        if vs["q"]:
+            ql = vs["q"].lower()
+            items = [it for it in items if ql in it[0].lower()]
+        vs["items"] = items
+
+    apply_view()
     cur0 = 0
     if focus is not None:
         for i, it in enumerate(vs["items"]):
             if it[0] == focus:
                 cur0 = i
                 break
-    count_w = max(len(str(c)) for _, c, _ in vs["items"])
 
     def draw_row(scr, y, i, selected, list_w):
         tag, count, last = vs["items"][i]
@@ -2330,6 +2351,8 @@ def tags_view(stdscr, notes, focus=None, ui=None):
                   list_w - 1, attr)
 
     def draw_preview(scr, x0, pw, ph, cur):
+        if not vs["items"]:
+            return
         sel_tag = vs["items"][cur][0]
         # Filtering every note by the selected tag is too costly to redo on
         # each j/k; it only changes when the selection does.
@@ -2341,16 +2364,43 @@ def tags_view(stdscr, notes, focus=None, ui=None):
             addnstr_w(scr, i + 1, x0, line, pw, curses.color_pair(4))
 
     def on_key(k, st):
+        # ---- "/" search: live, type-to-narrow (mirrors the note search) ----
+        if vs["q"] is not None:
+            if k == 27:                      # ESC — leave search, restore full list
+                vs["q"] = None
+                apply_view()
+                st["cur"] = st["off"] = 0
+            elif k in (10, 13):              # Enter — filter notes by highlighted tag
+                if vs["items"]:
+                    return (vs["items"][st["cur"]][0],)
+            elif k in (curses.KEY_BACKSPACE, 127, 8):
+                vs["q"] = vs["q"][:-1]
+                apply_view()
+                st["cur"] = st["off"] = 0
+            else:
+                ch = typed_char(stdscr, k)
+                if ch:
+                    vs["q"] += ch
+                    apply_view()
+                    st["cur"] = st["off"] = 0
+            return None
+
+        # ---- normal mode ----
         if k == 27:
             return (None,)
         if k == ord("q"):
             return (MODAL_QUIT,)
+        if k == ord("/"):
+            vs["q"] = ""
+            apply_view()
+            st["cur"] = st["off"] = 0
+            return None
         if k == ord("s"):
-            sel = vs["items"][st["cur"]][0]
+            sel = vs["items"][st["cur"]][0] if vs["items"] else None
             vs["mode_i"] = (vs["mode_i"] + 1) % len(TAG_SORTS)
             if ui is not None:
                 ui["mode_i"] = vs["mode_i"]
-            vs["items"] = sort_tag_stats(stats, TAG_SORTS[vs["mode_i"]])
+            apply_view()
             # Keep the selection on the same tag across the re-sort; the
             # scaffold's per-frame clamp re-centers the scroll window.
             for i, it in enumerate(vs["items"]):
@@ -2358,14 +2408,26 @@ def tags_view(stdscr, notes, focus=None, ui=None):
                     st["cur"] = i
                     break
         elif k in (10, 13):
-            return (vs["items"][st["cur"]][0],)
+            if vs["items"]:
+                return (vs["items"][st["cur"]][0],)
         return None
+
+    def header(w):
+        if vs["q"] is not None:
+            return f"tags  /{vs['q']}  ({len(vs['items'])})"
+        return f"tags ({len(vs['items'])})  sort:{TAG_SORTS[vs['mode_i']]}"
+
+    def footer():
+        if vs["q"] is not None:
+            return "type to filter  ⮐ notes by tag  ESC clear search"
+        return "j/k select  / search  s sort  ⮐ filter notes by tag  ESC back  q quit"
 
     return modal_list(stdscr, {
         "cur": cur0,
         "count": lambda: len(vs["items"]),
-        "header": lambda w: f"tags ({len(vs['items'])})  sort:{TAG_SORTS[vs['mode_i']]}",
-        "footer": lambda: "j/k select  s sort  ⮐ filter notes by tag  ESC back  q quit",
+        "capturing": lambda: vs["q"] is not None,
+        "header": header,
+        "footer": footer,
         "draw_row": draw_row,
         "draw_preview": draw_preview,
         "on_key": on_key,

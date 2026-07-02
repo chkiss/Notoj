@@ -2013,8 +2013,20 @@ class TestNoteHelpers(unittest.TestCase):
         self.assertEqual(notoj.content(n), "")
 
     def test_tags_joined(self):
+        # tags() applies the configured display order (default: frequency
+        # high->low, ties alphabetical). With no frequency data loaded both
+        # tags rank equal, so the alphabetical tie-break decides.
         n = make_note(tags=["foo", "bar"])
-        self.assertEqual(notoj.tags(n), "foo bar")
+        notoj.TAG_FREQ = {}
+        self.assertEqual(notoj.tags(n), "bar foo")
+
+    def test_tags_ordered_by_frequency(self):
+        n = make_note(tags=["rare", "common"])
+        notoj.TAG_FREQ = {"common": 50, "rare": 2}
+        try:
+            self.assertEqual(notoj.tags(n), "common rare")
+        finally:
+            notoj.TAG_FREQ = {}
 
     def test_tags_empty(self):
         n = make_note(tags=[])
