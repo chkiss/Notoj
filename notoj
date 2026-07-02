@@ -218,7 +218,7 @@ KEYMAP = [
         ("tag_filter", "t", "filter to notes sharing the selected note's tags; Tab cycles "
               "the filter: all of them → each single tag"),
         ("tag_browse", "T", "browse all tags, most recently used first (Enter filters by "
-              "the chosen tag; s cycles sort: recent → count → name)"),
+              "the chosen tag; / searches; s cycles sort: recent → count → name)"),
     ]),
     ("Resurface (open loops)", [
         ("resurface", "g r", "toggle resurface view (notes tagged #loop, most stale first)"),
@@ -233,12 +233,12 @@ KEYMAP = [
         ("trash_view", "g t", "trash (u restores; editing a trashed note restores it)"),
         ("dups_view", "g d", "duplicates (notes sharing a title)"),
         ("backlinks", "b", "backlinks: notes linking to the selected one via [[wikilinks]] "
-              "or [text](note.md) links (Enter jumps to the linking note)"),
+              "or [text](note.md) links (Enter jumps to the linking note; / searches)"),
         ("help", "?", "this key reference"),
     ]),
     ("Other", [
         ("hist_diff", "h", "diff vs previous version (vimdiff)"),
-        ("hist_browse", "H", "browse full history with diff preview"),
+        ("hist_browse", "H", "browse full history with diff preview (/ searches messages)"),
         ("conflict", "c", "resolve next Syncthing conflict (vimdiff)"),
         ("quit", "q", "quit"),
     ]),
@@ -2134,16 +2134,46 @@ def modal_list(stdscr, view):
       on_key(k, st) -> None to keep looping, or a 1-tuple (result,) to close
       on_move(st)                        -> selection changed (nav or gg)
       cur                                -> initial cursor index (default 0)
+      search                             -> {"items": fn, "match": fn}: give
+                                            the view a "/" filter (see below)
 
-    st is {"cur", "off", "page_h"}; on_key may move the cursor through it.
-    Returns the value from on_key's closing tuple."""
-    st = {"cur": view.get("cur", 0), "off": 0, "page_h": 1}
+    st is {"cur", "off", "page_h", "sel"}; on_key may move the cursor through
+    it. st["sel"] is the selected index into the view's ORIGINAL list — equal
+    to st["cur"] normally, mapped through the filter while a "/" search is
+    narrowing the rows. Views index their data with st["sel"], never st["cur"].
+    Returns the value from on_key's closing tuple.
+
+    "/" search: when view["search"] is present, the scaffold owns the whole
+    lifecycle — "/" opens an EditBuffer, printable keys narrow the rows live
+    (match(item, lowercased_query) over items()), the header gains "/query
+    (n)", bare ESC clears the filter (it never exits the view), and Enter is
+    forwarded to on_key with st["sel"] valid so the view's select action
+    works unchanged on a filtered list. Full readline editing comes with the
+    buffer. Adding search to a view is one dict entry."""
+    st = {"cur": view.get("cur", 0), "off": 0, "page_h": 1, "sel": 0}
     on_key = view["on_key"]
-    # A view is "capturing" while it owns a text field (e.g. the tags view's /
-    # filter). Then j/k/G/g are letters to type, not nav — only the non-typable
-    # nav keys (arrows, Ctrl-d/u/f/b) still move the cursor; everything else
-    # goes to on_key.
-    capturing = view.get("capturing")
+    search = view.get("search")
+    sq = None     # EditBuffer while the "/" filter is open, else None
+    idx = None    # filtered positions into search["items"]() (None = no filter)
+
+    def peek():
+        # ESC follow-up byte for EditBuffer's Alt chords: a real Alt-key sends
+        # ESC and the letter back-to-back, so it's already buffered; look with
+        # a short window. The main loop resets the timeout each iteration.
+        stdscr.timeout(25)
+        nxt = stdscr.getch()
+        stdscr.timeout(500)
+        return nxt
+
+    def count_f():
+        return len(idx) if idx is not None else view["count"]()
+
+    def orig(i):
+        return idx[i] if idx is not None else i
+
+    def refilter():
+        nonlocal idx
+        idx = filter_indices(search["items"](), search["match"], sq.text)
     eof_spins = 0
     # Tick twice a second rather than blocking: a resize is only guaranteed
     # to be noticed by the size poll below (SIGWINCH may surface as
@@ -2175,34 +2205,40 @@ def modal_list(stdscr, view):
             addnstr_w(stdscr, 0, 0, "window too narrow", max(1, w - 1))
         else:
             page_h = st["page_h"] = h - 2   # rows 1..h-2; footer bar at h-1
-            n_rows = view["count"]()
+            n_rows = count_f()
             # Per-frame clamp: covers the initial cursor, on_key cursor
             # moves, shrinking lists, and terminal resizes in one place.
             clamp_list(st, n_rows, page_h)
+            st["sel"] = orig(st["cur"]) if n_rows else 0
             list_w = min(38, w // 3) if view.get("draw_preview") else w - 1
 
             try:
                 stdscr.hline(0, 0, ord(" ") | curses.A_UNDERLINE, w)
             except curses.error:
                 pass
-            addnstr_w(stdscr, 0, 0, view["header"](w), w - 1,
+            head = view["header"](w)
+            if sq is not None:
+                head += f"  /{sq.text}  ({n_rows})"
+            addnstr_w(stdscr, 0, 0, head, w - 1,
                       curses.A_BOLD | curses.A_UNDERLINE)
 
             for i in range(st["off"], min(n_rows, st["off"] + page_h)):
-                view["draw_row"](stdscr, i - st["off"] + 1, i,
+                view["draw_row"](stdscr, i - st["off"] + 1, orig(i),
                                  i == st["cur"], list_w)
 
-            if view.get("draw_preview"):
+            if view.get("draw_preview") and (idx is None or idx):
                 for y in range(1, h - 1):
                     stdscr.addch(y, list_w, curses.ACS_VLINE)
                 view["draw_preview"](stdscr, list_w + 1, w - list_w - 2,
-                                     page_h, st["cur"])
+                                     page_h, st["sel"])
 
             try:
                 stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
             except curses.error:
                 pass
-            addnstr_w(stdscr, h - 1, 0, view["footer"](), w - 1, footer_attr())
+            foot = ("type to filter  ⮐ select  ESC clear search"
+                    if sq is not None else view["footer"]())
+            addnstr_w(stdscr, h - 1, 0, foot, w - 1, footer_attr())
 
         stdscr.refresh()
         t_wait = time.monotonic()
@@ -2225,7 +2261,53 @@ def modal_list(stdscr, view):
             continue
         eof_spins = 0
 
-        cap = bool(capturing and capturing())
+        # Scaffold "/" search: open on "/", then the EditBuffer sees every key
+        # before nav/on_key — j/k are letters to type while filtering. Keys
+        # the buffer doesn't own (Up/Down, PgUp/PgDn) fall through to nav so
+        # the list (and any preview) stays driveable mid-search.
+        if not narrow and search is not None:
+            if sq is None:
+                if k == ord("/"):
+                    sq = EditBuffer()
+                    refilter()
+                    st["cur"] = st["off"] = 0
+                    continue
+            else:
+                prev_sel = st["sel"]
+
+                def moved_to_top():
+                    # A filter change lands the cursor on a (possibly) new
+                    # item; state-based previews (history's diff) reload via
+                    # on_move, exactly as a nav move would.
+                    st["cur"] = st["off"] = 0
+                    st["sel"] = orig(0) if count_f() else 0
+                    if st["sel"] != prev_sel and count_f() and view.get("on_move"):
+                        view["on_move"](st)
+
+                r = sq.handle_key(k, stdscr.getch, peek)
+                if r == "cancel":       # bare ESC — clear filter, keep view
+                    sq = None
+                    idx = None
+                    moved_to_top()
+                    continue
+                if r == "changed":
+                    refilter()
+                    moved_to_top()
+                    continue
+                if r == "moved":
+                    continue
+                if r == "submit":       # Enter — view's select, filtered-aware
+                    if count_f():
+                        st["sel"] = orig(st["cur"])
+                        res = on_key(10, st)
+                        if res is not None:
+                            return res[0]
+                    continue
+                # r is None: not an editing key — fall through to nav below.
+
+        # While the "/" filter is open, j/k/G/g are letters (the EditBuffer
+        # consumed them above if printable); only non-typable nav keys move.
+        cap = sq is not None
         nav_ok = (NAV_KEYS - {ord("j"), ord("k"), ord("G")}) if cap else NAV_KEYS
         if not narrow and (k in nav_ok or (k == ord("g") and not cap)):
             prev = st["cur"]
@@ -2235,13 +2317,16 @@ def modal_list(stdscr, view):
             else:
                 d = nav_delta(k, st["page_h"])
                 if d == NAV_BOTTOM:
-                    st["cur"] = view["count"]() - 1
+                    st["cur"] = count_f() - 1
                 else:
                     st["cur"] += d
-            clamp_list(st, view["count"](), st["page_h"])
+            clamp_list(st, count_f(), st["page_h"])
+            st["sel"] = orig(st["cur"]) if count_f() else 0
             if st["cur"] != prev and view.get("on_move"):
                 view["on_move"](st)
         else:
+            # While searching, only keys the EditBuffer declined get here —
+            # function keys like PgUp/PgDn (hist diff scroll) work mid-filter.
             r = on_key(k, st)
             if r is not None:
                 return r[0]
@@ -2288,7 +2373,7 @@ def hist_view(stdscr, n):
         if k in [ord("q"), 27]:
             return (None,)
         if k in (10, 13):
-            open_vimdiff_at(n["path"], commits[st["cur"]]["hash"])
+            open_vimdiff_at(n["path"], commits[st["sel"]]["hash"])
             stdscr.refresh()
         elif k == curses.KEY_NPAGE:
             vs["d_scroll"] = min(vs["d_scroll"] + st["page_h"],
@@ -2297,14 +2382,20 @@ def hist_view(stdscr, n):
             vs["d_scroll"] = max(0, vs["d_scroll"] - st["page_h"])
         return None
 
+    def match(c, ql):
+        date_str = datetime.fromtimestamp(c["ts"]).strftime("%m-%d %H:%M")
+        return ql in c["msg"].lower() or ql in date_str
+
     modal_list(stdscr, {
         "count": lambda: len(commits),
+        "search": {"items": lambda: commits, "match": match},
         "header": lambda w: f"history: {title(n)}",
-        "footer": lambda: "j/k select  PgDn/PgUp scroll diff  ⮐ vimdiff  q back",
+        "footer": lambda: ("j/k select  / search  PgDn/PgUp scroll diff  "
+                           "⮐ vimdiff  q back"),
         "draw_row": draw_row,
         "draw_preview": draw_preview,
         "on_key": on_key,
-        "on_move": lambda st: load_diff(st["cur"]),   # one git show per move
+        "on_move": lambda st: load_diff(st["sel"]),   # one git show per move
     })
 
 
@@ -2318,23 +2409,9 @@ def tags_view(stdscr, notes, focus=None, ui=None):
     stats = tag_stats(notes)
     if not stats:
         return None
-    # vs["q"] is None outside search and a (possibly empty) string while the "/"
-    # filter is open — same live, type-to-narrow feel as the note search.
-    vs = {"mode_i": (ui or {}).get("mode_i", 0), "q": None}
-    # Count column width is fixed to the widest count overall so the "#tag"
-    # column doesn't jump around as the filter narrows the list.
+    vs = {"mode_i": (ui or {}).get("mode_i", 0)}
+    vs["items"] = sort_tag_stats(stats, TAG_SORTS[vs["mode_i"]])
     count_w = max((len(str(c)) for c, _ in stats.values()), default=1)
-
-    def apply_view():
-        """Rebuild vs["items"] from the current sort, then narrow by the search
-        query (case-insensitive substring) when one is active."""
-        items = sort_tag_stats(stats, TAG_SORTS[vs["mode_i"]])
-        if vs["q"]:
-            ql = vs["q"].lower()
-            items = [it for it in items if ql in it[0].lower()]
-        vs["items"] = items
-
-    apply_view()
     cur0 = 0
     if focus is not None:
         for i, it in enumerate(vs["items"]):
@@ -2351,8 +2428,6 @@ def tags_view(stdscr, notes, focus=None, ui=None):
                   list_w - 1, attr)
 
     def draw_preview(scr, x0, pw, ph, cur):
-        if not vs["items"]:
-            return
         sel_tag = vs["items"][cur][0]
         # Filtering every note by the selected tag is too costly to redo on
         # each j/k; it only changes when the selection does.
@@ -2364,43 +2439,16 @@ def tags_view(stdscr, notes, focus=None, ui=None):
             addnstr_w(scr, i + 1, x0, line, pw, curses.color_pair(4))
 
     def on_key(k, st):
-        # ---- "/" search: live, type-to-narrow (mirrors the note search) ----
-        if vs["q"] is not None:
-            if k == 27:                      # ESC — leave search, restore full list
-                vs["q"] = None
-                apply_view()
-                st["cur"] = st["off"] = 0
-            elif k in (10, 13):              # Enter — filter notes by highlighted tag
-                if vs["items"]:
-                    return (vs["items"][st["cur"]][0],)
-            elif k in (curses.KEY_BACKSPACE, 127, 8):
-                vs["q"] = vs["q"][:-1]
-                apply_view()
-                st["cur"] = st["off"] = 0
-            else:
-                ch = typed_char(stdscr, k)
-                if ch:
-                    vs["q"] += ch
-                    apply_view()
-                    st["cur"] = st["off"] = 0
-            return None
-
-        # ---- normal mode ----
         if k == 27:
             return (None,)
         if k == ord("q"):
             return (MODAL_QUIT,)
-        if k == ord("/"):
-            vs["q"] = ""
-            apply_view()
-            st["cur"] = st["off"] = 0
-            return None
         if k == ord("s"):
-            sel = vs["items"][st["cur"]][0] if vs["items"] else None
+            sel = vs["items"][st["sel"]][0] if vs["items"] else None
             vs["mode_i"] = (vs["mode_i"] + 1) % len(TAG_SORTS)
             if ui is not None:
                 ui["mode_i"] = vs["mode_i"]
-            apply_view()
+            vs["items"] = sort_tag_stats(stats, TAG_SORTS[vs["mode_i"]])
             # Keep the selection on the same tag across the re-sort; the
             # scaffold's per-frame clamp re-centers the scroll window.
             for i, it in enumerate(vs["items"]):
@@ -2409,25 +2457,18 @@ def tags_view(stdscr, notes, focus=None, ui=None):
                     break
         elif k in (10, 13):
             if vs["items"]:
-                return (vs["items"][st["cur"]][0],)
+                return (vs["items"][st["sel"]][0],)
         return None
-
-    def header(w):
-        if vs["q"] is not None:
-            return f"tags  /{vs['q']}  ({len(vs['items'])})"
-        return f"tags ({len(vs['items'])})  sort:{TAG_SORTS[vs['mode_i']]}"
-
-    def footer():
-        if vs["q"] is not None:
-            return "type to filter  ⮐ notes by tag  ESC clear search"
-        return "j/k select  / search  s sort  ⮐ filter notes by tag  ESC back  q quit"
 
     return modal_list(stdscr, {
         "cur": cur0,
         "count": lambda: len(vs["items"]),
-        "capturing": lambda: vs["q"] is not None,
-        "header": header,
-        "footer": footer,
+        "search": {"items": lambda: vs["items"],
+                   "match": lambda it, ql: ql in it[0].lower()},
+        "header": lambda w: (f"tags ({len(vs['items'])})  "
+                             f"sort:{TAG_SORTS[vs['mode_i']]}"),
+        "footer": lambda: ("j/k select  / search  s sort  "
+                           "⮐ filter notes by tag  ESC back  q quit"),
         "draw_row": draw_row,
         "draw_preview": draw_preview,
         "on_key": on_key,
@@ -2474,13 +2515,15 @@ def backlinks_view(stdscr, notes, note):
         if k == ord("q"):
             return (MODAL_QUIT,)
         if k in (10, 13) and links:
-            return (links[st["cur"]]["path"],)
+            return (links[st["sel"]]["path"],)
         return None
 
     return modal_list(stdscr, {
         "count": lambda: len(links),
+        "search": {"items": lambda: links,
+                   "match": lambda m, ql: ql in title(m).lower()},
         "header": lambda w: f"backlinks: {title(note)} ({len(links)})",
-        "footer": lambda: "j/k select  ⮐ go to note  ESC back  q quit",
+        "footer": lambda: "j/k select  / search  ⮐ go to note  ESC back  q quit",
         "draw_row": draw_row,
         "draw_preview": draw_preview,
         "on_key": on_key,
