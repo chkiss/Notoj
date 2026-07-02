@@ -4797,41 +4797,45 @@ def run(stdscr):
             state["p_scroll"] = 0
 
         elif state["search_mode"]:
-            # The filter field is editable text with an insertion cursor
-            # (state["q_pos"], an index into state["q"]). Clamp it first so it
-            # can't dangle past the query if q was reset elsewhere.
-            state["q_pos"] = min(state.get("q_pos", len(state["q"])), len(state["q"]))
+            # All editing lives in EditBuffer (the one editor shared with the
+            # modal "/" filters and the tag/schedule prompts); this branch
+            # only handles what's search-specific — list-cursor moves and the
+            # open-or-create Enter. state["q"]/["q_pos"] stay the source of
+            # truth for the rest of the app (draw, order_notes, external
+            # resets), mirrored from the buffer after each key. Sync in first,
+            # in case q was reset elsewhere since the last keypress.
+            buf = state.get("_qbuf")
+            if buf is None or buf.text != state["q"]:
+                buf = state["_qbuf"] = EditBuffer(state["q"])
+                buf.pos = min(state.get("q_pos", len(buf.text)), len(buf.text))
 
-            if k == 27:  # ESC — bare ESC exits; ESC+letter is a Meta (Alt) chord.
-                # A real Alt-key sends ESC and the letter back-to-back, so the
-                # follow-up is already buffered after set_escdelay; peek for it
-                # with a short window (the loop resets the timeout next iter).
+            if k == curses.KEY_DOWN:
+                state["cur"] += 1
+                state["p_scroll"] = 0
+                continue
+            if k == curses.KEY_UP:
+                state["cur"] -= 1
+                state["p_scroll"] = 0
+                continue
+
+            def peek():
+                # ESC follow-up byte for Alt chords: a real Alt-key sends ESC
+                # and the letter back-to-back, so it's already buffered after
+                # set_escdelay; look with a short window (the loop resets the
+                # timeout next iteration).
                 stdscr.timeout(25)
-                nxt = stdscr.getch()
-                q, p = state["q"], state["q_pos"]
-                if nxt in (ord("b"), ord("B")):        # Alt-b — back one word
-                    state["q_pos"] = word_boundary(q, p, forward=False)
-                elif nxt in (ord("f"), ord("F")):      # Alt-f — forward one word
-                    state["q_pos"] = word_boundary(q, p, forward=True)
-                elif nxt in (ord("d"), ord("D")):      # Alt-d — delete word ahead
-                    end = word_boundary(q, p, forward=True)
-                    if end > p:
-                        state["q"] = q[:p] + q[end:]
-                        state["cur"] = 0
-                        state["off"] = 0
-                elif nxt in (curses.KEY_BACKSPACE, 127, 8):  # Alt-⌫ — delete word back
-                    start = word_boundary(q, p, forward=False)
-                    if start < p:
-                        state["q"] = q[:start] + q[p:]
-                        state["q_pos"] = start
-                        state["cur"] = 0
-                        state["off"] = 0
-                else:
-                    # Nothing followed (-1) = bare ESC -> leave search. A stray
-                    # non-Meta key is dropped; ESC's exit takes precedence.
-                    state["search_mode"] = False
+                return stdscr.getch()
 
-            elif k in [10, 13]:
+            r = buf.handle_key(k, stdscr.getch, peek)
+            state["q"] = buf.text
+            state["q_pos"] = buf.pos
+
+            if r == "cancel":
+                state["search_mode"] = False
+            elif r == "changed":
+                state["cur"] = 0
+                state["off"] = 0
+            elif r == "submit":
                 state["search_mode"] = False
                 if filtered:
                     open_selected(filtered[state["cur"]])
@@ -4850,75 +4854,6 @@ def run(stdscr):
                     state["p_scroll"] = 0
                     if dest:
                         state["_restore_path"] = dest
-
-            elif k == curses.KEY_DOWN:
-                state["cur"] += 1
-                state["p_scroll"] = 0
-
-            elif k == curses.KEY_UP:
-                state["cur"] -= 1
-                state["p_scroll"] = 0
-
-            elif k in (curses.KEY_LEFT, 2):    # ←, Ctrl-b — back one char
-                state["q_pos"] = max(0, state["q_pos"] - 1)
-
-            elif k in (curses.KEY_RIGHT, 6):   # →, Ctrl-f — forward one char
-                state["q_pos"] = min(len(state["q"]), state["q_pos"] + 1)
-
-            elif k in (curses.KEY_HOME, 1):    # Home, Ctrl-a — start of line
-                state["q_pos"] = 0
-
-            elif k in (curses.KEY_END, 5):     # End, Ctrl-e — end of line
-                state["q_pos"] = len(state["q"])
-
-            elif k in [curses.KEY_BACKSPACE, 127, 8]:
-                # Delete the character before the cursor, not just the last one.
-                p = state["q_pos"]
-                if p > 0:
-                    state["q"] = state["q"][:p - 1] + state["q"][p:]
-                    state["q_pos"] = p - 1
-                    state["cur"] = 0
-                    state["off"] = 0
-
-            elif k == 4:    # Ctrl-d — delete the char under the cursor
-                p = state["q_pos"]
-                if p < len(state["q"]):
-                    state["q"] = state["q"][:p] + state["q"][p + 1:]
-                    state["cur"] = 0
-                    state["off"] = 0
-
-            elif k == 23:   # Ctrl-w — delete the word before the cursor
-                p = state["q_pos"]
-                start = word_boundary(state["q"], p, forward=False)
-                if start < p:
-                    state["q"] = state["q"][:start] + state["q"][p:]
-                    state["q_pos"] = start
-                    state["cur"] = 0
-                    state["off"] = 0
-
-            elif k == 21:   # Ctrl-u — delete from the cursor to the start
-                p = state["q_pos"]
-                if p > 0:
-                    state["q"] = state["q"][p:]
-                    state["q_pos"] = 0
-                    state["cur"] = 0
-                    state["off"] = 0
-
-            elif k == 11:   # Ctrl-k — delete from the cursor to the end
-                p = state["q_pos"]
-                if p < len(state["q"]):
-                    state["q"] = state["q"][:p]
-                    state["cur"] = 0
-                    state["off"] = 0
-
-            else:
-                ch = typed_char(stdscr, k)
-                if ch:
-                    p = state["q_pos"]
-                    state["q"] = state["q"][:p] + ch + state["q"][p:]
-                    state["q_pos"] = p + len(ch)
-                    state["cur"] = 0
-                    state["off"] = 0
 
             continue
 
