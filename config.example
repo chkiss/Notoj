@@ -99,6 +99,9 @@ preview_scroll = page
 #   color.tag       = green    # tags
 #   color.preview   = cyan     # preview body
 #   color.match     = green    # search-match highlight
+#   color.tag_inactive = 240   # parenthesised (not filtered on) tags in the
+#                              # t filter header; defaults to the grey the
+#                              # date gradient fades to for the oldest notes
 #   color.footer_bg = 239      # footer status-bar band (256-color only)
 # Status/alert bar — the amber band that shows cross-session undo prompts and
 # stale-skip notices. Defaults to the inverse of the title look (the accent

@@ -3538,6 +3538,7 @@ DATE_GRADIENT_COLORS = "40,10,230,223,11,208,202,102,240"
 DATE_RECENT_SECS = 3600     # fallback "recent" cut-off without a 256-color ramp
 
 _date_gradient = None       # [(max_age_secs | None, attr), …] ascending; built in init_colors
+_tag_inactive_pair = False  # pair 6 initialized (256-color terminals only)
 
 
 def parse_span(s):
@@ -3599,6 +3600,14 @@ def init_colors():
                              curses.color_pair(20 + i)))
         _date_gradient = gradient
 
+        # Inactive (parenthesised) tags in the tag-filter header: by default
+        # the same dim grey the date gradient fades to for the oldest notes,
+        # overridable via color.tag_inactive.
+        curses.init_pair(6, _cfg_color("color.tag_inactive",
+                                       _color_value(cols[-1], 240)), -1)
+        global _tag_inactive_pair
+        _tag_inactive_pair = True
+
 
 def footer_attr():
     """Attr for the footer bar (row h-1): gray band, or reverse video — the
@@ -3615,6 +3624,15 @@ def message_attr():
     if _message_band:
         return curses.color_pair(11) | curses.A_BOLD
     return curses.A_REVERSE | curses.A_BOLD
+
+
+def tag_inactive_attr():
+    """Attr for tags present but not filtered on (the parenthesised ones in
+    the tag-filter header): the configured grey on 256-color terminals, plain
+    dim elsewhere."""
+    if _tag_inactive_pair:
+        return curses.color_pair(6)
+    return curses.A_DIM
 
 
 def date_attr(ts, now):
@@ -4196,6 +4214,22 @@ def draw(stdscr, notes, state):
     except curses.error:
         pass
     addnstr_w(stdscr, 0, 0, header, w - 1, curses.A_UNDERLINE)
+
+    if state.get("tagf") is not None:
+        # Recolor the header's tag tokens so they read like the tags column:
+        # tags being filtered on in the tag color, the parenthesised
+        # (present-but-inactive) ones in the dim inactive grey.
+        tf = state["tagf"]
+        col = disp_width("tagged ")
+        for i, t in enumerate(tf["tags"]):
+            active = tf["idx"] < 0 or i == tf["idx"]
+            tok = "#" + t if active else "(#" + t + ")"
+            attr = curses.color_pair(3) if active else tag_inactive_attr()
+            if col >= w - 1:
+                break
+            addnstr_w(stdscr, 0, col, tok, w - 1 - col,
+                      attr | curses.A_UNDERLINE)
+            col += disp_width(tok) + 1
 
     visible = notes[state["off"]:state["off"] + h - 2]
     q_str = state["q"].strip()
