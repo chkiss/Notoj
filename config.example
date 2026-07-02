@@ -72,6 +72,16 @@
 # need a GUI editor instead. Default: true.
 # reshape_arabic=true
 
+# Order a note's own tags for display (list + preview). Presentation-only —
+# the frontmatter on disk is never reordered, and the order self-maintains as
+# tag counts change, so you never edit a note just to fix tag order. Ties
+# always break alphabetically. Values:
+#   freq      frequency high -> low  (broad "domain" tags lead)  [default]
+#   freq_asc  frequency low -> high  (rare, most-specific tags lead)
+#   name      alphabetical
+#   stored    leave as written in the file
+# tag_display_order=freq
+
 # Max width (columns) of the left list panel; extra width goes to the preview.
 # Default: 80.
 # list_max_w=80

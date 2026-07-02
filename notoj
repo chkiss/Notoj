@@ -653,8 +653,41 @@ def content(n):
     return n.get("content") or ""
 
 
+# Global tag-frequency map ({tag: count}) used to order each note's tags at
+# display time. Refreshed by set_tag_freq() whenever the note set is (re)loaded,
+# so the ordering self-maintains as counts drift — no per-note file edits.
+TAG_FREQ = {}
+
+
+def set_tag_freq(notes):
+    """Recompute TAG_FREQ from the current note set."""
+    freq = {}
+    for n in notes:
+        for t in n.get("tags") or []:
+            freq[t] = freq.get(t, 0) + 1
+    global TAG_FREQ
+    TAG_FREQ = freq
+
+
+def order_tags(tag_list):
+    """Order a note's own tags for display per the `tag_display_order` config:
+      freq      high -> low frequency (default)
+      freq_asc  low -> high frequency
+      name      alphabetical
+      stored    leave as written in the file
+    Ties always break alphabetically so the order is deterministic."""
+    mode = config_get("tag_display_order", "freq")
+    if mode == "stored":
+        return list(tag_list)
+    if mode == "name":
+        return sorted(tag_list)
+    if mode == "freq_asc":
+        return sorted(tag_list, key=lambda t: (TAG_FREQ.get(t, 0), t))
+    return sorted(tag_list, key=lambda t: (-TAG_FREQ.get(t, 0), t))
+
+
 def tags(n):
-    return " ".join(n.get("tags") or [])
+    return " ".join(order_tags(n.get("tags") or []))
 
 
 def is_recent(n):
@@ -4096,6 +4129,7 @@ def run(stdscr):
     }
 
     notes = load()
+    set_tag_freq(notes)
     snap = file_snapshot(NOTES_DIR)
     if prune_review(state["_review"], notes):
         save_review(state["_review"])
@@ -4115,6 +4149,7 @@ def run(stdscr):
         # a change re-snapshot — like the idle scan does — rather than keeping
         # pre-rename paths that would be reprocessed on the next tick.
         snap = file_snapshot(NOTES_DIR) if changed else new_snap
+        set_tag_freq(notes)
         state["_trash"] = None
         state["_dups"] = find_duplicates(notes)
         # Inline "#loop <when>" scheduling writes the review file from inside
