@@ -5103,7 +5103,16 @@ def run(stdscr):
         # ----------------------------
 
         elif k == curses.KEY_NPAGE:
-            state["p_scroll"] += preview_scroll_step(h - 2)
+            # Clamp to the last screenful so PgDn stops at the end of the note
+            # (one source line per preview row, pane height h - 2, no wrapping)
+            # rather than scrolling on into blank space — mirrors PgUp's floor.
+            max_scroll = 0
+            if 0 <= state["cur"] < len(filtered):
+                n_lines = content(filtered[state["cur"]]).count("\n") + 1
+                max_scroll = max(0, n_lines - (h - 2))
+            state["p_scroll"] = min(max_scroll,
+                                    state["p_scroll"]
+                                    + preview_scroll_step(h - 2))
 
         elif k == curses.KEY_PPAGE:
             state["p_scroll"] = max(0, state["p_scroll"]
