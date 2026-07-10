@@ -25,6 +25,15 @@ bash ~/Notoj/install.sh && source ~/.bashrc
 into `~/.local/bin`, adds it to `$PATH` in your bashrc/zshrc, and installs a
 shell function so every launch first pulls the latest repo in the background.
 
+It also offers to make notoj the default application for markdown files, so
+double-clicking a `.md` in a file manager opens notoj in a terminal and
+imports it (a file already in the notes directory is just selected). The
+prompt only appears on interactive runs; pass `--md-handler` to enable it
+non-interactively or `--no-md-handler` to never ask. It installs a desktop
+entry at `~/.local/share/applications/notoj.desktop` and registers it with
+`xdg-mime` — delete the file and re-run `xdg-mime default <your-editor>.desktop
+text/markdown` to undo.
+
 On first launch notoj prompts for your notes directory (created if missing,
 saved to `~/.config/notoj/config`) and — if the directory is empty — offers
 to import a Simplenote JSON export. Neither prompt appears again.
@@ -92,6 +101,14 @@ draft keeps its real dates rather than looking like it was written today. The
 original is left where it is (`--move` removes it once the copy is committed),
 and an existing note is never overwritten — a clashing name imports as
 `name (2).md`. Several files can be named at once; the first is selected.
+
+Every import records its provenance in a footer line appended to the note —
+`copied from /path/to/draft.md, original untouched`, or
+`moved from /path/to/draft.md` under `--move` — without touching the
+mtime-derived dates. A path that is already inside the notes directory is not
+re-imported: notoj simply opens with that note selected, which makes
+`notoj FILE.md` safe to register as the system handler for markdown files
+(`install.sh` offers this, or forces it with `--md-handler`).
 
 ## Note format
 

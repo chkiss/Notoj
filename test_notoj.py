@@ -3511,10 +3511,17 @@ class TestParseImportArgs(unittest.TestCase):
         with self.assertRaises(ValueError):
             notoj.parse_import_args([p])
 
-    def test_file_already_in_the_notes_dir(self):
+    def test_file_already_in_the_notes_dir_is_accepted(self):
+        # notoj is the .md handler, so an existing note can arrive as an
+        # argument — run() selects it instead of re-importing.
+        notoj.load_notes_dir = lambda: self.d
+        paths, move = notoj.parse_import_args([self.md])
+        self.assertEqual((paths, move), ([self.md], False))
+
+    def test_move_of_a_file_already_in_the_notes_dir_is_an_error(self):
         notoj.load_notes_dir = lambda: self.d
         with self.assertRaises(ValueError):
-            notoj.parse_import_args([self.md])
+            notoj.parse_import_args(["--move", self.md])
 
 
 class TestImportFile(unittest.TestCase):
@@ -3569,6 +3576,30 @@ class TestImportFile(unittest.TestCase):
         src = self._src()
         notoj.import_file(src, move=True)
         self.assertFalse(os.path.exists(src))
+
+    def test_copy_stamps_an_origin_footer(self):
+        src = self._src()
+        text = open(notoj.import_file(src), encoding="utf-8").read()
+        self.assertTrue(text.endswith(f"\ncopied from {src}, original untouched\n"))
+
+    def test_move_stamps_a_moved_footer(self):
+        src = self._src()
+        text = open(notoj.import_file(src, move=True), encoding="utf-8").read()
+        self.assertTrue(text.endswith(f"\nmoved from {src}\n"))
+        self.assertNotIn("original untouched", text)
+
+    def test_footer_keeps_the_source_mtime(self):
+        # The footer stamp must not read as a fresh external edit:
+        # mtime == modified: still holds after the append.
+        final = notoj.import_file(self._src())
+        self.assertEqual(int(os.path.getmtime(final)), 1_551_693_600)
+        self.assertIn("modified: 2019-03-04T10:00:00Z",
+                      open(final, encoding="utf-8").read())
+
+    def test_footer_on_a_body_without_trailing_newline(self):
+        src = self._src(data=b"# my draft\n\nno final newline")
+        text = open(notoj.import_file(src), encoding="utf-8").read()
+        self.assertIn("no final newline\n\ncopied from ", text)
 
     def test_collision_never_overwrites(self):
         first = notoj.import_file(self._src())

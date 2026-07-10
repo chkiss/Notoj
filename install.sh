@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -e
 
+# --md-handler / --no-md-handler: register (or skip registering) notoj as the
+# default application for markdown files. Without a flag, an interactive run
+# asks; a non-interactive run (curl | bash) skips and prints how to enable.
+MD_HANDLER=ask
+for arg in "$@"; do
+    case "$arg" in
+        --md-handler)    MD_HANDLER=yes ;;
+        --no-md-handler) MD_HANDLER=no ;;
+        *) echo "unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
+
 REPO="git@github.com:chkiss/Notoj.git"
 INSTALL_DIR="$HOME/Notoj"
 BIN_DIR="$HOME/.local/bin"
@@ -41,6 +53,42 @@ if ! grep -qF 'notoj()' "$RC" 2>/dev/null; then
     echo "" >> "$RC"
     echo "$SHELL_FUNC" >> "$RC"
     echo "Added notoj() function to $RC"
+fi
+
+# Optionally register notoj as the default application for markdown files:
+# a double-clicked .md opens notoj in a terminal, imported (or, if it is
+# already a note, just selected). Needs xdg-mime, so headless systems skip it.
+if ! command -v xdg-mime >/dev/null 2>&1; then
+    [ "$MD_HANDLER" = yes ] && echo "xdg-mime not found — skipping .md handler registration" >&2
+    MD_HANDLER=no
+fi
+if [ "$MD_HANDLER" = ask ]; then
+    if [ -t 0 ]; then
+        read -r -p "Make notoj the default editor for .md files? [y/N] " reply
+        case "$reply" in [Yy]*) MD_HANDLER=yes ;; *) MD_HANDLER=no ;; esac
+    else
+        MD_HANDLER=no
+        echo "Skipping .md handler registration (re-run with --md-handler to enable)"
+    fi
+fi
+if [ "$MD_HANDLER" = yes ]; then
+    APP_DIR="$HOME/.local/share/applications"
+    mkdir -p "$APP_DIR"
+    printf '%s\n' \
+        "[Desktop Entry]" \
+        "Type=Application" \
+        "Name=notoj" \
+        "Comment=keyboard-driven terminal notes" \
+        "Exec=$BIN_DIR/notoj %f" \
+        "Terminal=true" \
+        "MimeType=text/markdown;text/x-markdown;" \
+        "Categories=Utility;TextEditor;" \
+        > "$APP_DIR/notoj.desktop"
+    xdg-mime default notoj.desktop text/markdown
+    xdg-mime default notoj.desktop text/x-markdown
+    command -v update-desktop-database >/dev/null 2>&1 \
+        && update-desktop-database "$APP_DIR" || true
+    echo "Registered notoj as the default editor for markdown files"
 fi
 
 echo "Done. Run: source $RC"

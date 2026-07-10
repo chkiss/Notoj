@@ -258,7 +258,9 @@ def build_help(width=None):
     opt_w = 10
     for label, desc in (
         ("FILE.md", "copy the file into the notes dir, adopt it as a note "
-                    "(frontmatter, title, tags) and start with it selected; "
+                    "(frontmatter, title, tags), record where it was copied "
+                    "from in a footer line, and start with it selected; a "
+                    "file already in the notes dir is just selected; "
                     "repeatable, and the first one is the one selected"),
         ("--move", "remove each source file once its copy is committed"),
     ):
@@ -3451,17 +3453,38 @@ def parse_import_args(argv):
             raise ValueError(f"not a file: {p}")
         if os.path.splitext(p)[1].lower() not in IMPORT_EXTS:
             raise ValueError(f"not a markdown file: {p}")
-        if notes_dir and os.path.dirname(p) == notes_dir:
-            # Copying a note onto itself would just make a duplicate of it.
-            raise ValueError(f"already a note: {p}")
+        if move and notes_dir and os.path.dirname(p) == notes_dir:
+            # There is nothing to move — it is already where notes live.
+            raise ValueError(f"--move: already a note: {p}")
     return paths, move
+
+
+def append_origin_footer(dest, src, move):
+    """Append a provenance line to the vault copy — where the note came from
+    and what happened to the original — so an imported note records its source.
+    Preserves mtime: created:/modified: are derived from it downstream, and the
+    stamp must not read as a fresh external edit. Skipped (not fatal) if the
+    file can't be read as UTF-8."""
+    line = (f"moved from {src}" if move
+            else f"copied from {src}, original untouched")
+    try:
+        with open(dest, "r", encoding="utf-8") as f:
+            text = f.read()
+        if text and not text.endswith("\n"):
+            text += "\n"
+        st = os.stat(dest)
+        atomic_write(dest, f"{text}\n{line}\n")
+        os.utime(dest, (st.st_atime, st.st_mtime))
+    except Exception:
+        pass
 
 
 def import_file(src, move=False):
     """Copy an outside markdown file into the vault and adopt it: canonicalize
-    encoding/line endings, backfill frontmatter, derive the title and rename to
-    its slug, sync body hashtags, commit. Returns the note's FINAL path (which
-    is not the path it was copied to — adoption renames it), or None on failure.
+    encoding/line endings, stamp an origin footer, backfill frontmatter, derive
+    the title and rename to its slug, sync body hashtags, commit. Returns the
+    note's FINAL path (which is not the path it was copied to — adoption
+    renames it), or None on failure.
 
     copy2 carries the source mtime across, so created:/modified: say when the
     file was really written rather than when it was imported — the same contract
@@ -3474,6 +3497,7 @@ def import_file(src, move=False):
         return None
 
     ensure_canonical(dest)
+    append_origin_footer(dest, src, move)
     ensure_frontmatter(dest)
     ensure_id(dest)
     final = normalize_external_note(dest) or dest
@@ -4644,10 +4668,19 @@ def run(stdscr, imports=(), move=False):
     # Adopt any files named on the command line before the first load(), so
     # they come up as ordinary notes. Paths were validated in __main__; a
     # failure here is a copy that lost a race, and is reported in the bar.
+    # A path already inside the vault (notoj is the .md handler, so a note can
+    # arrive this way) is not re-imported — it is just the one to select.
     imported, failed = [], []
+    focus = None
+    vault = os.path.abspath(NOTES_DIR)
     for src in imports:
+        if os.path.dirname(src) == vault:
+            focus = focus or src
+            continue
         final = import_file(src, move)
         (imported if final else failed).append(final or src)
+        if final and not focus:
+            focus = final
 
     curses.curs_set(0)
     init_colors()
@@ -4718,10 +4751,10 @@ def run(stdscr, imports=(), move=False):
     if saved:
         state["_restore_path"] = saved
 
-    # A file imported this run wins over the saved cursor: you asked for it, so
-    # it is what the preview should be showing.
-    if imported:
-        state["_restore_path"] = imported[0]
+    # A file named on the command line wins over the saved cursor: you asked
+    # for it, so it is what the preview should be showing.
+    if focus:
+        state["_restore_path"] = focus
     if imported or failed:
         state["_msg_pool"] = import_msgs(imported, failed)
         state["_msg_rot"] = time.monotonic()
