@@ -3464,6 +3464,139 @@ class TestPoolMsg(unittest.TestCase):
                          "(2/2) b")
 
 
+class TestParseImportArgs(unittest.TestCase):
+    def setUp(self):
+        self._old = notoj.load_notes_dir
+        notoj.load_notes_dir = lambda: None
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.md = os.path.join(self.d, "a.md")
+        with open(self.md, "w") as f:
+            f.write("# a\n")
+
+    def tearDown(self):
+        notoj.load_notes_dir = self._old
+
+    def test_no_args(self):
+        self.assertEqual(notoj.parse_import_args([]), ([], False))
+
+    def test_file_is_absolutized(self):
+        paths, move = notoj.parse_import_args([self.md])
+        self.assertEqual((paths, move), ([self.md], False))
+
+    def test_move_flag_and_several_files(self):
+        b = os.path.join(self.d, "b.markdown")
+        with open(b, "w") as f:
+            f.write("# b\n")
+        paths, move = notoj.parse_import_args([self.md, "--move", b])
+        self.assertEqual((paths, move), ([self.md, b], True))
+
+    def test_unknown_option(self):
+        with self.assertRaises(ValueError):
+            notoj.parse_import_args(["--nope"])
+
+    def test_move_without_file(self):
+        with self.assertRaises(ValueError):
+            notoj.parse_import_args(["--move"])
+
+    def test_missing_file(self):
+        with self.assertRaises(ValueError):
+            notoj.parse_import_args([os.path.join(self.d, "gone.md")])
+
+    def test_non_markdown_file(self):
+        p = os.path.join(self.d, "a.txt")
+        with open(p, "w") as f:
+            f.write("x")
+        with self.assertRaises(ValueError):
+            notoj.parse_import_args([p])
+
+    def test_file_already_in_the_notes_dir(self):
+        notoj.load_notes_dir = lambda: self.d
+        with self.assertRaises(ValueError):
+            notoj.parse_import_args([self.md])
+
+
+class TestImportFile(unittest.TestCase):
+    def setUp(self):
+        self._old_dir, self._old_commit = notoj.NOTES_DIR, notoj.git_commit
+        self.vault = tempfile.mkdtemp()
+        self.src_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.vault, True)
+        self.addCleanup(shutil.rmtree, self.src_dir, True)
+        notoj.NOTES_DIR = self.vault
+        self.commits = []
+        notoj.git_commit = self.commits.append
+
+    def tearDown(self):
+        notoj.NOTES_DIR, notoj.git_commit = self._old_dir, self._old_commit
+
+    def _src(self, name="draft.md", data=b"# my draft\n\nbody #tagged\n", mtime=1_551_693_600):
+        p = os.path.join(self.src_dir, name)
+        with open(p, "wb") as f:
+            f.write(data)
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def test_adopts_and_renames_to_title_slug(self):
+        final = notoj.import_file(self._src())
+        self.assertEqual(os.path.basename(final), "my draft.md")
+        n = notoj.load_md(final)
+        self.assertEqual(n["title"], "my draft")
+        self.assertEqual(n["tags"], ["tagged"])   # body hashtag synced
+        self.assertEqual(self.commits, ["import: my draft.md"])
+
+    def test_source_mtime_becomes_created_and_modified(self):
+        final = notoj.import_file(self._src())
+        text = open(final, encoding="utf-8").read()
+        self.assertIn("created: 2019-03-04T10:00:00Z", text)
+        self.assertIn("modified: 2019-03-04T10:00:00Z", text)
+        # mtime == modified:, so the import never reads as a fresh external edit
+        self.assertEqual(int(os.path.getmtime(final)), 1_551_693_600)
+
+    def test_bom_and_crlf_are_canonicalized(self):
+        src = self._src(data="﻿# my draft\r\n\r\nbody\r\n".encode())
+        text = open(notoj.import_file(src), encoding="utf-8").read()
+        self.assertTrue(text.startswith("---\n"))
+        self.assertNotIn("\r", text)
+
+    def test_source_is_left_alone_by_default(self):
+        src = self._src()
+        notoj.import_file(src)
+        self.assertTrue(os.path.exists(src))
+
+    def test_move_removes_the_source(self):
+        src = self._src()
+        notoj.import_file(src, move=True)
+        self.assertFalse(os.path.exists(src))
+
+    def test_collision_never_overwrites(self):
+        first = notoj.import_file(self._src())
+        second = notoj.import_file(self._src())
+        self.assertNotEqual(first, second)
+        self.assertEqual(os.path.basename(second), "my draft (2).md")
+        self.assertEqual(len(os.listdir(self.vault)), 2)
+
+    def test_unreadable_source_returns_none(self):
+        self.assertIsNone(notoj.import_file(os.path.join(self.src_dir, "gone.md")))
+
+
+class TestImportMsgs(unittest.TestCase):
+    def test_one_import_names_its_adopted_file(self):
+        self.assertEqual(notoj.import_msgs(["/v/my draft.md"], []),
+                         ["imported my draft.md"])
+
+    def test_several_imports_are_counted(self):
+        self.assertEqual(notoj.import_msgs(["/v/a.md", "/v/b.md"], []),
+                         ["imported 2 files"])
+
+    def test_failures_are_reported(self):
+        self.assertEqual(notoj.import_msgs([], ["/s/x.md"]),
+                         ["could not import x.md"])
+
+    def test_nothing_to_say(self):
+        self.assertEqual(notoj.import_msgs([], []), [])
+
+
 class TestPreviewBodyLines(unittest.TestCase):
     def setUp(self):
         self._cache = notoj._config_cache

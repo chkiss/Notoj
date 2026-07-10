@@ -254,7 +254,18 @@ def build_help(width=None):
         width = shutil.get_terminal_size((80, 24)).columns
     desc_w = max(20, width - 4 - HELP_KEY_W)
     lines = ["notoj — keyboard-driven terminal notes", "",
-             "Usage: notoj [--help]", "", "Keybindings:"]
+             "Usage: notoj [--help] [--move] [FILE.md ...]", ""]
+    opt_w = 10
+    for label, desc in (
+        ("FILE.md", "copy the file into the notes dir, adopt it as a note "
+                    "(frontmatter, title, tags) and start with it selected; "
+                    "repeatable, and the first one is the one selected"),
+        ("--move", "remove each source file once its copy is committed"),
+    ):
+        first, *rest = textwrap.wrap(desc, max(20, width - 2 - opt_w))
+        lines.append(f"  {label:<{opt_w}}{first}")
+        lines.extend(f"  {'':<{opt_w}}{r}" for r in rest)
+    lines += ["", "Keybindings:"]
     for section, entries in KEYMAP:
         lines.append(f"  {section}")
         for action, key, desc in entries:
@@ -3339,15 +3350,21 @@ def load_trash():
     return notes
 
 
+def unique_dest(name):
+    """A free path in NOTES_DIR for a file called `name`, suffixing " (2)",
+    " (3)", … on collision. Never overwrites an existing note."""
+    dest = os.path.join(NOTES_DIR, name)
+    stem, ext = os.path.splitext(name)
+    i = 2
+    while os.path.exists(dest):
+        dest = os.path.join(NOTES_DIR, f"{stem} ({i}){ext}")
+        i += 1
+    return dest
+
+
 def restore_note(n):
     src = n["path"]
-    dst = os.path.join(NOTES_DIR, os.path.basename(src))
-    if os.path.exists(dst):
-        stem, ext = os.path.splitext(os.path.basename(src))
-        i = 2
-        while os.path.exists(dst):
-            dst = os.path.join(NOTES_DIR, f"{stem} ({i}){ext}")
-            i += 1
+    dst = unique_dest(os.path.basename(src))
     os.rename(src, dst)
     git_commit(f"restore: {title(n)}")
 
@@ -3406,6 +3423,80 @@ def finalize_new_note(tmp_path):
     schedule_inline_loop(dest)
     git_commit(f"add: {first_line}")
     return dest
+
+
+IMPORT_EXTS = (".md", ".markdown")
+
+
+def parse_import_args(argv):
+    """Split argv into (files to import, move flag). Raises ValueError with a
+    user-facing message if a flag is unknown or a file can't be imported — the
+    caller reports it while there is still a terminal, before curses starts."""
+    move, paths = False, []
+    for a in argv:
+        if a == "--move":
+            move = True
+        elif a.startswith("-") and a != "-":
+            raise ValueError(f"unknown option: {a}")
+        else:
+            paths.append(os.path.abspath(os.path.expanduser(a)))
+
+    if move and not paths:
+        raise ValueError("--move needs a file to import")
+
+    notes_dir = load_notes_dir()
+    notes_dir = os.path.abspath(os.path.expanduser(notes_dir)) if notes_dir else ""
+    for p in paths:
+        if not os.path.isfile(p):
+            raise ValueError(f"not a file: {p}")
+        if os.path.splitext(p)[1].lower() not in IMPORT_EXTS:
+            raise ValueError(f"not a markdown file: {p}")
+        if notes_dir and os.path.dirname(p) == notes_dir:
+            # Copying a note onto itself would just make a duplicate of it.
+            raise ValueError(f"already a note: {p}")
+    return paths, move
+
+
+def import_file(src, move=False):
+    """Copy an outside markdown file into the vault and adopt it: canonicalize
+    encoding/line endings, backfill frontmatter, derive the title and rename to
+    its slug, sync body hashtags, commit. Returns the note's FINAL path (which
+    is not the path it was copied to — adoption renames it), or None on failure.
+
+    copy2 carries the source mtime across, so created:/modified: say when the
+    file was really written rather than when it was imported — the same contract
+    a note gets when it arrives in the notes dir over Syncthing. With move=True
+    the original is removed once the vault copy is committed."""
+    dest = unique_dest(os.path.basename(src))
+    try:
+        shutil.copy2(src, dest)
+    except OSError:
+        return None
+
+    ensure_canonical(dest)
+    ensure_frontmatter(dest)
+    ensure_id(dest)
+    final = normalize_external_note(dest) or dest
+    git_commit(f"import: {os.path.basename(final)}")
+
+    if move:
+        try:
+            os.remove(src)
+        except OSError:
+            pass   # the copy is committed; a stuck original is not worth failing
+    return final
+
+
+def import_msgs(imported, failed):
+    """Status-bar lines for a command-line import: what landed (by its adopted
+    name, which the title rename may have changed) and what didn't."""
+    msgs = []
+    if len(imported) == 1:
+        msgs.append(f"imported {os.path.basename(imported[0])}")
+    elif imported:
+        msgs.append(f"imported {len(imported)} files")
+    msgs.extend(f"could not import {os.path.basename(s)}" for s in failed)
+    return msgs
 
 
 def new_note():
@@ -4517,8 +4608,17 @@ def draw(stdscr, notes, state):
 # Main loop
 # ----------------------------
 
-def run(stdscr):
+def run(stdscr, imports=(), move=False):
     git_init()
+
+    # Adopt any files named on the command line before the first load(), so
+    # they come up as ordinary notes. Paths were validated in __main__; a
+    # failure here is a copy that lost a race, and is reported in the bar.
+    imported, failed = [], []
+    for src in imports:
+        final = import_file(src, move)
+        (imported if final else failed).append(final or src)
+
     curses.curs_set(0)
     init_colors()
     KEY = build_key_dispatch()   # {action: keycode}, with config rebindings
@@ -4587,6 +4687,14 @@ def run(stdscr):
     saved = load_cursor()
     if saved:
         state["_restore_path"] = saved
+
+    # A file imported this run wins over the saved cursor: you asked for it, so
+    # it is what the preview should be showing.
+    if imported:
+        state["_restore_path"] = imported[0]
+    if imported or failed:
+        state["_msg_pool"] = import_msgs(imported, failed)
+        state["_msg_rot"] = time.monotonic()
 
     def refresh_notes():
         nonlocal notes, snap
@@ -5456,6 +5564,14 @@ if __name__ == "__main__":
         print(HELP)
         sys.exit(0)
 
+    # Validate CLI imports up here, while there is still a terminal to print an
+    # error to — the copy itself happens inside run(), once git is initialized.
+    try:
+        IMPORTS, MOVE = parse_import_args(sys.argv[1:])
+    except ValueError as e:
+        print(f"notoj: {e}", file=sys.stderr)
+        sys.exit(2)
+
     saved = load_notes_dir()
     if saved and os.path.isdir(saved):
         NOTES_DIR = saved
@@ -5481,7 +5597,7 @@ if __name__ == "__main__":
     offer_simplenote_import(NOTES_DIR)
 
     try:
-        curses.wrapper(run)
+        curses.wrapper(run, IMPORTS, MOVE)
     finally:
         set_cursor_style(0)  # don't leave a blinking block in the shell
         log_event({"t": "session", "ev": "quit", "sess": SESSION_ID})

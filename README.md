@@ -80,6 +80,19 @@ full keybinding reference. The essentials:
   on (the default), across sessions too, prompting before it reaches into a
   previous session's changes; `?` shows the full key reference in-app.
 
+### Importing a file
+
+`notoj path/to/draft.md` copies that markdown file into the notes directory,
+adopts it as a note, and opens with it selected. Adoption is the same pipeline
+an incoming Syncthing file goes through: a BOM and CRLF endings are stripped,
+missing frontmatter is filled in, the title comes from the first body line and
+the file is renamed to match it, and inline `#hashtags` sync into `tags:`.
+The note's `created`/`modified` come from the source file's mtime, so an old
+draft keeps its real dates rather than looking like it was written today. The
+original is left where it is (`--move` removes it once the copy is committed),
+and an existing note is never overwritten — a clashing name imports as
+`name (2).md`. Several files can be named at once; the first is selected.
+
 ## Note format
 
 Notes are markdown files with YAML frontmatter (`id`, `created`, `modified`,
