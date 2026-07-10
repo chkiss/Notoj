@@ -87,6 +87,11 @@
 # a positive integer scrolls that many lines. Default: page.
 preview_scroll = page
 
+# Word-wrap the note body in the preview pane: a line wider than the pane
+# continues on the next row, keeping its indentation. Off clips each line at
+# the pane edge instead (one source line per row). Default: true.
+# preview_wrap=true
+
 # Max width (columns) of the left list panel; extra width goes to the preview.
 # Default: 80.
 # list_max_w=80

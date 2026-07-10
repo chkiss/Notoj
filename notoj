@@ -4119,6 +4119,66 @@ def filter_indices(items, match, q):
     return [i for i, it in enumerate(items) if match(it, ql)]
 
 
+def preview_geometry(w):
+    """Split a terminal w columns wide into (show_preview, list_w, mid,
+    preview_w). Shared by the drawing code and the scroll keys so both agree
+    on how wide the preview pane is."""
+    if (w - w // 2 - 5) >= MIN_PREVIEW_W:
+        list_w = min(w // 2 - 2, LIST_MAX_W)
+        mid = list_w + 2
+        # Preview runs from mid+1 to the last column (w-1): no right margin,
+        # mirroring the list starting flush at column 0 on the left.
+        return True, list_w, mid, w - (mid + 1)
+    return False, w - 1, None, 0
+
+
+def wrap_to_width(line, width):
+    """Greedy word wrap into rows at most `width` COLUMNS wide, continuation
+    rows keeping the line's indentation. Measured with disp_width, the same
+    ruler the drawing code uses — textwrap counts characters, so one "→" (an
+    East-Asian-Ambiguous glyph, two columns here) would push a row past the
+    pane and cost it its last character. A word too long for a row is broken."""
+    indent = line[:len(line) - len(line.lstrip())]
+    avail = width - disp_width(indent)
+    if avail < 1:
+        indent, avail = "", width
+    rows, cur = [], ""
+    for word in line[len(indent):].split(" "):
+        cand = word if not cur else cur + " " + word
+        if disp_width(cand) <= avail:
+            cur = cand
+            continue
+        if cur:
+            rows.append(cur)
+            cur = ""
+        while disp_width(word) > avail:
+            head = clip_to_width(word, avail)
+            if not head:
+                break
+            rows.append(head)
+            word = word[len(head):]
+        cur = word
+    rows.append(cur)
+    return [indent + r for r in rows]
+
+
+def preview_body_lines(text, width):
+    """A note's text as the rows the preview pane draws. With `preview_wrap`
+    on (the default) a line wider than the pane continues on the next row,
+    keeping its indentation; with it off each source line is one row and the
+    overflow is clipped at the pane edge."""
+    lines = [ln.expandtabs(4) for ln in text.split("\n")]
+    if width <= 0 or not config_bool("preview_wrap", True):
+        return lines
+    out = []
+    for line in lines:
+        if disp_width(line) <= width:
+            out.append(line)
+        else:
+            out.extend(wrap_to_width(line, width))
+    return out
+
+
 def preview_scroll_step(page_h):
     """Lines PgDn/PgUp move a preview pane, from the `preview_scroll` config:
     "page" (default) scrolls a full pane height; a positive integer scrolls
@@ -4204,18 +4264,7 @@ def draw(stdscr, notes, state):
         stdscr.refresh()
         return
 
-    show_preview = (w - w // 2 - 5) >= MIN_PREVIEW_W
-    if show_preview:
-        natural_list_w = w // 2 - 2
-        list_w = min(natural_list_w, LIST_MAX_W)
-        mid = list_w + 2
-        # Preview runs from mid+1 to the last column (w-1): no right margin,
-        # mirroring the list starting flush at column 0 on the left.
-        preview_w = w - (mid + 1)
-    else:
-        mid = None
-        list_w = w - 1
-        preview_w = 0
+    show_preview, list_w, mid, preview_w = preview_geometry(w)
 
     show_date = list_w >= SHOW_DATE_MIN
     show_ago  = list_w >= SHOW_AGO_MIN
@@ -4361,7 +4410,7 @@ def draw(stdscr, notes, state):
         if 0 <= cur_idx < len(notes):
             cur = notes[cur_idx]
 
-            lines = content(cur).split("\n")
+            lines = preview_body_lines(content(cur), preview_w)
 
             start = state["p_scroll"]
             end = start + h - 2
@@ -5104,11 +5153,14 @@ def run(stdscr):
 
         elif k == curses.KEY_NPAGE:
             # Clamp to the last screenful so PgDn stops at the end of the note
-            # (one source line per preview row, pane height h - 2, no wrapping)
             # rather than scrolling on into blank space — mirrors PgUp's floor.
+            # Counted in drawn rows (wrapping splits a source line), pane
+            # height h - 2.
             max_scroll = 0
             if 0 <= state["cur"] < len(filtered):
-                n_lines = content(filtered[state["cur"]]).count("\n") + 1
+                preview_w = preview_geometry(w)[3]
+                n_lines = len(preview_body_lines(
+                    content(filtered[state["cur"]]), preview_w))
                 max_scroll = max(0, n_lines - (h - 2))
             state["p_scroll"] = min(max_scroll,
                                     state["p_scroll"]

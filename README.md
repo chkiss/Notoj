@@ -37,13 +37,28 @@ to import a Simplenote JSON export. Neither prompt appears again.
 | `~/.config/notoj/omdb_key` | OMDb API key for `update_ratings.py` (or env `OMDB_API_KEY`) |
 | `NOTOJ_NOTES_DIR` (env) | Overrides the notes dir for the companion scripts |
 
-`~/.config/notoj/config` is plain `key = value` lines (`#` comments). Beyond
-`notes_dir` you can set the editor (`default_editor`, or per-tag
-`tag_editor.<tag>` — e.g. open `#arabic` notes in mlterm, `#hindi` in a GUI
-editor), toggle preview markdown rendering and Arabic-script reshaping, pick
-colors (`color.*`), keep the undo history across sessions (`undo.persist`, on
-by default), and remap any key (`key.<action>`, including the `g_` chords).
-[`config.example`](config.example) documents every option with its default.
+`~/.config/notoj/config` is plain `key = value` lines (`#` comments); booleans
+take `true/false/yes/no/on/off/1/0`. The main options:
+
+| Key | Default | What it does |
+|---|---|---|
+| `notes_dir` | *(set on first run)* | Where notes live — required |
+| `default_editor` | `vim` | Editor for opening/creating notes (`$NOTOJ_VIM` wins over it) |
+| `tag_editor.<tag>` | — | Per-tag editor override — e.g. open `#arabic` notes in mlterm, `#hindi` in a GUI editor |
+| `render_markdown` | `true` | Render light markdown in the preview pane (master switch) |
+| `markdown_asterisk` | `true` | Style `*italic*` / `**bold**` |
+| `markdown_underscore_italic` | `false` | Style `_italic_` (off leaves `snake_case` alone) |
+| `markdown_underscore_bold` | `false` | Style `__bold__` (off leaves `__dunder__` alone) |
+| `reshape_arabic` | `true` | Pre-shape Arabic-script text in the list and preview so it isn't isolated |
+| `preview_wrap` | `true` | Word-wrap the preview body; off clips each line at the pane edge |
+| `preview_scroll` | `page` | Lines PgDn/PgUp scroll any preview pane — `page`, or a line count |
+| `list_max_w` | `80` | Max width of the left list panel; extra width goes to the preview |
+| `tag_display_order` | `freq` | Tag order for display — `freq`, `freq_asc`, `name`, `stored` |
+| `undo.persist` | `true` | Keep the undo history across sessions |
+| `color.<slot>` | — | Colors for `accent`, `date`, `tag`, `preview`, `match`, `footer_bg`, plus the `date_gradient` |
+| `key.<action>` | — | Remap any key, including the `g_` chords |
+
+[`config.example`](config.example) documents every option in full.
 
 ## Using notoj
 

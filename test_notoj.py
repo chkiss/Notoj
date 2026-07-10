@@ -3464,6 +3464,64 @@ class TestPoolMsg(unittest.TestCase):
                          "(2/2) b")
 
 
+class TestPreviewBodyLines(unittest.TestCase):
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    def test_wraps_by_default(self):
+        self.assertEqual(notoj.preview_body_lines("aaa bbb ccc", 7),
+                         ["aaa bbb", "ccc"])
+
+    def test_wrap_keeps_indent_on_continuation(self):
+        self.assertEqual(notoj.preview_body_lines("  aaa bbb ccc", 9),
+                         ["  aaa bbb", "  ccc"])
+
+    def test_short_lines_and_blanks_pass_through(self):
+        self.assertEqual(notoj.preview_body_lines("one\n\ntwo", 20),
+                         ["one", "", "two"])
+
+    def test_long_word_is_broken(self):
+        self.assertEqual(notoj.preview_body_lines("abcdefgh", 3),
+                         ["abc", "def", "gh"])
+
+    def test_tabs_expand_before_wrapping(self):
+        self.assertEqual(notoj.preview_body_lines("\tab", 20), ["    ab"])
+
+    def test_rows_never_exceed_the_pane_in_columns(self):
+        # "→" is two columns to disp_width; a character-counting wrapper would
+        # emit a row one column too wide and the draw would clip its last char.
+        for row in notoj.preview_body_lines("aa → bb → cc → dd", 6):
+            self.assertLessEqual(notoj.disp_width(row), 6, row)
+
+    def test_off_leaves_source_lines_whole(self):
+        notoj._config_cache = {"preview_wrap": "false"}
+        self.assertEqual(notoj.preview_body_lines("aaa bbb ccc", 7),
+                         ["aaa bbb ccc"])
+
+    def test_zero_width_pane_never_wraps(self):
+        self.assertEqual(notoj.preview_body_lines("aaa bbb", 0), ["aaa bbb"])
+
+
+class TestPreviewGeometry(unittest.TestCase):
+    def test_narrow_terminal_collapses_preview(self):
+        show, list_w, mid, pw = notoj.preview_geometry(40)
+        self.assertFalse(show)
+        self.assertEqual((list_w, mid, pw), (39, None, 0))
+
+    def test_wide_terminal_splits(self):
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        self.assertTrue(show)
+        self.assertEqual(mid, list_w + 2)
+        self.assertEqual(pw, 100 - (mid + 1))
+
+    def test_list_panel_capped(self):
+        self.assertLessEqual(notoj.preview_geometry(400)[1], notoj.LIST_MAX_W)
+
+
 class TestLaunch(unittest.TestCase):
     def setUp(self):
         notoj.launch.missing = None
