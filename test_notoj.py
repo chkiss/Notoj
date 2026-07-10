@@ -9,6 +9,7 @@ import tempfile
 import time
 import types
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -3637,6 +3638,88 @@ class TestPreviewBodyLines(unittest.TestCase):
 
     def test_zero_width_pane_never_wraps(self):
         self.assertEqual(notoj.preview_body_lines("aaa bbb", 0), ["aaa bbb"])
+
+
+class TestPreviewScrollSpeed(unittest.TestCase):
+    """Scrolling redraws the same note over and over. Wrapping it once per
+    keypress made a long note lag; the rows for a note are computed when you
+    land on it and reused until the note, the pane width, or the text change."""
+
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    def _note(self, tag, n_lines=2000):
+        # Unique text per test so no other test's cache entry can answer.
+        return "\n".join("%s lorem ipsum dolor sit amet consectetur elit %d"
+                         % (tag, i) for i in range(n_lines))
+
+    def _counting_wrap(self):
+        calls = []
+        real = notoj.wrap_to_width
+
+        def spy(line, width):
+            calls.append(line)
+            return real(line, width)
+        return calls, spy
+
+    def test_redrawing_one_note_wraps_it_once(self):
+        text = self._note("redraw")
+        calls, spy = self._counting_wrap()
+        with unittest.mock.patch.object(notoj, "wrap_to_width", spy):
+            first = notoj.preview_body_lines(text, 40)
+            after_first = len(calls)
+            for _ in range(30):
+                notoj.preview_body_lines(text, 40)
+        self.assertGreater(after_first, 0, "the note should wrap at least once")
+        self.assertEqual(len(calls), after_first,
+                         "30 redraws re-wrapped the note instead of reusing it")
+        self.assertEqual(notoj.preview_body_lines(text, 40), first)
+
+    def test_pgdn_clamp_reuses_the_drawn_rows(self):
+        # draw() renders the rows, then KEY_NPAGE asks how many there are.
+        text = self._note("pgdn")
+        calls, spy = self._counting_wrap()
+        with unittest.mock.patch.object(notoj, "wrap_to_width", spy):
+            notoj.preview_body_lines(text, 40)
+            after_draw = len(calls)
+            len(notoj.preview_body_lines(text, 40))
+        self.assertEqual(len(calls), after_draw,
+                         "the PgDn clamp wrapped the note a second time")
+
+    def test_resizing_the_pane_rewraps(self):
+        text = self._note("resize")
+        wide = notoj.preview_body_lines(text, 60)
+        narrow = notoj.preview_body_lines(text, 30)
+        self.assertNotEqual(wide, narrow)
+        self.assertEqual(notoj.preview_body_lines(text, 60), wide)
+
+    def test_edited_text_is_not_served_from_cache(self):
+        text = self._note("edited")
+        before = notoj.preview_body_lines(text, 40)
+        after = notoj.preview_body_lines(text + "\nappended line", 40)
+        self.assertEqual(after[:len(before)], before)
+        self.assertEqual(after[-1], "appended line")
+
+    def test_scrolling_a_long_note_stays_responsive(self):
+        # A keypress redraws the preview; PgDn also measures it. Budget the
+        # whole round trip against one cold wrap, so the assertion tracks the
+        # machine rather than a hard-coded millisecond count.
+        text = self._note("responsive", n_lines=3000)
+        t0 = time.perf_counter()
+        notoj.preview_body_lines(text, 60)          # landing on the note
+        cold = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        for _ in range(50):                          # 25 PgDn presses
+            notoj.preview_body_lines(text, 60)
+            len(notoj.preview_body_lines(text, 60))
+        warm = time.perf_counter() - t0
+        self.assertLess(warm, cold,
+                        "50 scroll redraws cost more than one cold wrap")
 
 
 class TestPreviewGeometry(unittest.TestCase):

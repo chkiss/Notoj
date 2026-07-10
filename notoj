@@ -4253,14 +4253,17 @@ def wrap_to_width(line, width):
     return [indent + r for r in rows]
 
 
-def preview_body_lines(text, width):
-    """A note's text as the rows the preview pane draws. With `preview_wrap`
-    on (the default) a line wider than the pane continues on the next row,
-    keeping its indentation; with it off each source line is one row and the
-    overflow is clipped at the pane edge."""
-    lines = [ln.expandtabs(4) for ln in text.split("\n")]
-    if width <= 0 or not config_bool("preview_wrap", True):
-        return lines
+# Wrapped rows for the notes most recently previewed, keyed by the text and
+# the pane width. Every keypress redraws the preview, and PgDn measures it a
+# second time to clamp the scroll; wrapping a long note on each of those is
+# what made scrolling lag. The rows are computed when you land on a note and
+# reused until the note, its text, or the pane width changes. Callers must
+# treat the list as read-only.
+_PREVIEW_ROWS = collections.OrderedDict()
+_PREVIEW_ROWS_MAX = 8
+
+
+def _wrap_body(lines, width):
     out = []
     for line in lines:
         if disp_width(line) <= width:
@@ -4268,6 +4271,33 @@ def preview_body_lines(text, width):
         else:
             out.extend(wrap_to_width(line, width))
     return out
+
+
+def preview_body_lines(text, width):
+    """A note's text as the rows the preview pane draws. With `preview_wrap`
+    on (the default) a line wider than the pane continues on the next row,
+    keeping its indentation; with it off each source line is one row and the
+    overflow is clipped at the pane edge.
+
+    Memoized per (text, width) — see _PREVIEW_ROWS. The returned list is
+    shared with the cache: read it, never mutate it."""
+    if width <= 0 or not config_bool("preview_wrap", True):
+        return [ln.expandtabs(4) for ln in text.split("\n")]
+
+    # hash() over the note body is O(1) after CPython caches it on the str,
+    # which the note dict holds for as long as the note is loaded. Compare the
+    # text as well, so a hash collision serves the wrong note's rows.
+    key = (hash(text), len(text), width)
+    hit = _PREVIEW_ROWS.get(key)
+    if hit is not None and hit[0] == text:
+        _PREVIEW_ROWS.move_to_end(key)
+        return hit[1]
+
+    rows = _wrap_body([ln.expandtabs(4) for ln in text.split("\n")], width)
+    _PREVIEW_ROWS[key] = (text, rows)
+    if len(_PREVIEW_ROWS) > _PREVIEW_ROWS_MAX:
+        _PREVIEW_ROWS.popitem(last=False)
+    return rows
 
 
 def preview_scroll_step(page_h):
