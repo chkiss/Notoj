@@ -4286,6 +4286,32 @@ def preview_scroll_step(page_h):
     return max(1, page_h)
 
 
+def preview_max_scroll(note, w, h):
+    """Highest p_scroll that still shows content — the note's wrapped length
+    minus one screenful, floored at 0. Shared by every PgDn on the notes list
+    (search mode included) so the pane stops at the end of the note instead of
+    scrolling into blank space. Counted in drawn rows, pane height h - 2."""
+    if note is None:
+        return 0
+    preview_w = preview_geometry(w)[3]
+    n_lines = len(preview_body_lines(content(note), preview_w))
+    return max(0, n_lines - (h - 2))
+
+
+def preview_scroll_key(k, state, note, w, h):
+    """Apply a PgDn/PgUp keypress to state["p_scroll"], clamped to the note.
+    True if the key was a page key and was consumed."""
+    if k == curses.KEY_NPAGE:
+        state["p_scroll"] = min(preview_max_scroll(note, w, h),
+                                state["p_scroll"] + preview_scroll_step(h - 2))
+        return True
+    if k == curses.KEY_PPAGE:
+        state["p_scroll"] = max(0, state["p_scroll"]
+                                - preview_scroll_step(h - 2))
+        return True
+    return False
+
+
 def nav_delta(k, page_h):
     """Decode a list-motion key into a cursor delta (or NAV_BOTTOM, or None
     for non-motion keys). One decoder for every list surface, so a new
@@ -5175,6 +5201,14 @@ def run(stdscr, imports=(), move=False):
                 state["cur"] -= 1
                 state["p_scroll"] = 0
                 continue
+            if k in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+                # Same preview paging as the main list — the EditBuffer has no
+                # use for the page keys, so scrolling stays available while
+                # you're still typing the query.
+                cur_note = (filtered[state["cur"]]
+                            if 0 <= state["cur"] < len(filtered) else None)
+                preview_scroll_key(k, state, cur_note, w, h)
+                continue
 
             r = buf.handle_key(k, stdscr.getch, esc_peek)
             state["q"] = buf.text
@@ -5282,24 +5316,10 @@ def run(stdscr, imports=(), move=False):
         # Preview scrolling
         # ----------------------------
 
-        elif k == curses.KEY_NPAGE:
-            # Clamp to the last screenful so PgDn stops at the end of the note
-            # rather than scrolling on into blank space — mirrors PgUp's floor.
-            # Counted in drawn rows (wrapping splits a source line), pane
-            # height h - 2.
-            max_scroll = 0
-            if 0 <= state["cur"] < len(filtered):
-                preview_w = preview_geometry(w)[3]
-                n_lines = len(preview_body_lines(
-                    content(filtered[state["cur"]]), preview_w))
-                max_scroll = max(0, n_lines - (h - 2))
-            state["p_scroll"] = min(max_scroll,
-                                    state["p_scroll"]
-                                    + preview_scroll_step(h - 2))
-
-        elif k == curses.KEY_PPAGE:
-            state["p_scroll"] = max(0, state["p_scroll"]
-                                    - preview_scroll_step(h - 2))
+        elif k in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+            cur_note = (filtered[state["cur"]]
+                        if 0 <= state["cur"] < len(filtered) else None)
+            preview_scroll_key(k, state, cur_note, w, h)
 
         # ----------------------------
         # Trash note
