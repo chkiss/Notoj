@@ -75,8 +75,12 @@ def diff_block(conflict, original):
         return "_Original is gone — this conflict copy is the only remaining version._"
     a, b = read_text(original), read_text(conflict)
     if a is None or b is None:
-        so = os.path.getsize(original) if os.path.exists(original) else 0
-        sc = os.path.getsize(conflict)
+        def size(p):
+            try:
+                return os.path.getsize(p)
+            except OSError:  # vanished between the walk and here
+                return 0
+        so, sc = size(original), size(conflict)
         return f"_Binary file — current {so:,} B vs conflict {sc:,} B. Compare manually._"
     ud = list(difflib.unified_diff(a, b, "current", "conflict", lineterm=""))
     if not ud:
@@ -96,7 +100,7 @@ def build_body(conflicts):
     home = os.path.expanduser("~")
     for conflict, original in conflicts:
         rel = conflict.replace(home, "~")
-        lines.append(f"## {os.path.basename(original or conflict)}")
+        lines.append(f"## {os.path.basename(original)}")
         lines.append(f"`{rel}`")
         lines.append("")
         lines.append(diff_block(conflict, original))
@@ -123,7 +127,8 @@ def write_report(body):
     nid = uuid.uuid4().hex
     created = now
     if os.path.exists(REPORT):  # preserve id/created if updating
-        old = open(REPORT, encoding="utf-8").read()
+        with open(REPORT, encoding="utf-8") as fh:
+            old = fh.read()
         mid = re.search(r'^id:\s*(\S+)', old, re.M)
         mcr = re.search(r'^created:\s*(\S+)', old, re.M)
         if mid:

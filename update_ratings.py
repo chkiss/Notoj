@@ -280,7 +280,11 @@ def process(path, dry, no_new=False):
     with open(path, encoding="utf-8") as f:
         text = f.read()
     fm, body = split_frontmatter(text)
-    if not no_new:
+    col, kind = CONFIG.get(os.path.basename(path), ("Rating", "movie"))
+    # `;`-grouped wishlist bullets are a film-note convention, and the "whole
+    # bullet is a real title" guard is an OMDb movie lookup — never rewrite
+    # Books/TV bullets ("Author; Title" would be split apart).
+    if not no_new and kind == "movie":
         body = split_groups(body, find_block(body))
     span = find_block(body)
     rated, none = parse_existing(body[span[0]:span[1]]) if span else ({}, [])
@@ -291,30 +295,26 @@ def process(path, dry, no_new=False):
         for title in section_titles(body, span):
             if "http" in title.lower():   # link lines (grouping handled upstream)
                 continue
-            if already_known(title, known):
+            # Check against titles adopted earlier this run too, so two
+            # spellings of the same film added together merge into one row.
+            if already_known(title, known + new):
                 continue
-            if title not in new:
-                new.append(title)
+            new.append(title)
 
-    kind = CONFIG.get(os.path.basename(path), ("Rating", "movie"))[1]
     added = []
     for title in new:
         disp = omdb_lookup(title, kind) if kind in ("movie", "tv") else None
         rated[title] = disp or "?"
         added.append(f"{title} → {rated[title]}")
 
-    col = CONFIG.get(os.path.basename(path), ("Rating", "movie"))[0]
     block = render_block(col, kind, rated, none)
 
     if span:
         new_body = body[:span[0]].rstrip("\n") + "\n\n" + block + "\n" + body[span[1]:].lstrip("\n")
     else:  # no table yet: insert after the title line
-        lines = body.split("\n", 2)
-        new_body = body  # leave alone if structure unexpected
-        if len(lines) >= 1:
-            head = lines[0]
-            rest = body[len(head):].lstrip("\n")
-            new_body = head + "\n\n" + block + "\n\n" + rest
+        head = body.split("\n", 1)[0]
+        rest = body[len(head):].lstrip("\n")
+        new_body = head + "\n\n" + block + "\n\n" + rest
 
     name = os.path.basename(path)
     if added:
