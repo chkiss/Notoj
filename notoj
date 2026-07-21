@@ -703,6 +703,20 @@ def tags(n):
     return " ".join(order_tags(n.get("tags") or []))
 
 
+def search_text(n):
+    """(title, body, tags) lowercased for matching, cached on the note dict.
+
+    Reloads build fresh dicts for changed files (and incremental_update keeps
+    the old dicts for unchanged ones), so the cache never goes stale. Tags are
+    joined unordered — display order is irrelevant to substring matching, and
+    order_tags does a config lookup + sort per note."""
+    c = n.get("_search_lc")
+    if c is None:
+        c = n["_search_lc"] = (title(n).lower(), content(n).lower(),
+                               " ".join(n.get("tags") or []).lower())
+    return c
+
+
 def is_recent(n):
     m = n.get("modificationDate", 0)
     return m and (datetime.now().timestamp() - float(m)) < 3600
@@ -727,7 +741,9 @@ def sort_notes(notes, key, rev):
 
 
 def _edit_dist(a, b):
-    if abs(len(a) - len(b)) > 2:
+    # The only caller accepts distance <= 1, so a length gap > 1 can't match —
+    # skip the O(mn) DP for those pairs (this runs per keypress in search).
+    if abs(len(a) - len(b)) > 1:
         return 99
     dp = list(range(len(b) + 1))
     for ca in a:
@@ -945,12 +961,7 @@ def normalize_external_note(path):
         new_stem = slugify(new_title)
         current_stem = os.path.splitext(os.path.basename(path))[0]
         if new_stem != current_stem:
-            new_path = os.path.join(NOTES_DIR, new_stem + ".md")
-            if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(path):
-                i = 2
-                while os.path.exists(new_path):
-                    new_path = os.path.join(NOTES_DIR, f"{new_stem} ({i}).md")
-                    i += 1
+            new_path = unique_dest(new_stem + ".md", keep=path)
             os.rename(path, new_path)
             final_path = new_path
 
@@ -1011,9 +1022,7 @@ def rank_notes(notes, q):
     results = []
 
     for n in notes:
-        t = title(n).lower()
-        body = content(n).lower()
-        tag_str = tags(n).lower()
+        t, body, tag_str = search_text(n)
         t_words = t.split()
 
         score = 0
@@ -1159,6 +1168,32 @@ def extract_hashtags(text):
     return list(dict.fromkeys(raw))
 
 
+def rewrite_tags_field(fm_text, tags):
+    """The frontmatter body (text between the `---` fences) with its tags:
+    block replaced by `tags` — a block list, `tags: []` when empty, appended
+    at the end when the field was missing (e.g. an adopted external file).
+    The single implementation behind every tags-field rewrite."""
+    out = []
+    skip_items = False
+    has_field = False
+    block = (["tags:"] + [f"  - {yaml_scalar(t)}" for t in tags]
+             if tags else ["tags: []"])
+    for line in fm_text.splitlines():
+        if line.startswith("tags:"):
+            has_field = True
+            out.extend(block)
+            skip_items = True
+            continue
+        if skip_items:
+            if line.startswith("  - "):
+                continue
+            skip_items = False
+        out.append(line)
+    if not has_field:
+        out.extend(block)
+    return "\n".join(out)
+
+
 def sync_hashtags(path):
     """Add any inline #hashtags found in the note body to the YAML tags field.
 
@@ -1191,23 +1226,8 @@ def sync_hashtags(path):
     if not new_tags:
         return False
 
-    all_tags = existing + new_tags
-    new_fm_lines = []
-    skip_items = False
-    for line in text[4:fm_end].splitlines():
-        if line.startswith("tags:"):
-            new_fm_lines.append("tags:")
-            for t in all_tags:
-                new_fm_lines.append(f"  - {yaml_scalar(t)}")
-            skip_items = True
-            continue
-        if skip_items:
-            if line.startswith("  - "):
-                continue
-            skip_items = False
-        new_fm_lines.append(line)
-
-    new_text = "---\n" + "\n".join(new_fm_lines) + text[fm_end:]
+    new_text = ("---\n" + rewrite_tags_field(text[4:fm_end], existing + new_tags)
+                + text[fm_end:])
     try:
         atomic_write(path, new_text)
         return True
@@ -1270,30 +1290,8 @@ def add_tags(path, new_tags):
     if not added:
         return []
 
-    all_tags = existing + added
-    has_tags_field = False
-    new_fm_lines = []
-    skip_items = False
-    for line in text[4:fm_end].splitlines():
-        if line.startswith("tags:"):
-            has_tags_field = True
-            new_fm_lines.append("tags:")
-            for t in all_tags:
-                new_fm_lines.append(f"  - {yaml_scalar(t)}")
-            skip_items = True
-            continue
-        if skip_items:
-            if line.startswith("  - "):
-                continue
-            skip_items = False
-        new_fm_lines.append(line)
-
-    if not has_tags_field:
-        new_fm_lines.append("tags:")
-        for t in all_tags:
-            new_fm_lines.append(f"  - {yaml_scalar(t)}")
-
-    new_text = "---\n" + "\n".join(new_fm_lines) + text[fm_end:]
+    new_text = ("---\n" + rewrite_tags_field(text[4:fm_end], existing + added)
+                + text[fm_end:])
     try:
         atomic_write(path, new_text)
     except Exception:
@@ -1354,25 +1352,8 @@ def remove_tag(path, tag):
     if new_tags == existing and body_stripped == body:
         return False
 
-    new_fm_lines = []
-    skip_items = False
-    for line in text[4:fm_end].splitlines():
-        if line.startswith("tags:"):
-            if new_tags:
-                new_fm_lines.append("tags:")
-                for t in new_tags:
-                    new_fm_lines.append(f"  - {yaml_scalar(t)}")
-            else:
-                new_fm_lines.append("tags: []")
-            skip_items = True
-            continue
-        if skip_items:
-            if line.startswith("  - "):
-                continue
-            skip_items = False
-        new_fm_lines.append(line)
-
-    new_text = "---\n" + "\n".join(new_fm_lines) + "\n---\n" + body_stripped
+    new_text = ("---\n" + rewrite_tags_field(text[4:fm_end], new_tags)
+                + "\n---\n" + body_stripped)
     try:
         atomic_write(path, new_text)
     except Exception:
@@ -1405,25 +1386,8 @@ def remove_tags_frontmatter(path, tags):
     if new_tags == existing:
         return False
 
-    new_fm_lines = []
-    skip_items = False
-    for line in text[4:fm_end].splitlines():
-        if line.startswith("tags:"):
-            if new_tags:
-                new_fm_lines.append("tags:")
-                for t in new_tags:
-                    new_fm_lines.append(f"  - {yaml_scalar(t)}")
-            else:
-                new_fm_lines.append("tags: []")
-            skip_items = True
-            continue
-        if skip_items:
-            if line.startswith("  - "):
-                continue
-            skip_items = False
-        new_fm_lines.append(line)
-
-    new_text = "---\n" + "\n".join(new_fm_lines) + text[fm_end:]
+    new_text = ("---\n" + rewrite_tags_field(text[4:fm_end], new_tags)
+                + text[fm_end:])
     try:
         atomic_write(path, new_text)
     except Exception:
@@ -1782,7 +1746,10 @@ def parse_when(s, now=None):
 
     for fmt_str in ("%Y-%m-%d", "%Y/%m/%d", "%m-%d-%Y", "%m/%d/%Y"):
         try:
-            dt = datetime.strptime(s, fmt_str).replace(tzinfo=timezone.utc)
+            # Local midnight, matching the local strftime that pins relative
+            # horizons in schedule_inline_loop — UTC here would skew every
+            # round-tripped date by the timezone offset.
+            dt = datetime.strptime(s, fmt_str)
             return dt.timestamp()
         except ValueError:
             continue
@@ -2233,7 +2200,8 @@ def modal_list(stdscr, view):
     # Tick twice a second rather than blocking: a resize is only guaranteed
     # to be noticed by the size poll below (SIGWINCH may surface as
     # KEY_RESIZE, as ERR, or not wake a blocked getch at all, depending on
-    # the terminal). An idle tick redraws nothing, so it costs ~0.
+    # the terminal). An idle tick stays inside the input wait below and
+    # redraws nothing, so it costs ~0.
     stdscr.timeout(500)
 
     while True:
@@ -2246,6 +2214,8 @@ def modal_list(stdscr, view):
             if (ts.lines, ts.columns) != stdscr.getmaxyx():
                 curses.resizeterm(ts.lines, ts.columns)
                 stdscr.clear()
+                if sq is not None:
+                    refilter()  # items() may rebuild for the new width (help)
         except (curses.error, OSError):
             pass
 
@@ -2323,25 +2293,38 @@ def modal_list(stdscr, view):
                 hide_input_cursor(stdscr)
 
         stdscr.refresh()
-        t_wait = time.monotonic()
-        k = stdscr.getch()
 
-        # A terminal resize arrives as KEY_RESIZE — or as ERR (-1) when the
-        # SIGWINCH interrupts the blocked getch (tmux does this). Neither is
-        # a view key: just loop, redrawing at the new size.
-        if k in (-1, curses.KEY_RESIZE):
-            # But a *dead* terminal (closed pty, dropped SSH) also yields
-            # ERR — instantly, ignoring the timeout — which would busy-spin
-            # at 100% CPU. A run of instant ERRs means the input is gone:
+        # Wait for input here across idle ticks — a `continue` would rebuild
+        # the whole frame, so the 2 Hz tick must not take that path. Only a
+        # real key, a resize (KEY_RESIZE, or a size change after an ERR —
+        # tmux surfaces SIGWINCH that way), or the dead-pty guard leaves
+        # this wait.
+        while True:
+            t_wait = time.monotonic()
+            k = stdscr.getch()
+            if k != -1:
+                eof_spins = 0
+                break
+            # A *dead* terminal (closed pty, dropped SSH) yields ERR
+            # instantly, ignoring the timeout — which would busy-spin at
+            # 100% CPU. A run of instant ERRs means the input is gone:
             # unwind; the main loop's matching guard then exits the app.
-            if k == -1 and time.monotonic() - t_wait < 0.01:
+            if time.monotonic() - t_wait < 0.01:
                 eof_spins += 1
                 if eof_spins > 50:
                     return None
-            else:
-                eof_spins = 0
-            continue
-        eof_spins = 0
+                continue
+            eof_spins = 0
+            try:
+                ts = os.get_terminal_size()
+                if (ts.lines, ts.columns) != stdscr.getmaxyx():
+                    break          # resize surfaced as ERR: redraw
+            except (curses.error, OSError):
+                pass
+        if k in (-1, curses.KEY_RESIZE):
+            if k == curses.KEY_RESIZE and sq is not None:
+                refilter()  # row list may rebuild at the new width (help)
+            continue               # redraw at the new size
 
         # Scaffold "/" search: open on "/", then the EditBuffer sees every key
         # before nav/on_key — j/k are letters to type while filtering. Keys
@@ -2408,8 +2391,11 @@ def modal_list(stdscr, view):
         if not narrow and (k in nav_ok or (k == ord("g") and not cap)):
             prev = st["cur"]
             if k == ord("g"):
-                if stdscr.getch() == ord("g"):
+                k2 = stdscr.getch()
+                if k2 == ord("g"):
                     st["cur"] = 0
+                elif k2 != -1:
+                    curses.ungetch(k2)  # not a chord: let it dispatch normally
             else:
                 d = nav_delta(k, st["page_h"])
                 if d == NAV_BOTTOM:
@@ -2851,12 +2837,7 @@ def check_rename(n):
 
     if title_changed:
         new_stem = slugify(new_first_line)
-        new_path = os.path.join(NOTES_DIR, new_stem + ".md")
-        if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(path):
-            i = 2
-            while os.path.exists(new_path):
-                new_path = os.path.join(NOTES_DIR, f"{new_stem} ({i}).md")
-                i += 1
+        new_path = unique_dest(new_stem + ".md", keep=path)
     else:
         new_path = path
 
@@ -3114,26 +3095,40 @@ def _vim_position_args(src, end, search):
     return args
 
 
-def open_note(n, end=False, search=None):
-    suspend_curses()
+def edit_in_editor(n, end, search):
+    """Suspend curses and open the note in the configured editor, positioned
+    by `end`/`search`. True when the file was written (its mtime moved); a
+    missing editor or a quit without writing is False. The one launch
+    preamble behind open_note and edit_trash_note."""
     path = n["path"]
-    before = None
-    mtime_before = None
-    if os.path.exists(path):
+    try:
         mtime_before = os.path.getmtime(path)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                before = f.read()
-        except Exception:
-            before = None
+    except OSError:
+        mtime_before = None
     ed = vim_cmd(n)
     cmd = list(ed)
     if is_vimlike(ed):
         src = vim_source_args()
         cmd += src + _vim_position_args(src, end, search)
     cmd.append(path)
-    launch(cmd)   # a missing editor leaves mtime unchanged → no restore below
-    if os.path.exists(path) and os.path.getmtime(path) != mtime_before:
+    suspend_curses()
+    launch(cmd)   # a missing editor leaves mtime unchanged → False
+    try:
+        return os.path.getmtime(path) != mtime_before
+    except OSError:
+        return False
+
+
+def open_note(n, end=False, search=None):
+    path = n["path"]
+    before = None
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                before = f.read()
+        except Exception:
+            before = None
+    if edit_in_editor(n, end, search):
         final = check_rename(n) or path
         git_commit(f"edit: {title(n)}")
         if before is not None and os.path.exists(final):
@@ -3160,16 +3155,7 @@ def edit_trash_note(n, end=False, search=None):
     path = n["path"]
     if not os.path.exists(path):
         return None
-    mtime_before = os.path.getmtime(path)
-    ed = vim_cmd(n)
-    cmd = list(ed)
-    if is_vimlike(ed):
-        src = vim_source_args()
-        cmd += src + _vim_position_args(src, end, search)
-    cmd.append(path)
-    suspend_curses()
-    launch(cmd)   # a missing editor leaves mtime unchanged → returns None below
-    if not os.path.exists(path) or os.path.getmtime(path) == mtime_before:
+    if not edit_in_editor(n, end, search):
         return None
     restored = do_restore(path, os.path.join(NOTES_DIR, os.path.basename(path)))
     if not restored:
@@ -3187,14 +3173,7 @@ def _stem(path):
 def do_trash(path):
     """Move a note file into the trash, returning its trash path."""
     os.makedirs(TRASH_DIR, exist_ok=True)
-    base = os.path.basename(path)
-    dest = os.path.join(TRASH_DIR, base)
-    if os.path.exists(dest):
-        stem, ext = os.path.splitext(base)
-        i = 2
-        while os.path.exists(dest):
-            dest = os.path.join(TRASH_DIR, f"{stem} ({i}){ext}")
-            i += 1
+    dest = unique_dest(os.path.basename(path), TRASH_DIR)
     os.rename(path, dest)
     git_commit(f"trash: {_stem(path)}")
     return dest
@@ -3205,14 +3184,8 @@ def do_restore(trash_path, orig_path):
     path it landed at."""
     if not os.path.exists(trash_path):
         return None
-    dest = orig_path
-    if os.path.exists(dest):
-        d = os.path.dirname(orig_path) or NOTES_DIR
-        stem, ext = os.path.splitext(os.path.basename(orig_path))
-        i = 2
-        while os.path.exists(dest):
-            dest = os.path.join(d, f"{stem} ({i}){ext}")
-            i += 1
+    dest = unique_dest(os.path.basename(orig_path),
+                       os.path.dirname(orig_path) or NOTES_DIR)
     os.rename(trash_path, dest)
     git_commit(f"restore: {_stem(dest)}")
     return dest
@@ -3361,23 +3334,29 @@ def load_trash():
     return notes
 
 
-def unique_dest(name):
-    """A free path in NOTES_DIR for a file called `name`, suffixing " (2)",
-    " (3)", … on collision. Never overwrites an existing note."""
-    dest = os.path.join(NOTES_DIR, name)
+def unique_dest(name, directory=None, keep=None):
+    """A free path in `directory` (default NOTES_DIR) for a file called
+    `name`, suffixing " (2)", " (3)", … on collision. `keep` is a path whose
+    own existence is not a collision — the file being renamed, so a rename
+    that lands on itself (e.g. a case-only title change on a case-insensitive
+    filesystem) doesn't earn a suffix. Never overwrites an existing note.
+    The one collision-suffix implementation — every rename/trash/restore/new
+    path goes through here."""
+    d = directory or NOTES_DIR
+    keep = os.path.abspath(keep) if keep else None
+    dest = os.path.join(d, name)
     stem, ext = os.path.splitext(name)
     i = 2
-    while os.path.exists(dest):
-        dest = os.path.join(NOTES_DIR, f"{stem} ({i}){ext}")
+    while os.path.exists(dest) and os.path.abspath(dest) != keep:
+        dest = os.path.join(d, f"{stem} ({i}){ext}")
         i += 1
     return dest
 
 
 def restore_note(n):
-    src = n["path"]
-    dst = unique_dest(os.path.basename(src))
-    os.rename(src, dst)
-    git_commit(f"restore: {title(n)}")
+    """Restore a trashed note into the vault root (the trash view's `u`) —
+    the one collision-handling implementation lives in do_restore."""
+    do_restore(n["path"], os.path.join(NOTES_DIR, os.path.basename(n["path"])))
 
 
 def finalize_new_note(tmp_path):
@@ -3419,13 +3398,7 @@ def finalize_new_note(tmp_path):
 
     new_text = "---\n" + "\n".join(new_yaml_lines) + text[fm_end:]
 
-    stem = slugify(first_line)
-    dest = os.path.join(NOTES_DIR, stem + ".md")
-    if os.path.exists(dest):
-        i = 2
-        while os.path.exists(dest):
-            dest = os.path.join(NOTES_DIR, f"{stem} ({i}).md")
-            i += 1
+    dest = unique_dest(slugify(first_line) + ".md")
 
     with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(new_text)
@@ -3532,7 +3505,9 @@ def import_msgs(imported, failed):
     return msgs
 
 
-def new_note():
+def new_note(title_text=""):
+    """Open the editor on a fresh frontmatter stub — seeded with `title_text`
+    as the first body line when given — and adopt the result into the vault."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     key = uuid.uuid4().hex
     frontmatter = (
@@ -3544,40 +3519,10 @@ def new_note():
         f"tags: []\n"
         f"---\n"
     )
+    body = "\n" + (title_text + "\n\n" if title_text else "")
     tmp_path = os.path.join(NOTES_DIR, f".new_{key}.md")
     with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(frontmatter + "\n")
-
-    suspend_curses()
-    ed = vim_cmd()
-    cmd = list(ed)
-    if is_vimlike(ed):
-        cmd += vim_source_args() + ["-c", "normal G", "-c", "startinsert"]
-    cmd.append(tmp_path)
-    if not launch(cmd):
-        try:
-            os.remove(tmp_path)   # editor missing — don't leave a stub note
-        except OSError:
-            pass
-        return None
-    return finalize_new_note(tmp_path)
-
-
-def new_note_with_title(title_text):
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    key = uuid.uuid4().hex
-    frontmatter = (
-        f"---\n"
-        f"id: {key}\n"
-        f"created: {now_iso}\n"
-        f"modified: {now_iso}\n"
-        f"version: 1\n"
-        f"tags: []\n"
-        f"---\n"
-    )
-    tmp_path = os.path.join(NOTES_DIR, f".new_{key}.md")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(frontmatter + "\n" + title_text + "\n\n")
+        f.write(frontmatter + body)
 
     suspend_curses()
     ed = vim_cmd()
@@ -4103,11 +4048,6 @@ def typed_char_getch(getch, k):
     return None
 
 
-def typed_char(stdscr, k):
-    """typed_char_getch bound to a curses screen (the historical interface)."""
-    return typed_char_getch(stdscr.getch, k)
-
-
 def word_boundary(s, pos, forward):
     """Index of the next word boundary from `pos` in `s`, readline-style: skip
     any run of whitespace, then a run of word characters. `forward` scans right,
@@ -4314,19 +4254,21 @@ def preview_body_lines(text, width):
 
     Memoized per (text, width) — see _PREVIEW_ROWS. The returned list is
     shared with the cache: read it, never mutate it."""
-    if width <= 0 or not config_bool("preview_wrap", True):
-        return [ln.expandtabs(4) for ln in text.split("\n")]
+    wrap = width > 0 and config_bool("preview_wrap", True)
 
     # hash() over the note body is O(1) after CPython caches it on the str,
     # which the note dict holds for as long as the note is loaded. Compare the
-    # text as well, so a hash collision serves the wrong note's rows.
-    key = (hash(text), len(text), width)
+    # text as well, so a hash collision serves the wrong note's rows. The
+    # no-wrap rows are width-independent; key them as width 0.
+    key = (hash(text), len(text), width if wrap else 0)
     hit = _PREVIEW_ROWS.get(key)
     if hit is not None and hit[0] == text:
         _PREVIEW_ROWS.move_to_end(key)
         return hit[1]
 
-    rows = _wrap_body([ln.expandtabs(4) for ln in text.split("\n")], width)
+    rows = [ln.expandtabs(4) for ln in text.split("\n")]
+    if wrap:
+        rows = _wrap_body(rows, width)
     _PREVIEW_ROWS[key] = (text, rows)
     if len(_PREVIEW_ROWS) > _PREVIEW_ROWS_MAX:
         _PREVIEW_ROWS.popitem(last=False)
@@ -4574,11 +4516,12 @@ def draw(stdscr, notes, state):
                 if i >= h - 2:
                     break
 
-                safe = line.expandtabs(4).replace("\n", "")
+                # rows from preview_body_lines are already tab-expanded and
+                # newline-free
                 draw_body = (draw_markdown_line if render_md
                             else draw_line_highlighted)
                 draw_body(
-                    stdscr, i + 1, mid + 1, safe, preview_w,
+                    stdscr, i + 1, mid + 1, line, preview_w,
                     curses.color_pair(4),
                     curses.color_pair(5) | curses.A_BOLD,
                     tokens,
@@ -4724,6 +4667,7 @@ def run(stdscr, imports=(), move=False):
         "_dups": [],
         "trash_mode": False,
         "_trash": None,         # cached trash listing; None = reload on next draw
+        "_trash_gen": 0,        # bumped per reload — the cache-key marker for _trash
         "review_mode": False,
         "tagf": None,           # tag-filter view: {"tags": [...], "idx": -1|i}
         "_tags_ui": {"mode_i": 0},   # tags view sort mode, kept across visits
@@ -4927,6 +4871,7 @@ def run(stdscr, imports=(), move=False):
         # stable in the cache key below (rather than flipping None->list mid-key).
         if state["trash_mode"] and state["_trash"] is None:
             state["_trash"] = load_trash()
+            state["_trash_gen"] += 1
 
         def compute_filtered():
             if state["trash_mode"]:
@@ -4947,7 +4892,10 @@ def run(stdscr, imports=(), move=False):
         # is a free generation marker; the rest are the mode, sort and query.
         filter_key = (
             id(notes), state["sort"], state["rev"], q,
-            state["trash_mode"], id(state["_trash"]),
+            # A generation counter, not id(_trash): the old list is freed
+            # (set to None) before the new one is allocated, so id() could
+            # collide and serve a stale frame.
+            state["trash_mode"], state["_trash_gen"],
             id(state["dup_mode"]), state["review_mode"], id(state["_review"]),
             tuple(tagf_active(state["tagf"])) if state["tagf"] is not None else None,
         )
@@ -5247,7 +5195,7 @@ def run(stdscr, imports=(), move=False):
                     # "no match -> create a note from the query" only makes
                     # sense in the plain notes view, not while filtering a
                     # loops / duplicates / trash subset.
-                    dest = new_note_with_title(state["q"].strip())
+                    dest = new_note(state["q"].strip())
                     refresh_notes()
                     state["q"] = ""
                     state["q_pos"] = 0
@@ -5515,10 +5463,11 @@ def run(stdscr, imports=(), move=False):
             elif state["_undo"]:
                 nxt = state["_undo"][-1]
                 foreign = nxt.get("sess") and nxt["sess"] != SESSION_ID
-                if foreign and state["_xsess_armed"] != ("undo", nxt["sess"]):
+                # _xsess_armed is always None here — an armed keystroke is
+                # consumed (and disarmed) by the prompt block before dispatch.
+                if foreign:
                     xsess_arm("undo", nxt["sess"])
                 else:
-                    state["_xsess_armed"] = None
                     undo_step()
             elif not state["trash_mode"]:
                 push_msg("nothing to undo")
@@ -5528,10 +5477,9 @@ def run(stdscr, imports=(), move=False):
             if state["_redo"]:
                 nxt = state["_redo"][-1]
                 foreign = nxt.get("sess") and nxt["sess"] != SESSION_ID
-                if foreign and state["_xsess_armed"] != ("redo", nxt["sess"]):
+                if foreign:
                     xsess_arm("redo", nxt["sess"])
                 else:
-                    state["_xsess_armed"] = None
                     redo_step()
             else:
                 push_msg("nothing to redo")

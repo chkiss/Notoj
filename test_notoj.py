@@ -784,46 +784,44 @@ class TestRankNotes(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# typed_char — printable-key decoding, incl. multibyte UTF-8 reassembly
+# typed_char_getch — printable-key decoding, incl. multibyte UTF-8 reassembly
 # ---------------------------------------------------------------------------
 
-class FakeScreen:
-    """Minimal stdscr stand-in: getch() returns queued ints in order."""
-    def __init__(self, queued=()):
-        self._q = list(queued)
-    def getch(self):
-        return self._q.pop(0)
+def typed(k, queued=()):
+    """typed_char_getch fed by a queue of ints, as a curses getch would."""
+    q = list(queued)
+    return notoj.typed_char_getch(lambda: q.pop(0), k)
 
 
 class TestTypedChar(unittest.TestCase):
     def test_ascii_printable(self):
-        self.assertEqual(notoj.typed_char(FakeScreen(), ord("a")), "a")
-        self.assertEqual(notoj.typed_char(FakeScreen(), ord(" ")), " ")
+        self.assertEqual(typed(ord("a")), "a")
+        self.assertEqual(typed(ord(" ")), " ")
 
     def test_control_and_special_keys_rejected(self):
         for k in (10, 13, 27, 9, 127, curses_stub.KEY_BACKSPACE):
-            self.assertIsNone(notoj.typed_char(FakeScreen(), k))
+            self.assertIsNone(typed(k))
 
     def test_two_byte_arabic(self):
         # "ب" U+0628 -> 0xD8 0xA8: lead byte arrives via k, continuation via getch.
         ch = "ب"
         lead, cont = ch.encode("utf-8")
-        self.assertEqual(notoj.typed_char(FakeScreen([cont]), lead), ch)
+        self.assertEqual(typed(lead, [cont]), ch)
 
     def test_three_byte(self):
         # "あ" U+3042 -> three bytes; two follow the lead.
         ch = "あ"
         b = ch.encode("utf-8")
-        self.assertEqual(notoj.typed_char(FakeScreen(list(b[1:])), b[0]), ch)
+        self.assertEqual(typed(b[0], list(b[1:])), ch)
 
     def test_four_byte_emoji(self):
         ch = "\U0001f600"  # 😀
         b = ch.encode("utf-8")
-        self.assertEqual(notoj.typed_char(FakeScreen(list(b[1:])), b[0]), ch)
+        self.assertEqual(typed(b[0], list(b[1:])), ch)
 
     def test_invalid_sequence_returns_none(self):
         # Lead byte expecting a continuation, fed a bogus one -> decode fails.
-        self.assertIsNone(notoj.typed_char(FakeScreen([0x00]), 0xD8))
+        self.assertIsNone(typed(0xD8, [0x00]))
 
 
 class TestWordBoundary(unittest.TestCase):
@@ -1331,6 +1329,29 @@ class TestSyncHashtags(unittest.TestCase):
             with open(path, encoding="utf-8") as f:
                 text = f.read()
             self.assertEqual(text.count("existing"), 2)  # once in tags, once in body
+
+    def test_adds_tags_field_when_missing(self):
+        # A note without any tags: field (e.g. an adopted external file) must
+        # gain one — before the fix the rewrite was a byte-identical no-op
+        # that still reported "changed", re-syncing the note on every launch.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, (
+                "---\n"
+                "id: abc\n"
+                "created: 2013-10-08T13:08:43Z\n"
+                "modified: 2013-10-08T13:08:43Z\n"
+                "version: 1\n"
+                "---\n"
+                "\n"
+                "My note with #newtag\n"
+            ))
+            self.assertTrue(notoj.sync_hashtags(path))
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("tags:\n  - newtag\n", text)
+            # Adopted: a second sync sees nothing new to do.
+            self.assertFalse(notoj.sync_hashtags(path))
 
     def test_no_hashtags_no_change(self):
         content = (
@@ -2266,7 +2287,7 @@ class TestParseWhen(unittest.TestCase):
     def test_iso_date(self):
         ts = notoj.parse_when("2026-12-01", self.now)
         self.assertEqual(
-            datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d"), "2026-12-01"
+            datetime.fromtimestamp(ts).strftime("%Y-%m-%d"), "2026-12-01"
         )
 
     def test_garbage_returns_none(self):
