@@ -3692,6 +3692,70 @@ class TestPreviewBodyLines(unittest.TestCase):
         self.assertEqual(notoj.preview_body_lines("aaa bbb", 0), ["aaa bbb"])
 
 
+class TestSharedPreviewWrap(unittest.TestCase):
+    """The modal previews (history diff, tag notes, backlinks) wrap through
+    the same wrap_preview_rows as the notes pane. The history diff once wrapped
+    by hand and silently stopped honouring preview_wrap; these lock in the
+    contract that lets every pane share one implementation."""
+
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    def test_rows_carry_source_index_and_last_flag(self):
+        # The diff paints a continuation row with its source line's color, so
+        # a wrapped "+" line must still report the index of that "+" line.
+        rows = notoj.wrap_preview_rows(["+aaa bbb", "-c"], 4)
+        self.assertEqual(rows, [("+aaa", 0, False), ("bbb", 0, True),
+                                ("-c", 1, True)])
+
+    def test_off_leaves_lines_whole(self):
+        notoj._config_cache = {"preview_wrap": "false"}
+        self.assertEqual(notoj.wrap_preview_rows(["aaa bbb ccc"], 7),
+                         [("aaa bbb ccc", 0, True)])
+
+    def test_tabs_expand(self):
+        self.assertEqual(notoj.wrap_preview_rows(["\tab"], 20),
+                         [("    ab", 0, True)])
+
+    def test_cache_rewraps_when_width_or_selection_changes(self):
+        calls = []
+
+        def source(key):
+            calls.append(key)
+            return ["aaa bbb ccc"]
+
+        p = notoj.PreviewRows(source)
+        self.assertEqual(len(p.rows(0, 7)), 2)
+        p.rows(0, 7)                      # same key and width: cached
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(p.rows(0, 40)), 1)   # resize re-wraps
+        p.rows(1, 40)                             # new selection re-wraps
+        self.assertEqual(len(calls), 3)
+
+    def test_count_is_wrapped_rows_so_pgdn_pages_past_them(self):
+        p = notoj.PreviewRows(lambda key: ["aaa bbb ccc"])
+        # Before any draw there is no width; the source count is the fallback.
+        self.assertEqual(p.count(0), 1)
+        p.rows(0, 7)
+        self.assertEqual(p.count(0), 2)
+        # A different selection than the cached one falls back rather than
+        # reporting the wrong note's row count.
+        self.assertEqual(p.count(1), 1)
+
+    def test_invalidate_drops_stale_rows(self):
+        lines = ["aaa bbb ccc"]
+        p = notoj.PreviewRows(lambda key: lines)
+        p.rows(0, 7)
+        lines[:] = ["x"]                  # e.g. history reloading its diff
+        self.assertEqual(len(p.rows(0, 7)), 2, "stale rows expected pre-drop")
+        p.invalidate()
+        self.assertEqual(p.rows(0, 7), [("x", 0, True)])
+
+
 class TestPreviewScrollSpeed(unittest.TestCase):
     """Scrolling redraws the same note over and over. Wrapping it once per
     keypress made a long note lag; the rows for a note are computed when you

@@ -2425,6 +2425,20 @@ def hist_view(stdscr, n):
 
     def load_diff(cur):
         vs["diff"] = get_diff_lines(n["path"], commits[cur]["hash"])
+        # The rows are keyed by the selected commit, but the diff behind a
+        # given index can also change under a "/" refilter — drop them.
+        prev.invalidate()
+
+    prev = PreviewRows(lambda _sel: vs["diff"])
+
+    def diff_attr(line):
+        if line.startswith("+") and not line.startswith("+++"):
+            return curses.color_pair(3)
+        if line.startswith("-") and not line.startswith("---"):
+            return curses.color_pair(2)
+        if line.startswith("@@"):
+            return curses.color_pair(4)
+        return curses.A_NORMAL
 
     load_diff(0)
 
@@ -2449,16 +2463,8 @@ def hist_view(stdscr, n):
         if not diff:
             addnstr_w(scr, 1, x0, "(no changes vs current)", pw, curses.A_DIM)
             return
-        for i, line in enumerate(diff[off:off + ph]):
-            if line.startswith("+") and not line.startswith("+++"):
-                attr = curses.color_pair(3)
-            elif line.startswith("-") and not line.startswith("---"):
-                attr = curses.color_pair(2)
-            elif line.startswith("@@"):
-                attr = curses.color_pair(4)
-            else:
-                attr = curses.A_NORMAL
-            addnstr_w(scr, i + 1, x0, line.expandtabs(4), pw, attr)
+        for i, (line, src, _) in enumerate(prev.rows(cur, pw)[off:off + ph]):
+            addnstr_w(scr, i + 1, x0, line, pw, diff_attr(diff[src]))
 
     def on_key(k, st):
         if k in [ord("q"), 27]:
@@ -2475,7 +2481,9 @@ def hist_view(stdscr, n):
     modal_list(stdscr, {
         "count": lambda: len(commits),
         "search": {"items": lambda: commits, "match": match},
-        "preview_lines": lambda sel: len(vs["diff"]),
+        # Rows, not source lines: with wrap on, a long diff line is several
+        # rows and PgDn must page past all of them.
+        "preview_lines": prev.count,
         "header": lambda w: f"history: {title(n)}",
         "footer": lambda: ("j/k select  / search  PgDn/PgUp scroll diff  "
                            "⮐ vimdiff  q back"),
@@ -2522,16 +2530,20 @@ def tags_view(stdscr, notes, focus=None, ui=None):
             vs.setdefault("_prev", {}), sel_tag,
             lambda: sort_notes(filter_by_tags(notes, [sel_tag]), "modified", True))
 
+    prev = PreviewRows(lambda sel: [title(m) for m in tagged_for(sel)])
+
     def draw_preview(scr, x0, pw, ph, cur, off):
         # A miniature notes list: same title color and date recency gradient
         # as the main list, so the pane reads as "these notes".
         now_ts = datetime.now().timestamp()
-        for i, m in enumerate(tagged_for(cur)[off:off + ph]):
-            t = title(m)
+        tagged = tagged_for(cur)
+        for i, (t, src, last) in enumerate(prev.rows(cur, pw)[off:off + ph]):
             addnstr_w(scr, i + 1, x0, t, pw, curses.color_pair(1))
+            # The date trails the title's *final* row, so a wrapped title
+            # keeps its date instead of colliding with its continuation.
             tw = disp_width(t) + 2
-            if tw < pw:
-                ts = m.get("modificationDate")
+            if last and tw < pw:
+                ts = tagged[src].get("modificationDate")
                 addnstr_w(scr, i + 1, x0 + tw, f"({ago(ts)})", pw - tw,
                           date_attr(ts, now_ts))
 
@@ -2546,6 +2558,7 @@ def tags_view(stdscr, notes, focus=None, ui=None):
             if ui is not None:
                 ui["mode_i"] = vs["mode_i"]
             vs["items"] = sort_tag_stats(stats, TAG_SORTS[vs["mode_i"]])
+            prev.invalidate()   # the rows are keyed by index; the order moved
             # Keep the selection on the same tag across the re-sort; the
             # scaffold's per-frame clamp re-centers the scroll window.
             for i, it in enumerate(vs["items"]):
@@ -2562,7 +2575,7 @@ def tags_view(stdscr, notes, focus=None, ui=None):
         "count": lambda: len(vs["items"]),
         "search": {"items": lambda: vs["items"],
                    "match": lambda it, ql: ql in it[0].lower()},
-        "preview_lines": lambda sel: len(tagged_for(sel)),
+        "preview_lines": prev.count,
         "header": lambda w: (f"tags ({len(vs['items'])})  "
                              f"sort:{TAG_SORTS[vs['mode_i']]}"),
         "footer": lambda: ("j/k select  / search  s sort  "
@@ -2603,13 +2616,17 @@ def backlinks_view(stdscr, notes, note):
         return frame_cache(prev_cache, sel,
                            lambda: linking_lines(content(links[sel]), fname))
 
+    # Hits are stripped before wrapping: a referencing line is usually indented
+    # body text, and keeping that indent would waste pane width on every row.
+    prev = PreviewRows(lambda sel: [ln.strip() for ln in hits_for(sel)])
+
     def draw_preview(scr, x0, pw, ph, cur, off):
         if not links:
             addnstr_w(scr, 1, x0, "(no notes link to this one)", pw, curses.A_DIM)
             return
-        for i, line in enumerate(hits_for(cur)[off:off + ph]):
+        for i, (line, _, _) in enumerate(prev.rows(cur, pw)[off:off + ph]):
             draw_line_highlighted(
-                scr, i + 1, x0, line.expandtabs(4).strip(), pw,
+                scr, i + 1, x0, line, pw,
                 curses.color_pair(4),
                 curses.color_pair(5) | curses.A_BOLD,
                 [hi_token] if hi_token else [],
@@ -2628,7 +2645,7 @@ def backlinks_view(stdscr, notes, note):
         "count": lambda: len(links),
         "search": {"items": lambda: links,
                    "match": lambda m, ql: ql in title(m).lower()},
-        "preview_lines": lambda sel: len(hits_for(sel)) if links else 0,
+        "preview_lines": lambda sel: prev.count(sel) if links else 0,
         "header": lambda w: f"backlinks: {title(note)} ({len(links)})",
         "footer": lambda: "j/k select  / search  ⮐ go to note  ESC back  q quit",
         "draw_row": draw_row,
@@ -4236,14 +4253,61 @@ _PREVIEW_ROWS = collections.OrderedDict()
 _PREVIEW_ROWS_MAX = 8
 
 
-def _wrap_body(lines, width):
+def wrap_preview_rows(lines, width):
+    """Source lines as the rows a preview pane draws: tabs expanded, then
+    wrapped to `width` when the `preview_wrap` config is on (the default) and
+    left to clip at the pane edge when it is off.
+
+    Each row is (text, src_i, last) — the index of the line it came from, and
+    whether it is that line's final row. Carrying the index rather than a
+    finished string is what lets every preview keep its own painting while
+    sharing one wrap: the history diff maps src_i to its +/- color so a
+    wrapped line stays green across continuations, and the tag pane uses
+    `last` to park a note's date after its final row. This is the single
+    place that consults preview_wrap; previews that wrap by hand drift out of
+    step with it, which is exactly how the history diff lost wrapping."""
+    wrap = width > 0 and config_bool("preview_wrap", True)
     out = []
-    for line in lines:
-        if disp_width(line) <= width:
-            out.append(line)
-        else:
-            out.extend(wrap_to_width(line, width))
+    for i, line in enumerate(lines):
+        line = line.expandtabs(4)
+        parts = (wrap_to_width(line, width)
+                 if wrap and disp_width(line) > width else [line])
+        out.extend((p, i, j == len(parts) - 1) for j, p in enumerate(parts))
     return out
+
+
+class PreviewRows:
+    """Per-view wrap cache for the modal previews (history diff, tag notes,
+    backlink hits). `source(key)` yields the lines for a selection; rows()
+    wraps them and holds the result until the selection or the pane width
+    changes — every keypress redraws the pane and PgDn measures it again, so
+    re-wrapping per call is what made the notes preview lag before it was
+    memoized. Callers must treat the returned list as read-only.
+
+    The notes pane keeps its own global cache (_PREVIEW_ROWS) instead: it is
+    keyed by note text rather than by a selection index, so it survives moving
+    away from a note and back."""
+
+    def __init__(self, source):
+        self._source = source
+        self._key = self._width = self._rows = None
+
+    def rows(self, key, width):
+        if self._rows is not None and (self._key, self._width) == (key, width):
+            return self._rows
+        self._key, self._width = key, width
+        self._rows = wrap_preview_rows(self._source(key), width)
+        return self._rows
+
+    def count(self, key):
+        # PgDn clamps against drawn rows. Before the pane has drawn at this
+        # key there is no width to wrap to, so fall back to the source count.
+        if self._rows is not None and self._key == key:
+            return len(self._rows)
+        return len(self._source(key))
+
+    def invalidate(self):
+        self._key = self._width = self._rows = None
 
 
 def preview_body_lines(text, width):
@@ -4266,9 +4330,11 @@ def preview_body_lines(text, width):
         _PREVIEW_ROWS.move_to_end(key)
         return hit[1]
 
-    rows = [ln.expandtabs(4) for ln in text.split("\n")]
-    if wrap:
-        rows = _wrap_body(rows, width)
+    # Shares wrap_preview_rows with the modal previews so one config knob and
+    # one wrap rule serve every pane; the body pane draws whole rows uniformly,
+    # so the source indices are dropped here.
+    rows = [r[0] for r in wrap_preview_rows(text.split("\n"),
+                                            width if wrap else 0)]
     _PREVIEW_ROWS[key] = (text, rows)
     if len(_PREVIEW_ROWS) > _PREVIEW_ROWS_MAX:
         _PREVIEW_ROWS.popitem(last=False)
