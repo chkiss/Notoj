@@ -127,7 +127,8 @@ def action_keycode(action, default_label):
 # Two-key chord actions: default binding is two characters (prefix + suffix);
 # remappable to a different 2-key chord via key.<action> = <two chars>.
 CHORD_DEFAULTS = {"goto_top": "gg", "dups_view": "gd",
-                  "trash_view": "gt", "resurface": "gr"}
+                  "trash_view": "gt", "resurface": "gr",
+                  "hist_diff": "gh"}
 CHORD_ACTIONS = set(CHORD_DEFAULTS)
 
 
@@ -184,6 +185,7 @@ KEYMAP = [
         (None, "k / ↑", "move up"),
         ("goto_top", "g g", "jump to top"),
         (None, "G", "jump to bottom"),
+        (None, "h / m / l", "jump to the top / middle / bottom of the visible page"),
         (None, "Ctrl-f/b", "page down / up"),
         (None, "Ctrl-d/u", "half-page down / up"),
         (None, "PgDn/PgUp", "scroll preview pane"),
@@ -214,6 +216,9 @@ KEYMAP = [
     ]),
     ("Tags", [
         ("tag", "#", "add tags to the selected note (space-separated)"),
+        (None, "Tab", "at the tag prompt, complete the tag being typed against "
+              "the existing tags, most-used first (Shift-Tab cycles back; Tab "
+              "on an empty word browses them all)"),
         ("tag_repeat", ".", "repeat the last tag addition on the selected note"),
         ("tag_filter", "t", "filter to notes sharing the selected note's tags; Tab cycles "
               "the filter: all of them → each single tag"),
@@ -237,7 +242,7 @@ KEYMAP = [
         ("help", "?", "this key reference"),
     ]),
     ("Other", [
-        ("hist_diff", "h", "diff vs previous version (vimdiff)"),
+        ("hist_diff", "g h", "diff vs previous version (vimdiff)"),
         ("hist_browse", "H", "browse full history with diff preview (/ searches messages)"),
         ("conflict", "c", "resolve next Syncthing conflict (vimdiff)"),
         ("quit", "q", "quit"),
@@ -1263,6 +1268,34 @@ def parse_tag_input(s):
     Tolerates a leading '#' on each token so "#work urgent" and
     "work urgent" behave the same."""
     return [t.lstrip("#") for t in s.split() if t.strip("#").strip()]
+
+
+def tag_completions(prefix, freq=None):
+    """Known tag names that extend `prefix` (case-insensitive, a leading '#'
+    ignored), most-used first and alphabetical within a count. An empty prefix
+    offers the whole vocabulary, so Tab on a blank prompt browses it."""
+    freq = TAG_FREQ if freq is None else freq
+    p = prefix.lstrip("#").lower()
+    hits = [t for t in freq if t.lower().startswith(p)]
+    return sorted(hits, key=lambda t: (-freq.get(t, 0), t))
+
+
+def token_start(text, pos):
+    """Where the whitespace-delimited token ending at `pos` begins."""
+    start = pos
+    while start > 0 and not text[start - 1].isspace():
+        start -= 1
+    return start
+
+
+def complete_token(text, pos, tag):
+    """Replace the whitespace-delimited token ending at `pos` with `tag`,
+    keeping the token's leading '#' if it had one. Returns (text, pos) with
+    the cursor left after the completion so the next Tab can cycle."""
+    start = token_start(text, pos)
+    lead = "#" if text[start:pos].startswith("#") else ""
+    head = text[:start] + lead + tag
+    return head + text[pos:], len(head)
 
 
 def add_tags(path, new_tags):
@@ -2384,10 +2417,12 @@ def modal_list(stdscr, view):
                 st["p_off"] = max(0, st["p_off"] - step)
             continue
 
-        # While the "/" filter is open, j/k/G/g are letters (the EditBuffer
-        # consumed them above if printable); only non-typable nav keys move.
+        # While the "/" filter is open, j/k/G/g/h/m/l are letters (the
+        # EditBuffer consumed them above if printable); only non-typable nav
+        # keys move.
         cap = sq is not None
-        nav_ok = (NAV_KEYS - {ord("j"), ord("k"), ord("G")}) if cap else NAV_KEYS
+        nav_ok = (NAV_KEYS - {ord("j"), ord("k"), ord("G")} - SCREEN_KEYS
+                  if cap else NAV_KEYS)
         if not narrow and (k in nav_ok or (k == ord("g") and not cap)):
             prev = st["cur"]
             if k == ord("g"):
@@ -2400,6 +2435,9 @@ def modal_list(stdscr, view):
                 d = nav_delta(k, st["page_h"])
                 if d == NAV_BOTTOM:
                     st["cur"] = count_f() - 1
+                elif d == NAV_SCREEN:
+                    st["cur"] = screen_target(k, st["off"], st["page_h"],
+                                              count_f())
                 else:
                     st["cur"] += d
             clamp_list(st, count_f(), st["page_h"])
@@ -4040,10 +4078,18 @@ def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi_attr, tokens):
 # stays decoded per surface; only the resulting jump-to-top is trivial.)
 NAV_BOTTOM = "bottom"
 
+# Sentinel nav_delta result: h/m/l — jump within the visible page. The target
+# depends on the scroll window, which nav_delta can't see, so surfaces resolve
+# it through screen_target().
+NAV_SCREEN = "screen"
+
+# The vim-style within-page jumps: high / middle / low.
+SCREEN_KEYS = {ord("h"), ord("m"), ord("l")}
+
 # Every key nav_delta understands; surfaces gate their nav branch on this.
 NAV_KEYS = {ord("j"), ord("k"), ord("G"),
             curses.KEY_DOWN, curses.KEY_UP,
-            4, 21, 6, 2}   # Ctrl-d, Ctrl-u, Ctrl-f, Ctrl-b
+            4, 21, 6, 2} | SCREEN_KEYS   # Ctrl-d, Ctrl-u, Ctrl-f, Ctrl-b
 
 
 def typed_char_getch(getch, k):
@@ -4382,7 +4428,10 @@ def nav_delta(k, page_h):
     """Decode a list-motion key into a cursor delta (or NAV_BOTTOM, or None
     for non-motion keys). One decoder for every list surface, so a new
     motion key lands everywhere at once: j/k/arrows one row, Ctrl-d/u half a
-    page, Ctrl-f/b a full page minus one row of overlap, G the bottom."""
+    page, Ctrl-f/b a full page minus one row of overlap, G the bottom,
+    h/m/l a jump inside the visible page (resolved by screen_target)."""
+    if k in SCREEN_KEYS:
+        return NAV_SCREEN
     if k in (ord("j"), curses.KEY_DOWN):
         return 1
     if k in (ord("k"), curses.KEY_UP):
@@ -4398,6 +4447,21 @@ def nav_delta(k, page_h):
     if k == ord("G"):
         return NAV_BOTTOM
     return None
+
+
+def screen_target(k, off, page_h, n_items):
+    """Row index for an h/m/l jump: the first, middle, or last item currently
+    on screen, given the scroll offset `off` and the page height. Short pages
+    (fewer items than rows) measure from the real last item, so l lands on it
+    rather than on empty space."""
+    last = min(off + page_h, n_items) - 1
+    if last < off:
+        return off
+    if k == ord("h"):
+        return off
+    if k == ord("l"):
+        return last
+    return (off + last) // 2
 
 
 def clamp_list(state, n_items, page_h):
@@ -5131,6 +5195,29 @@ def run(stdscr, imports=(), move=False):
 
         elif state["tag_mode"]:
             buf = prompt_buf(state, "tag_input")
+
+            if k in (9, curses.KEY_BTAB):   # Tab / Shift-Tab — cycle tag names
+                # A run of Tabs cycles one candidate list; any other key ends
+                # the run (the stored text/pos no longer match the buffer), so
+                # the next Tab starts a fresh completion from what you typed.
+                comp = state.get("_tag_comp")
+                if not (comp and comp["text"] == buf.text
+                        and comp["pos"] == buf.pos):
+                    start = token_start(buf.text, buf.pos)
+                    comp = {"cands": tag_completions(buf.text[start:buf.pos]),
+                            "i": -1, "text": buf.text, "pos": buf.pos}
+                if comp["cands"]:
+                    comp["i"] = ((comp["i"] + (1 if k == 9 else -1))
+                                 % len(comp["cands"]))
+                    buf.text, buf.pos = complete_token(
+                        buf.text, buf.pos, comp["cands"][comp["i"]])
+                    comp["text"], comp["pos"] = buf.text, buf.pos
+                    state["tag_input"] = buf.text
+                else:
+                    push_msg("no tag matches")
+                state["_tag_comp"] = comp
+                continue
+
             r = buf.handle_key(k, stdscr.getch, esc_peek)
             state["tag_input"] = buf.text
 
@@ -5330,6 +5417,9 @@ def run(stdscr, imports=(), move=False):
             d = nav_delta(k, h - 2)
             if d == NAV_BOTTOM:
                 state["cur"] = len(filtered) - 1
+            elif d == NAV_SCREEN:
+                state["cur"] = screen_target(k, state["off"], h - 2,
+                                             len(filtered))
             else:
                 state["cur"] += d
             state["p_scroll"] = 0
@@ -5367,6 +5457,12 @@ def run(stdscr, imports=(), move=False):
                 state["off"] = 0
                 state["p_scroll"] = 0
                 state["sort"] = "relevance"
+
+            elif act == "hist_diff":
+                if filtered:
+                    if not open_hist_last(filtered[state["cur"]]):
+                        push_msg("no earlier version of this note")
+                    refresh_notes()
 
             elif act == "resurface":
                 state["review_mode"] = not state["review_mode"]
@@ -5436,6 +5532,7 @@ def run(stdscr, imports=(), move=False):
         elif key_matches(k, KEY["tag"]) and filtered and not state["trash_mode"]:
             state["tag_mode"] = True
             state["tag_input"] = ""
+            state["_tag_comp"] = None
 
         elif key_matches(k, KEY["tag_repeat"]) and filtered and state["_last_tags"] and not state["trash_mode"]:
             note = filtered[state["cur"]]
@@ -5591,11 +5688,6 @@ def run(stdscr, imports=(), move=False):
                 push_msg("no conflicts to resolve")
 
         # history
-        elif key_matches(k, KEY["hist_diff"]) and filtered:
-            if not open_hist_last(filtered[state["cur"]]):
-                push_msg("no earlier version of this note")
-            refresh_notes()
-
         elif key_matches(k, KEY["hist_browse"]) and filtered:
             hist_view(stdscr, filtered[state["cur"]])
             refresh_notes()

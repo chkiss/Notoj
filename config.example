@@ -150,9 +150,10 @@ preview_scroll = page
 #   Tags:     tag(#)  tag_repeat(.)  tag_filter(t)  tag_browse(T)
 #   Loops:    snooze(z)  schedule(S)  loop_done(x)
 #   Views:    backlinks(b)  help(?)
-#   Other:    hist_diff(h)  hist_browse(H)  conflict(c)  quit(q)
+#   Other:    hist_browse(H)  conflict(c)  quit(q)
 # Two-key chords rebind to another TWO-key chord (value = the two characters):
 #   Chords:   goto_top(gg)  dups_view(gd)  trash_view(gt)  resurface(gr)
+#             hist_diff(gh)
 # Don't bind a single-key action to a chord's first key (the chord wins).
 # Examples:
 #   key.quit = Q

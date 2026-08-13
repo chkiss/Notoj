@@ -1548,6 +1548,43 @@ class TestNotagFlag(unittest.TestCase):
 # parse_tag_input
 # ---------------------------------------------------------------------------
 
+class TestTagCompletion(unittest.TestCase):
+    FREQ = {"work": 10, "worklog": 3, "workshop": 3, "wine": 1}
+
+    def test_ranked_by_frequency_then_name(self):
+        self.assertEqual(notoj.tag_completions("wor", self.FREQ),
+                         ["work", "worklog", "workshop"])
+
+    def test_case_insensitive_and_hash_tolerant(self):
+        self.assertEqual(notoj.tag_completions("#WORKS", self.FREQ),
+                         ["workshop"])
+
+    def test_empty_prefix_offers_everything(self):
+        self.assertEqual(notoj.tag_completions("", self.FREQ),
+                         ["work", "worklog", "workshop", "wine"])
+
+    def test_no_match(self):
+        self.assertEqual(notoj.tag_completions("zz", self.FREQ), [])
+
+    def test_token_start(self):
+        self.assertEqual(notoj.token_start("work ur", 7), 5)
+        self.assertEqual(notoj.token_start("work ", 5), 5)
+        self.assertEqual(notoj.token_start("work", 4), 0)
+
+    def test_complete_token_replaces_last_word(self):
+        self.assertEqual(notoj.complete_token("work ur", 7, "urgent"),
+                         ("work urgent", 11))
+
+    def test_complete_token_keeps_hash_and_tail(self):
+        self.assertEqual(notoj.complete_token("#wo done", 3, "work"),
+                         ("#work done", 5))
+
+    def test_cycling_replaces_the_previous_completion(self):
+        text, pos = notoj.complete_token("wor", 3, "work")
+        self.assertEqual(notoj.complete_token(text, pos, "worklog"),
+                         ("worklog", 7))
+
+
 class TestParseTagInput(unittest.TestCase):
     def test_space_separated(self):
         self.assertEqual(notoj.parse_tag_input("work urgent"), ["work", "urgent"])
@@ -2967,6 +3004,26 @@ class TestNavDelta(unittest.TestCase):
     def test_nav_keys_match_decoder(self):
         for k in notoj.NAV_KEYS:
             self.assertIsNotNone(notoj.nav_delta(k, 20), k)
+
+
+class TestScreenTarget(unittest.TestCase):
+    def test_decoder_returns_screen_sentinel(self):
+        for k in "hml":
+            self.assertEqual(notoj.nav_delta(ord(k), 20), notoj.NAV_SCREEN)
+
+    def test_full_page(self):
+        # 100 items, 10 rows showing, scrolled to items 30..39
+        self.assertEqual(notoj.screen_target(ord("h"), 30, 10, 100), 30)
+        self.assertEqual(notoj.screen_target(ord("m"), 30, 10, 100), 34)
+        self.assertEqual(notoj.screen_target(ord("l"), 30, 10, 100), 39)
+
+    def test_short_page_measures_from_last_item(self):
+        # only 3 items on a 10-row page: l lands on the last, not on blank space
+        self.assertEqual(notoj.screen_target(ord("l"), 0, 10, 3), 2)
+        self.assertEqual(notoj.screen_target(ord("m"), 0, 10, 3), 1)
+
+    def test_empty_list(self):
+        self.assertEqual(notoj.screen_target(ord("l"), 0, 10, 0), 0)
 
 
 class TestClampList(unittest.TestCase):
