@@ -218,9 +218,10 @@ KEYMAP = [
     ]),
     ("Tags", [
         ("tag", "#", "add tags to the selected note (space-separated)"),
-        (None, "Tab", "at the tag prompt, complete the tag being typed against "
-              "the existing tags, most-used first (Shift-Tab cycles back; Tab "
-              "on an empty word browses them all)"),
+        (None, "Tab", "at the tag prompt, a dimmed preview shows the tag you "
+              "would complete to as you type (most-used first); Tab accepts it "
+              "and cycles the next match, Shift-Tab cycles back, Tab on an empty "
+              "word browses them all. Disable with tag_preview=false."),
         ("tag_repeat", ".", "repeat the last tag addition on the selected note"),
         ("tag_filter", "t", "filter to notes sharing the selected note's tags; Tab cycles "
               "the filter: all of them → each single tag"),
@@ -1299,6 +1300,50 @@ def complete_token(text, pos, tag):
     lead = "#" if text[start:pos].startswith("#") else ""
     head = text[:start] + lead + tag
     return head + text[pos:], len(head)
+
+
+def tag_preview_suffix(text, pos, cands):
+    """The dimmed 'ghost completion' suffix to append at the cursor when typing
+    tags, or "" when there's nothing to suggest.
+
+    Mirrors Tab's first candidate: the part of the best-match tag that follows
+    the current token's text. Strips a leading '#' from the token (matching
+    parse_tag_input) so a token typed as '#arab' completes against 'arabic'
+    just like one typed as 'arab'. Returns "" when the token already exactly
+    matches a tag (no suffix to offer) or when nothing matches the prefix."""
+    if not cands:
+        return ""
+    start = token_start(text, pos)
+    tok = text[start:pos]
+    # Only preview on the in-progress token — not after a completed tag that
+    # the user accepted and then kept typing; a trailing space ends the token.
+    if not tok or tok[-1].isspace():
+        return ""
+    lead = "#" if tok.startswith("#") else ""
+    bare = tok.lstrip("#").lower()
+    if not bare:
+        return ""
+    # The first candidate is the same one Tab would accept first.
+    for c in cands:
+        if c.lower().startswith(bare):
+            suffix = c[len(tok) - len(lead):]   # what's left after the token
+            if suffix and not suffix[0].isspace():
+                return suffix
+            return ""
+    return ""
+
+
+def refresh_tag_preview(state, buf):
+    """Recompute the dimmed completion suffix shown at the tag-prompt cursor
+    (the "ghost" hint). Based on the first matching tag for the token currently
+    being typed; cleared when tag_preview is off, no token is in progress, or
+    nothing matches. Stored in state['_tag_preview'] for draw() to render."""
+    if not config_bool("tag_preview", True):
+        state["_tag_preview"] = ""
+        return
+    start = token_start(buf.text, buf.pos)
+    cands = tag_completions(buf.text[start:buf.pos])
+    state["_tag_preview"] = tag_preview_suffix(buf.text, buf.pos, cands)
 
 
 def add_tags(path, new_tags):
@@ -3710,6 +3755,7 @@ DATE_RECENT_SECS = 3600     # fallback "recent" cut-off without a 256-color ramp
 
 _date_gradient = None       # [(max_age_secs | None, attr), …] ascending; built in init_colors
 _tag_inactive_pair = False  # pair 6 initialized (256-color terminals only)
+_tag_preview_pair = False   # pair 7 initialized (256-color terminals only)
 
 
 def parse_span(s):
@@ -3779,6 +3825,14 @@ def init_colors():
         global _tag_inactive_pair
         _tag_inactive_pair = True
 
+        # Tag-completion preview (the dimmed "ghost" suffix shown at the cursor
+        # while typing in the tag prompt). Defaults to the same dim grey as the
+        # inactive tags, overridable via color.tag_preview.
+        curses.init_pair(7, _cfg_color("color.tag_preview",
+                                       _color_value(cols[-1], 240)), -1)
+        global _tag_preview_pair
+        _tag_preview_pair = True
+
 
 def footer_attr():
     """Attr for the footer bar (row h-1): gray band, or reverse video — the
@@ -3803,6 +3857,15 @@ def tag_inactive_attr():
     dim elsewhere."""
     if _tag_inactive_pair:
         return curses.color_pair(6)
+    return curses.A_DIM
+
+
+def tag_preview_attr():
+    """Attr for the dimmed 'ghost completion' suffix at the tag prompt cursor,
+    signaling it's a preview (not yet accepted). On 256-color terminals uses the
+    configured color.tag_preview; otherwise plain dim so it reads as a hint."""
+    if _tag_preview_pair:
+        return curses.color_pair(7)
     return curses.A_DIM
 
 
@@ -4563,6 +4626,18 @@ def draw(stdscr, notes, state):
         pass
     addnstr_w(stdscr, 0, 0, header, w - 1, curses.A_UNDERLINE)
 
+    if state.get("tag_mode"):
+        # Dimmed "ghost" suffix: the first tag completing what was just typed,
+        # shown as a preview so Tab is no longer blind. Drawn after the header
+        # (which ends in the real tag_input) so the cursor sits at the end of the
+        # actual text; the preview is purely visual and dismissed on Enter/ESC.
+        preview = state.get("_tag_preview", "")
+        if preview and config_bool("tag_preview", True):
+            x0 = disp_width(header)
+            if x0 < w - 1:
+                addnstr_w(stdscr, 0, x0, preview, w - 1 - x0,
+                          tag_preview_attr() | curses.A_UNDERLINE)
+
     if state["q"] or state.get("search_mode"):
         # The live filter value in the accent color, same as the modal "/"
         # searches, so the two filter fields read as one feature.
@@ -4824,6 +4899,7 @@ def run(stdscr, imports=(), move=False):
         "search_mode": False,
         "tag_mode": False,
         "tag_input": "",
+        "_tag_preview": "",
         "_last_tags": "",
         "dup_mode": None,
         "_dups": [],
@@ -5219,6 +5295,7 @@ def run(stdscr, imports=(), move=False):
                         buf.text, buf.pos, comp["cands"][comp["i"]])
                     comp["text"], comp["pos"] = buf.text, buf.pos
                     state["tag_input"] = buf.text
+                    refresh_tag_preview(state, buf)
                 else:
                     push_msg("no tag matches")
                 state["_tag_comp"] = comp
@@ -5226,10 +5303,12 @@ def run(stdscr, imports=(), move=False):
 
             r = buf.handle_key(k, stdscr.getch, esc_peek)
             state["tag_input"] = buf.text
+            refresh_tag_preview(state, buf)
 
             if r == "cancel":
                 state["tag_mode"] = False
                 state["tag_input"] = ""
+                state["_tag_preview"] = ""
 
             elif r == "submit":
                 if filtered and 0 <= state["cur"] < len(filtered):
@@ -5246,6 +5325,7 @@ def run(stdscr, imports=(), move=False):
                         state["_restore_path"] = note["path"]
                 state["tag_mode"] = False
                 state["tag_input"] = ""
+                state["_tag_preview"] = ""
 
             continue
 
@@ -5539,6 +5619,7 @@ def run(stdscr, imports=(), move=False):
             state["tag_mode"] = True
             state["tag_input"] = ""
             state["_tag_comp"] = None
+            state["_tag_preview"] = ""
 
         elif key_matches(k, KEY["tag_repeat"]) and filtered and state["_last_tags"] and not state["trash_mode"]:
             note = filtered[state["cur"]]

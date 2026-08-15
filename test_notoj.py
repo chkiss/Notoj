@@ -1571,6 +1571,32 @@ class TestTagCompletion(unittest.TestCase):
         self.assertEqual(notoj.token_start("work ", 5), 5)
         self.assertEqual(notoj.token_start("work", 4), 0)
 
+    def test_preview_suffix_completes_first_candidate(self):
+        cands = notoj.tag_completions("wor", self.FREQ)
+        self.assertEqual(notoj.tag_preview_suffix("wor", 3, cands), "k")
+
+    def test_preview_suffix_hash_leading_tok(self):
+        cands = notoj.tag_completions("#wor", self.FREQ)
+        self.assertEqual(notoj.tag_preview_suffix("#wor", 4, cands), "k")
+
+    def test_preview_suffix_exact_match_no_suffix(self):
+        cands = notoj.tag_completions("work", self.FREQ)
+        self.assertEqual(notoj.tag_preview_suffix("work", 4, cands), "")
+
+    def test_preview_suffix_no_match(self):
+        cands = notoj.tag_completions("zz", self.FREQ)
+        self.assertEqual(notoj.tag_preview_suffix("zz", 2, cands), "")
+
+    def test_preview_suffix_empty_token(self):
+        cands = notoj.tag_completions("", self.FREQ)
+        self.assertEqual(notoj.tag_preview_suffix("", 0, cands), "")
+
+    def test_preview_suffix_only_suggests_extending_prefix(self):
+        # A token that isn't a prefix of any tag yields no suffix; the first
+        # match for the actual prefix is still surfaced.
+        cands = notoj.tag_completions("wo", self.FREQ)
+        self.assertEqual(notoj.tag_preview_suffix("wo", 2, cands), "rk")
+
     def test_complete_token_replaces_last_word(self):
         self.assertEqual(notoj.complete_token("work ur", 7, "urgent"),
                          ("work urgent", 11))
@@ -1583,6 +1609,51 @@ class TestTagCompletion(unittest.TestCase):
         text, pos = notoj.complete_token("wor", 3, "work")
         self.assertEqual(notoj.complete_token(text, pos, "worklog"),
                          ("worklog", 7))
+
+
+class TestTagPreviewRefresh(unittest.TestCase):
+    FREQ = {"work": 10, "worklog": 3, "wine": 1}
+
+    def setUp(self):
+        # refresh_tag_preview() consults config_bool(), so save/restore the
+        # config cache and inject the module-level tag frequency it reads.
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+        self._freq = notoj.TAG_FREQ
+        notoj.TAG_FREQ = self.FREQ
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+        notoj.TAG_FREQ = self._freq
+
+    def _buf(self, text):
+        return notoj.EditBuffer(text)
+
+    def test_preview_suggests_first_match(self):
+        buf = self._buf("wor")
+        st = {}
+        notoj.refresh_tag_preview(st, buf)
+        self.assertEqual(st.get("_tag_preview"), "k")
+
+    def test_no_suffix_on_exact_match(self):
+        buf = self._buf("work")
+        st = {}
+        notoj.refresh_tag_preview(st, buf)
+        self.assertEqual(st.get("_tag_preview"), "")
+
+    def test_preview_empty_when_tag_preview_disabled(self):
+        notoj._config_cache = {"tag_preview": "false"}
+        buf = self._buf("wor")
+        st = {}
+        notoj.refresh_tag_preview(st, buf)
+        self.assertEqual(st.get("_tag_preview"), "")
+
+    def test_preview_empty_after_space(self):
+        # A completed token followed by a space: no in-progress token to extend.
+        buf = self._buf("work ")
+        st = {}
+        notoj.refresh_tag_preview(st, buf)
+        self.assertEqual(st.get("_tag_preview"), "")
 
 
 class TestParseTagInput(unittest.TestCase):

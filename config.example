@@ -82,6 +82,12 @@
 #   stored    leave as written in the file
 # tag_display_order=freq
 
+# Show a dimmed "ghost completion" suffix at the tag-prompt cursor while typing
+# — the first existing tag that extends what you've typed — so Tab isn't blind:
+# it completes to the next candidate, cycling most-used-first; Shift-Tab cycles
+# back. Turn this off to restore the pre-preview behavior. Default: true.
+# tag_preview=true
+
 # Lines PgDn/PgUp scroll a preview pane (notes body, history diff, tag /
 # backlink previews — one knob for all). "page" scrolls a full pane height;
 # a positive integer scrolls that many lines. Default: page.
@@ -106,6 +112,8 @@ preview_scroll = page
 #   color.match     = green    # search-match highlight
 #   color.tag_inactive = 240   # parenthesised (not filtered on) tags in the
 #                              # t filter header; defaults to the grey the
+#   color.tag_preview    = 240   # dimmed "ghost completion" suffix at the tag
+#                              # prompt cursor (the tag you'd get on Tab)
 #                              # date gradient fades to for the oldest notes
 #   color.footer_bg = 239      # footer status-bar band (256-color only)
 # Status/alert bar — the amber band that shows cross-session undo prompts and
