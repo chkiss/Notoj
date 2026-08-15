@@ -41,6 +41,8 @@ try:
 except ImportError:
     pass
 
+VERSION = os.environ.get("NOTOJ_VERSION", "0.6.0")
+
 # ----------------------------
 # Config (~/.config/notoj/config) — simple `key = value` lines, # comments.
 # ----------------------------
@@ -258,8 +260,8 @@ def build_help(width=None):
     if width is None:
         width = shutil.get_terminal_size((80, 24)).columns
     desc_w = max(20, width - 4 - HELP_KEY_W)
-    lines = ["notoj — keyboard-driven terminal notes", "",
-             "Usage: notoj [--help] [--move] [FILE.md ...]", ""]
+    lines = [f"notoj {VERSION} — keyboard-driven terminal notes", "",
+             "Usage: notoj [--help] [--version] [--move] [FILE.md ...]", ""]
     opt_w = 10
     for label, desc in (
         ("FILE.md", "copy the file into the notes dir, adopt it as a note "
@@ -268,6 +270,7 @@ def build_help(width=None):
                     "file already in the notes dir is just selected; "
                     "repeatable, and the first one is the one selected"),
         ("--move", "remove each source file once its copy is committed"),
+        ("--version", "print the notoj version and exit"),
     ):
         first, *rest = textwrap.wrap(desc, max(20, width - 2 - opt_w))
         lines.append(f"  {label:<{opt_w}}{first}")
@@ -3472,9 +3475,12 @@ def parse_import_args(argv):
     user-facing message if a flag is unknown or a file can't be imported — the
     caller reports it while there is still a terminal, before curses starts."""
     move, paths = False, []
+    version = False
     for a in argv:
         if a == "--move":
             move = True
+        elif a == "--version":
+            version = True
         elif a.startswith("-") and a != "-":
             raise ValueError(f"unknown option: {a}")
         else:
@@ -3493,7 +3499,7 @@ def parse_import_args(argv):
         if move and notes_dir and os.path.dirname(p) == notes_dir:
             # There is nothing to move — it is already where notes live.
             raise ValueError(f"--move: already a note: {p}")
-    return paths, move
+    return paths, move, version
 
 
 def append_origin_footer(dest, src, move):
@@ -5765,10 +5771,14 @@ if __name__ == "__main__":
         print(HELP)
         sys.exit(0)
 
+    if len(sys.argv) > 1 and sys.argv[1] == "--version":
+        print(f"notoj {VERSION}")
+        sys.exit(0)
+
     # Validate CLI imports up here, while there is still a terminal to print an
     # error to — the copy itself happens inside run(), once git is initialized.
     try:
-        IMPORTS, MOVE = parse_import_args(sys.argv[1:])
+        IMPORTS, MOVE, VERSION_FLAG = parse_import_args(sys.argv[1:])
     except ValueError as e:
         print(f"notoj: {e}", file=sys.stderr)
         sys.exit(2)

@@ -3557,18 +3557,22 @@ class TestParseImportArgs(unittest.TestCase):
         notoj.load_notes_dir = self._old
 
     def test_no_args(self):
-        self.assertEqual(notoj.parse_import_args([]), ([], False))
+        self.assertEqual(notoj.parse_import_args([]), ([], False, False))
 
     def test_file_is_absolutized(self):
-        paths, move = notoj.parse_import_args([self.md])
+        paths, move, version = notoj.parse_import_args([self.md])
         self.assertEqual((paths, move), ([self.md], False))
 
     def test_move_flag_and_several_files(self):
         b = os.path.join(self.d, "b.markdown")
         with open(b, "w") as f:
             f.write("# b\n")
-        paths, move = notoj.parse_import_args([self.md, "--move", b])
+        paths, move, version = notoj.parse_import_args([self.md, "--move", b])
         self.assertEqual((paths, move), ([self.md, b], True))
+
+    def test_version_flag(self):
+        paths, move, version = notoj.parse_import_args(["--version"])
+        self.assertEqual((paths, move, version), ([], False, True))
 
     def test_unknown_option(self):
         with self.assertRaises(ValueError):
@@ -3593,7 +3597,7 @@ class TestParseImportArgs(unittest.TestCase):
         # notoj is the .md handler, so an existing note can arrive as an
         # argument — run() selects it instead of re-importing.
         notoj.load_notes_dir = lambda: self.d
-        paths, move = notoj.parse_import_args([self.md])
+        paths, move, version = notoj.parse_import_args([self.md])
         self.assertEqual((paths, move), ([self.md], False))
 
     def test_move_of_a_file_already_in_the_notes_dir_is_an_error(self):
