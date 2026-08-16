@@ -381,6 +381,10 @@ class TestLoadMd(unittest.TestCase):
             self.assertEqual(n["title"], "My note title")
             self.assertEqual(n["id"], "abc")
             self.assertGreater(n["modificationDate"], 0)
+            # 7 frontmatter lines + the blank line after them: the body's
+            # first line is file line 9, i.e. index 8.
+            self.assertEqual(n["body_line"], 8)
+            self.assertEqual(n["content"].split("\n")[0], "My note title")
 
     def test_no_frontmatter_delimiter(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3438,7 +3442,7 @@ class VimSearchIntegrationTests(unittest.TestCase):
     cursor — guarding against the regression where a fuzzily-ranked note with no
     literal hit left `n` searching a stale pattern."""
 
-    def _run(self, body, search, end=False):
+    def _run(self, body, search, end=False, at=None):
         d = tempfile.mkdtemp()
         try:
             note = os.path.join(d, "note.md")
@@ -3448,7 +3452,8 @@ class VimSearchIntegrationTests(unittest.TestCase):
             # -i NONE: never touch (or read) the user's real ~/.viminfo, so the
             # search register starts empty and the test can't pollute it.
             args = (["vim", "-N", "-u", "NONE", "-i", "NONE"]
-                    + notoj._vim_position_args(src=False, end=end, search=search)
+                    + notoj._vim_position_args(src=False, end=end, search=search,
+                                               at=at)
                     + ["-c", 'call writefile([@/, line("."), col(".")], "%s")' % out,
                        "-c", "qa!", note])
             subprocess.run(args, stdin=subprocess.DEVNULL,
@@ -3474,6 +3479,29 @@ class VimSearchIntegrationTests(unittest.TestCase):
         reg, line, _ = self._run(body, pat)
         self.assertEqual(reg, pat)        # `n` would report *this* pattern, not junk
         self.assertEqual(line, 1)         # title fallback (no NotojOpenAtTitle here)
+
+    def test_at_opens_on_the_focused_match_not_the_first(self):
+        # Stepping the preview to the 3rd hit (line 4) must enter Vim there,
+        # not back at the first one.
+        body = "foo\nbar\nfoo\nfoo tail\n"
+        pat = notoj.vim_search_pattern("foo")
+        reg, line, col = self._run(body, pat, at=(4, 0))
+        self.assertEqual(reg, pat)        # `n` carries on from here
+        self.assertEqual((line, col), (4, 1))
+
+    def test_at_steps_over_earlier_hits_on_the_same_line(self):
+        body = "intro\nfoo and foo and foo\n"
+        pat = notoj.vim_search_pattern("foo")
+        _, line, col = self._run(body, pat, at=(2, 2))
+        self.assertEqual((line, col), (2, 17))   # the third "foo" on that line
+
+    def test_at_past_the_last_hit_stops_at_the_last_one(self):
+        # 'W' means no wrap: an ordinal that overshoots leaves the cursor on the
+        # final match rather than looping back to the top of the file.
+        body = "intro\nfoo and foo\n"
+        pat = notoj.vim_search_pattern("foo")
+        _, line, col = self._run(body, pat, at=(2, 9))
+        self.assertEqual((line, col), (2, 9))
 
     def test_phrase_matches_across_a_line_break(self):
         body = "intro\nthe cat\nfood bowl\n"
@@ -3984,6 +4012,212 @@ class TestPreviewGeometry(unittest.TestCase):
 
     def test_list_panel_capped(self):
         self.assertLessEqual(notoj.preview_geometry(400)[1], notoj.LIST_MAX_W)
+
+
+class TestMarkdownHeaderColor(unittest.TestCase):
+    def test_header_does_not_inherit_the_preview_color(self):
+        # Regression: curses packs the pair number into the attribute, so the
+        # preview body's pair 4 OR-ed with the accent's pair 1 came out as
+        # pair 5 — the search-match slot — and every "# Heading" wore whatever
+        # color.match was set to.
+        cp = curses_stub.color_pair
+        attr = notoj._md_entries("# Head", cp(4))[0][2]
+        self.assertEqual(attr, cp(9) | curses_stub.A_BOLD)
+        self.assertNotEqual(attr & ~curses_stub.A_BOLD, cp(5))
+
+    def test_header_marker_is_dropped(self):
+        self.assertEqual("".join(e[0] for e in notoj._md_entries("## Head", 0)),
+                         "Head")
+
+
+class TestVimMatchPosition(unittest.TestCase):
+    """Where Vim opens: the match the preview was focused on, not the first."""
+
+    def note(self, path="/n/a.md", body_line=4):
+        return {"path": path, "content": "x", "body_line": body_line}
+
+    def state(self, matches, idx, path="/n/a.md"):
+        return {"_matches": matches, "m_idx": idx,
+                "_match_key": (path, ("foo",), 40, True)}
+
+    def test_body_offset_is_added_to_the_source_line(self):
+        # Body line 2 of a note whose body starts on file line 4 is file line 7
+        # (both 0-based until the +1 for Vim's 1-based lines).
+        st = self.state([(0, 0, 0, 0), (3, 0, 2, 0)], 1)
+        self.assertEqual(notoj.vim_match_position(st, self.note()), (7, 0))
+
+    def test_ordinal_within_the_line_is_carried(self):
+        st = self.state([(0, 0, 0, 0), (0, 1, 0, 1)], 1)
+        self.assertEqual(notoj.vim_match_position(st, self.note(body_line=0)),
+                         (1, 1))
+
+    def test_no_matches_is_none(self):
+        self.assertIsNone(notoj.vim_match_position(self.state([], 0),
+                                                   self.note()))
+
+    def test_match_list_for_another_note_is_ignored(self):
+        st = self.state([(0, 0, 0, 0)], 0, path="/n/other.md")
+        self.assertIsNone(notoj.vim_match_position(st, self.note()))
+
+    def test_note_without_a_body_offset_is_none(self):
+        # An unparsed note falls back to the old jump-to-the-first-match.
+        st = self.state([(0, 0, 0, 0)], 0)
+        self.assertIsNone(notoj.vim_match_position(st, {"path": "/n/a.md"}))
+
+    def test_no_note(self):
+        self.assertIsNone(notoj.vim_match_position(self.state([], 0), None))
+
+
+class TestSearchTokens(unittest.TestCase):
+    def test_splits_on_whitespace(self):
+        self.assertEqual(notoj.search_tokens("Foo BAR"), ["foo", "bar"])
+
+    def test_quoted_phrase_is_one_token(self):
+        self.assertEqual(notoj.search_tokens('"foo bar"'), ["foo bar"])
+
+    def test_empty(self):
+        self.assertEqual(notoj.search_tokens("  "), [])
+        self.assertEqual(notoj.search_tokens(None), [])
+
+
+class TestMatchSpans(unittest.TestCase):
+    def test_leftmost_first_and_case_insensitive(self):
+        self.assertEqual(notoj.match_spans("a Foo b foo", ["foo"]),
+                         [(2, 5), (8, 11)])
+
+    def test_multiple_tokens_interleave_in_reading_order(self):
+        self.assertEqual(notoj.match_spans("bar foo bar", ["foo", "bar"]),
+                         [(0, 3), (4, 7), (8, 11)])
+
+    def test_non_overlapping(self):
+        # "aa" in "aaa" matches once; the scan resumes past the first hit
+        # rather than sliding one character, so the count can't run away.
+        self.assertEqual(notoj.match_spans("aaa", ["aa"]), [(0, 2)])
+
+    def test_no_tokens_or_no_text(self):
+        self.assertEqual(notoj.match_spans("abc", []), [])
+        self.assertEqual(notoj.match_spans("", ["a"]), [])
+
+
+class TestPreviewMatchList(unittest.TestCase):
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    def test_rows_and_ordinals_in_reading_order(self):
+        text = "foo bar\nbaz\nfoo foo"
+        self.assertEqual(
+            notoj.preview_match_list(text, ["foo"], 40, False),
+            [(0, 0, 0, 0), (2, 0, 2, 0), (2, 1, 2, 1)])
+
+    def test_wrapped_line_keeps_one_source_line(self):
+        # Two rows on screen, one source line: the source ordinals run 0,1 —
+        # they're what Vim is told to step over, and Vim doesn't wrap.
+        notoj._config_cache = {"preview_wrap": "true"}
+        got = notoj.preview_match_list("foo aaaa foo", ["foo"], 8, False)
+        self.assertEqual([m[0] for m in got], [0, 1])       # two screen rows
+        self.assertEqual([m[2:] for m in got], [(0, 0), (0, 1)])
+
+    def test_markdown_matches_the_stripped_text(self):
+        # The marker characters aren't on screen, so a hit spanning them is not
+        # a hit the reader can see: "**fo**o" reads as "foo".
+        self.assertEqual(
+            notoj.preview_match_list("**fo**o", ["foo"], 40, True),
+            [(0, 0, 0, 0)])
+        self.assertEqual(
+            notoj.preview_match_list("**fo**o", ["foo"], 40, False), [])
+
+    def test_heading_hit_is_found(self):
+        self.assertEqual(
+            notoj.preview_match_list("# Foo notes", ["foo"], 40, True),
+            [(0, 0, 0, 0)])
+
+    def test_no_query_no_matches(self):
+        self.assertEqual(notoj.preview_match_list("foo", [], 40, True), [])
+
+
+class TestPreviewMatchNavigation(unittest.TestCase):
+    """n/N stepping and the open-on-first-match snap."""
+
+    W, H = 100, 12          # pane height is H - 2 = 10 rows
+
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {"render_markdown": "false", "preview_wrap": "false"}
+        # One match on row 0 and one far below the fold, so the scroll is
+        # forced to move for the second.
+        body = "\n".join(["foo"] + ["x"] * 30 + ["foo"])
+        self.note = {"path": "/n/a.md", "content": body}
+        self.state = {"p_scroll": 0}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    def sync(self):
+        return notoj.sync_preview_matches(self.state, self.note, ["foo"],
+                                          self.W, self.H)
+
+    def test_first_match_is_focused(self):
+        self.assertEqual(len(self.sync()), 2)
+        self.assertEqual(self.state["m_idx"], 0)
+        self.assertEqual(notoj.focused_match(self.state), (0, 0))
+
+    def test_opens_scrolled_to_the_first_match(self):
+        self.state["p_scroll"] = 99
+        deep = {"path": "/n/b.md", "content": "\n".join(["x"] * 20 + ["foo"])}
+        self.note = deep
+        self.sync()
+        # Row 20, wanting one line of context above it — but the pane stops at
+        # the end of the note, so it clamps to the last screenful.
+        self.assertEqual(self.state["p_scroll"], 11)
+
+    def test_n_steps_forward_and_scrolls(self):
+        self.sync()
+        self.assertTrue(notoj.match_step(self.state, self.note, ["foo"],
+                                         self.W, self.H, 1))
+        self.assertEqual(self.state["m_idx"], 1)
+        self.assertEqual(notoj.focused_match(self.state), (31, 0))
+        self.assertEqual(self.state["p_scroll"], 22)   # clamped to the last page
+
+    def test_n_wraps_back_to_the_first(self):
+        self.sync()
+        for _ in range(2):
+            notoj.match_step(self.state, self.note, ["foo"], self.W, self.H, 1)
+        self.assertEqual(self.state["m_idx"], 0)
+        self.assertEqual(self.state["p_scroll"], 0)
+
+    def test_N_wraps_backwards_from_the_first(self):
+        self.sync()
+        notoj.match_step(self.state, self.note, ["foo"], self.W, self.H, -1)
+        self.assertEqual(self.state["m_idx"], 1)
+
+    def test_no_matches_is_declined(self):
+        self.assertFalse(notoj.match_step(self.state, self.note, ["zzz"],
+                                          self.W, self.H, 1))
+
+    def test_no_note_is_declined(self):
+        self.assertFalse(notoj.match_step(self.state, None, ["foo"],
+                                          self.W, self.H, 1))
+
+    def test_paging_does_not_snap_back(self):
+        # p_scroll is not part of the cache key, so a PgDn survives the next
+        # frame's sync — only a new note or query re-snaps the pane.
+        self.sync()
+        self.state["p_scroll"] = 5
+        self.sync()
+        self.assertEqual(self.state["p_scroll"], 5)
+
+    def test_changing_the_query_re_snaps(self):
+        self.sync()
+        self.state["p_scroll"] = 5
+        notoj.sync_preview_matches(self.state, self.note, ["x"],
+                                   self.W, self.H)
+        self.assertEqual(self.state["m_idx"], 0)
+        # The first "x" is row 1, above the scrolled-to line — back up to it.
+        self.assertEqual(self.state["p_scroll"], 0)
 
 
 class TestLaunch(unittest.TestCase):

@@ -20,7 +20,8 @@
 * `/` activates incremental search bar
 * Live incremental filtering while typing
 * Enter opens selected note, or creates a new note titled with the query when no results match
-* `n` creates a blank new note directly (explicit shortcut, complementary to search-to-create)
+* `o` creates a blank new note directly (explicit shortcut, complementary to search-to-create)
+* `n`/`N` step the preview to the next/previous match, which the preview opens on
 * ESC or Enter exits search mode
 * Keyboard-only operation
 

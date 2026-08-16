@@ -194,9 +194,11 @@ KEYMAP = [
         (None, "ESC", "step back (prompt → filter → view)"),
     ]),
     ("Notes", [
-        ("open", "Enter", "open note in Vim at top"),
+        ("open", "Enter", "open note in Vim — at the match the preview is on "
+              "when a search is active (n/N move it), else at the top"),
         ("open_end", "e", "open note in Vim at the last line (normal mode)"),
-        ("new", "n", "create new blank note"),
+        ("new", "o", "create new blank note (o as in vim's open-a-new-line; "
+              "n/N are the search-match keys)"),
         ("trash", "d", "trash selected note"),
         ("undo", "u", "undo last trash, loop-close (x), tag addition, or note edit"),
         ("redo", "Ctrl-r", "redo last undone action"),
@@ -211,6 +213,9 @@ KEYMAP = [
         (None, "Alt-b/f", "word motion: back / forward one word"),
         (None, "Alt-d/⌫", "delete word ahead / word behind"),
         (None, "Enter", "open match, or create new note titled with query"),
+        ("match_next", "n", "jump the preview to the next search match (wraps); "
+              "the preview already opens on the first one"),
+        ("match_prev", "N", "jump the preview to the previous search match"),
     ]),
     ("Sorting (applies in every view; shown in the header)", [
         ("sort", "s", "cycle sort: relevance (default) → title → created → modified"),
@@ -501,15 +506,21 @@ def load_md(path):
             return None
 
         meta = parse_frontmatter(text[4:end])
-        body = text[end + 5:]
+        body_start = end + 5
+        body = text[body_start:]
         if body.startswith("\n"):
             body = body[1:]
+            body_start += 1
 
         body_title = derive_title(body)
 
         return {
             "path": path,
             "content": body,
+            # File line the body starts on (0-based), so a position found in
+            # `content` can be turned back into a line number in the file —
+            # what lets Vim open on the match the preview was showing.
+            "body_line": text.count("\n", 0, body_start),
             "title": body_title or meta.get("title") or "",
             "tags": meta.get("tags") or [],
             "system_tags": meta.get("system_tags") or [],
@@ -2541,7 +2552,7 @@ def hist_view(stdscr, n):
             draw_line_highlighted(
                 scr, y, dw, c["msg"], list_w - 1 - dw,
                 curses.color_pair(1) | curses.A_BOLD | base,
-                curses.color_pair(5) | curses.A_BOLD | base,
+                match_attr() | base,
                 [q] if q else [])
 
     def draw_preview(scr, x0, pw, ph, cur, off):
@@ -2606,7 +2617,7 @@ def tags_view(stdscr, notes, focus=None, ui=None):
         draw_line_highlighted(
             scr, y, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
             list_w - 1, curses.color_pair(3) | base,
-            curses.color_pair(5) | curses.A_BOLD | base, [q] if q else [])
+            match_attr() | base, [q] if q else [])
 
     def tagged_for(sel):
         # Filtering every note by the selected tag is too costly to redo on
@@ -2688,7 +2699,7 @@ def backlinks_view(stdscr, notes, note):
         base = curses.A_REVERSE if selected else 0
         t = title(m)
         draw_line_highlighted(scr, y, 0, t, list_w - 1, attr | base,
-                              curses.color_pair(5) | curses.A_BOLD | base,
+                              match_attr() | base,
                               [q] if q else [])
         tw = disp_width(t) + 2
         if tw < list_w - 1:
@@ -2714,7 +2725,7 @@ def backlinks_view(stdscr, notes, note):
             draw_line_highlighted(
                 scr, i + 1, x0, line, pw,
                 curses.color_pair(4),
-                curses.color_pair(5) | curses.A_BOLD,
+                match_attr(),
                 [hi_token] if hi_token else [],
             )
 
@@ -2795,7 +2806,7 @@ def help_view(stdscr):
         if kind == "blank":
             return
         base = curses.A_REVERSE if selected else 0
-        hi = curses.color_pair(5) | curses.A_BOLD | base
+        hi = match_attr() | base
         toks = [q] if q else []
         if kind == "section":
             addnstr_w(scr, y, 0, text, list_w - 1, curses.A_BOLD | base)
@@ -3169,7 +3180,7 @@ def vim_search_pattern(q):
     return r"\c\V" + body
 
 
-def _vim_position_args(src, end, search):
+def _vim_position_args(src, end, search, at=None):
     """The -c args that place the cursor (and, with an active search, highlight
     the matches) for a spawned Vim.
 
@@ -3177,9 +3188,11 @@ def _vim_position_args(src, end, search):
     ranks fuzzily (edit distance, tag and substring hits), so a note can rank
     for a query it doesn't contain verbatim. `let @/` sets the pattern (so `n`
     and 'hlsearch' use *this* query, never a stale one) without the E486 that a
-    failed `/pat` would raise. Positioning: the last line (end), else the first
-    literal match via the quiet search() — falling back to the title when the
-    note has no verbatim hit — else the title. `src` flags that the notoj
+    failed `/pat` would raise. Positioning: the last line (end), else `at` —
+    the (1-based file line, ordinal-on-that-line) of the match the preview was
+    focused on, so opening at the 3rd hit enters Vim on the 3rd hit — else the
+    first literal match via the quiet search(), falling back to the title when
+    the note has no verbatim hit, else the title. `src` flags that the notoj
     vimscript (with NotojOpenAtTitle) was sourced."""
     args = []
     if search:
@@ -3190,17 +3203,31 @@ def _vim_position_args(src, end, search):
     elif search:
         # search() (unlike /pat or `normal n`) is silent when there's no match,
         # so a fuzzy-only hit won't beep or error — it just keeps the fallback.
-        jump = "silent! keepjumps call cursor(1, 1) | if search(@/, 'cw') == 0"
-        jump += " | call NotojOpenAtTitle() | endif" if src else " | endif"
-        args += ["-c", jump]
+        if at:
+            line, ordinal = at
+            # From the top of the target line, take the first match at or after
+            # it, then step over the earlier hits on that same line. One -c
+            # holding the loop, not one -c per step: Vim caps a command line at
+            # ten -c arguments, so a line with a dozen hits would have blown
+            # past it. 'W' (no wrap) means running out of matches just leaves
+            # the cursor on the last one instead of looping back to the top of
+            # the file.
+            args += ["-c", "silent! keepjumps call cursor(%d, 1) | "
+                           "silent! call search(@/, 'cW') | "
+                           "for _ in range(%d) | silent! call search(@/, 'W') "
+                           "| endfor" % (line, ordinal)]
+        else:
+            jump = "silent! keepjumps call cursor(1, 1) | if search(@/, 'cw') == 0"
+            jump += " | call NotojOpenAtTitle() | endif" if src else " | endif"
+            args += ["-c", jump]
     elif src:
         args += ["-c", "call NotojOpenAtTitle()"]
     return args
 
 
-def edit_in_editor(n, end, search):
+def edit_in_editor(n, end, search, at=None):
     """Suspend curses and open the note in the configured editor, positioned
-    by `end`/`search`. True when the file was written (its mtime moved); a
+    by `end`/`search`/`at`. True when the file was written (its mtime moved); a
     missing editor or a quit without writing is False. The one launch
     preamble behind open_note and edit_trash_note."""
     path = n["path"]
@@ -3212,7 +3239,7 @@ def edit_in_editor(n, end, search):
     cmd = list(ed)
     if is_vimlike(ed):
         src = vim_source_args()
-        cmd += src + _vim_position_args(src, end, search)
+        cmd += src + _vim_position_args(src, end, search, at)
     cmd.append(path)
     suspend_curses()
     launch(cmd)   # a missing editor leaves mtime unchanged → False
@@ -3222,7 +3249,7 @@ def edit_in_editor(n, end, search):
         return False
 
 
-def open_note(n, end=False, search=None):
+def open_note(n, end=False, search=None, at=None):
     path = n["path"]
     before = None
     if os.path.exists(path):
@@ -3231,7 +3258,7 @@ def open_note(n, end=False, search=None):
                 before = f.read()
         except Exception:
             before = None
-    if edit_in_editor(n, end, search):
+    if edit_in_editor(n, end, search, at):
         final = check_rename(n) or path
         git_commit(f"edit: {title(n)}")
         if before is not None and os.path.exists(final):
@@ -3250,7 +3277,7 @@ def open_note(n, end=False, search=None):
     return None
 
 
-def edit_trash_note(n, end=False, search=None):
+def edit_trash_note(n, end=False, search=None, at=None):
     """Open a trashed note in Vim. Any saved change restores the note from the
     trash into the notes dir (then the usual title-rename pipeline runs);
     quitting Vim without writing leaves it in the trash. Returns the restored
@@ -3258,7 +3285,7 @@ def edit_trash_note(n, end=False, search=None):
     path = n["path"]
     if not os.path.exists(path):
         return None
-    if not edit_in_editor(n, end, search):
+    if not edit_in_editor(n, end, search, at):
         return None
     restored = do_restore(path, os.path.join(NOTES_DIR, os.path.basename(path)))
     if not restored:
@@ -3756,6 +3783,7 @@ DATE_RECENT_SECS = 3600     # fallback "recent" cut-off without a 256-color ramp
 _date_gradient = None       # [(max_age_secs | None, attr), …] ascending; built in init_colors
 _tag_inactive_pair = False  # pair 6 initialized (256-color terminals only)
 _tag_preview_pair = False   # pair 7 initialized (256-color terminals only)
+_match_focus_pair = False   # pair 8 initialized (256-color terminals only)
 
 
 def parse_span(s):
@@ -3783,7 +3811,21 @@ def init_colors():
     curses.init_pair(2, _cfg_color("color.date", curses.COLOR_RED), -1)
     curses.init_pair(3, _cfg_color("color.tag", curses.COLOR_GREEN), -1)
     curses.init_pair(4, _cfg_color("color.preview", curses.COLOR_CYAN), -1)
-    curses.init_pair(5, _cfg_color("color.match", curses.COLOR_GREEN), -1)
+
+    # Search matches get the one hue nothing else in the UI claims. Amber is
+    # titles and markdown headers, green is tags, red is dates, cyan is the
+    # preview body — a match highlighted in any of those reads as that thing
+    # rather than as a hit, which is exactly what a match inside a "# Heading"
+    # line used to look like. Magenta is free here, survives the 8-color
+    # fallback, and is what vim/less use for search.
+    magenta = 205 if curses.COLORS >= 256 else curses.COLOR_MAGENTA
+    match = _cfg_color("color.match", magenta)
+    curses.init_pair(5, match, -1)
+
+    # Rendered markdown headers in the preview. Their own slot rather than
+    # borrowing pair 1, so "# Heading" and a match inside it stay distinct and
+    # either can be recolored on its own.
+    curses.init_pair(9, _cfg_color("color.header", accent), -1)
 
     # Footer status bar: default fg over a gray band, distinct enough to read
     # as the screen's bottom edge so every row above it can hold content.
@@ -3800,6 +3842,16 @@ def init_colors():
         msg_bg = _cfg_color("color.message_bg", accent)
         curses.init_pair(11, msg_fg, msg_bg)
         _message_band = True
+
+        # The in-focus match — the one n/N is sitting on — is the match color
+        # worn as a band instead of as text, so the current hit reads as a
+        # cursor among the other hits (Vim's CurSearch vs Search). Without 256
+        # colors there's no second color to spend on it and match_focus_attr()
+        # falls back to reverse video, which lands in the same place.
+        curses.init_pair(8, _cfg_color("color.match_focus_fg", 235),
+                         _cfg_color("color.match_focus_bg", match))
+        global _match_focus_pair
+        _match_focus_pair = True
 
         # Modified-date recency gradient. One bucket per edge plus a final
         # "older" bucket, so len(colors) should be len(spans)+1; a short color
@@ -3867,6 +3919,27 @@ def tag_preview_attr():
     if _tag_preview_pair:
         return curses.color_pair(7)
     return curses.A_DIM
+
+
+def md_header_attr():
+    """Attr for a rendered markdown header line in the preview. Its own slot
+    (color.header) so headers can be told apart from both the title column and
+    the search-match color; defaults to the accent, which is what they were
+    always meant to be."""
+    return curses.color_pair(9)
+
+
+def match_attr():
+    """Attr for a search match that isn't the one in focus."""
+    return curses.color_pair(5) | curses.A_BOLD
+
+
+def match_focus_attr():
+    """Attr for the in-focus match (the one n/N has landed on): the match color
+    as a band on 256-color terminals, reverse video everywhere else."""
+    if _match_focus_pair:
+        return curses.color_pair(8) | curses.A_BOLD
+    return curses.color_pair(5) | curses.A_REVERSE | curses.A_BOLD
 
 
 def date_attr(ts, now):
@@ -3989,8 +4062,48 @@ def addnstr_w(win, y, x, text, max_w, attr=0):
         pass
 
 
-def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens):
+def search_tokens(q):
+    """The lowercased substrings a query highlights on: a quoted "phrase" is
+    one token, anything else splits on whitespace. Mirrors how rank_notes
+    reads the same query, so what's ranked is what's highlighted."""
+    q = (q or "").strip()
+    if not q:
+        return []
+    if q.startswith('"') and q.endswith('"') and len(q) > 2:
+        return [q[1:-1].lower()]
+    return q.lower().split()
+
+
+def match_spans(text, tokens):
+    """The (start, end) character spans `text` matches on, leftmost first and
+    non-overlapping — one definition of "the matches on this line", shared by
+    both renderers and by the n/N navigation so the k-th match a renderer
+    paints is the k-th match n/N counts."""
+    if not text or not tokens:
+        return []
+    tl = text.lower()
+    spans, pos = [], 0
+    while pos < len(text):
+        best = None
+        for tok in tokens:
+            if not tok:
+                continue
+            idx = tl.find(tok, pos)
+            if idx != -1 and (best is None or idx < best[0]):
+                best = (idx, tok)
+        if best is None:
+            break
+        mi, tok = best
+        spans.append((mi, mi + len(tok)))
+        pos = mi + len(tok)
+    return spans
+
+
+def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr,
+                          tokens, focus=None, focus_attr=None):
     """Render text at (y, x), switching to hi_attr on token-match substrings.
+    `focus` is the ordinal of the match on this line that is in focus (the one
+    n/N sits on); it's drawn in focus_attr instead.
 
     Column accounting is by display width, so wide glyphs (emoji, em-dash, CJK,
     arrows) advance the cursor by their true width and the line is clipped to
@@ -3998,23 +4111,16 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens)
     text = clip_to_width(text, max_w)
     if not text:
         return
-    if not tokens:
+    spans = match_spans(text, tokens)
+    if not spans:
         addnstr_w(stdscr, y, x, text, max_w, base_attr)
         return
     pos = 0
     col = x
     rem = max_w                       # remaining budget, in display columns
-    tl = text.lower()
-    while pos < len(text) and rem > 0:
-        best = None
-        for tok in tokens:
-            idx = tl.find(tok, pos)
-            if idx != -1 and (best is None or idx < best[0]):
-                best = (idx, tok)
-        if best is None:
-            addnstr_w(stdscr, y, col, text[pos:], rem, base_attr)
+    for k, (mi, me) in enumerate(spans):
+        if rem <= 0:
             break
-        mi, tok = best
         if mi > pos:
             seg = text[pos:mi]
             addnstr_w(stdscr, y, col, seg, rem, base_attr)
@@ -4024,12 +4130,15 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr, tokens)
             pos = mi
             if rem <= 0:
                 break
-        seg = text[mi:mi + len(tok)]
-        addnstr_w(stdscr, y, col, seg, rem, hi_attr)
+        seg = text[mi:me]
+        attr = focus_attr if (k == focus and focus_attr is not None) else hi_attr
+        addnstr_w(stdscr, y, col, seg, rem, attr)
         w = disp_width(seg)
         col += w
         rem -= w
-        pos = mi + len(tok)
+        pos = me
+    if pos < len(text) and rem > 0:
+        addnstr_w(stdscr, y, col, text[pos:], rem, base_attr)
 
 
 # --- Markdown preview styling -----------------------------------------------
@@ -4077,7 +4186,12 @@ def _md_entries(raw, base_attr):
     what's painted (identical, except struck chars carry a combining overlay)."""
     m = MD_HEADER.match(raw)
     if m:
-        a = base_attr | curses.A_BOLD | curses.color_pair(1)
+        # The header's own color replaces the base color rather than being
+        # OR-ed onto it: curses packs the pair number into the attribute as a
+        # bit field, so pair 4 (the preview body) | pair 1 (the accent) is
+        # pair 5 — the search-match slot. That arithmetic is why headers used
+        # to come out in whatever color color.match was set to.
+        a = md_header_attr() | curses.A_BOLD
         return [(c, c, a) for c in m.group(2)]
     out = []
     pos = 0
@@ -4103,27 +4217,25 @@ def _md_entries(raw, base_attr):
     return out
 
 
-def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi_attr, tokens):
+def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi_attr, tokens,
+                       focus=None, focus_attr=None):
     """Like draw_line_highlighted but renders inline markdown; token matches
-    still win, overriding the markdown attribute on the matched run."""
+    still win, overriding the markdown attribute on the matched run. `focus`
+    is the ordinal of the in-focus match on this line, drawn in focus_attr."""
     entries = _md_entries(raw, base_attr)
     if not entries:
         return
     if tokens:
-        logical = "".join(e[0] for e in entries).lower()
-        hot = [False] * len(entries)
-        for tok in tokens:
-            if not tok:
-                continue
-            start = 0
-            while True:
-                idx = logical.find(tok, start)
-                if idx == -1:
-                    break
-                for j in range(idx, idx + len(tok)):
-                    hot[j] = True
-                start = idx + len(tok)
-        entries = [(e[0], e[1], hi_attr if hot[k] else e[2])
+        # Matched against the logical (marker-stripped) text, which is what the
+        # reader sees — so a hit inside **bold** or a `# Heading` is found where
+        # it looks like it is.
+        spans = match_spans("".join(e[0] for e in entries), tokens)
+        hot = [None] * len(entries)
+        for k, (start, end) in enumerate(spans):
+            attr = focus_attr if (k == focus and focus_attr is not None) else hi_attr
+            for j in range(start, end):
+                hot[j] = attr
+        entries = [(e[0], e[1], hot[k] if hot[k] is not None else e[2])
                    for k, e in enumerate(entries)]
     col, rem, i, n = x, max_w, 0, len(entries)
     while i < n and rem > 0:
@@ -4493,6 +4605,109 @@ def preview_scroll_key(k, state, note, w, h):
     return False
 
 
+def preview_match_list(text, tokens, width, render_md):
+    """Every token match in a note's preview rows, in reading order, as
+    (row, ordinal-on-that-row, src_line, ordinal-on-that-src-line).
+
+    The first pair is what the renderers need: the ordinal is what they count
+    matches by, so the entry the navigation is on and the run drawn in the
+    focus color are the same run. The second pair is the same match located in
+    the note's source (which a wrapped row can't give directly), so opening the
+    note in Vim can land on the match you were looking at."""
+    if not tokens or not text:
+        return []
+    out = []
+    per_src = {}                  # src line -> matches counted so far on it
+    for i, (raw, src, _) in enumerate(wrap_preview_rows(text.split("\n"), width)):
+        # Match the logical (marker-stripped) text when markdown is rendered,
+        # so the counting agrees with draw_markdown_line.
+        line = "".join(e[0] for e in _md_entries(raw, 0)) if render_md else raw
+        n = len(match_spans(line, tokens))
+        seen = per_src.get(src, 0)
+        out.extend((i, j, src, seen + j) for j in range(n))
+        per_src[src] = seen + n
+    return out
+
+
+def reveal_preview_row(row, state, note, w, h):
+    """The p_scroll that brings preview `row` into view, moving the pane as
+    little as it can and keeping a line of context above the row."""
+    top = state["p_scroll"]
+    if top <= row < top + (h - 2):
+        return top
+    return max(0, min(preview_max_scroll(note, w, h), row - 1))
+
+
+def sync_preview_matches(state, note, tokens, w, h):
+    """Keep the preview's match list, focus index and scroll in step with the
+    selected note and the live query; returns the list.
+
+    Recomputed only when the note, the query or the pane width changes — which
+    is also when the focus resets to the first match and the pane snaps to it,
+    so a search result opens on its first occurrence instead of at line 1. The
+    cache key deliberately excludes p_scroll, so PgDn/PgUp scroll freely
+    afterwards without the pane snapping back."""
+    preview_w = preview_geometry(w)[3]
+    render_md = config_bool("render_markdown", True)
+    key = (note["path"] if note else None, tuple(tokens), preview_w, render_md)
+    if state.get("_match_key") != key:
+        state["_match_key"] = key
+        state["_matches"] = (preview_match_list(content(note), tokens,
+                                                preview_w, render_md)
+                             if note is not None else [])
+        state["m_idx"] = 0
+        if state["_matches"]:
+            state["p_scroll"] = reveal_preview_row(state["_matches"][0][0],
+                                                   state, note, w, h)
+    return state["_matches"]
+
+
+def match_step(state, note, tokens, w, h, delta):
+    """Move the in-focus match by `delta` (n forward, N back), wrapping at the
+    ends, and scroll the preview to it. False when there's nothing to step."""
+    ms = sync_preview_matches(state, note, tokens, w, h)
+    if not ms:
+        return False
+    state["m_idx"] = (state.get("m_idx", 0) + delta) % len(ms)
+    state["p_scroll"] = reveal_preview_row(ms[state["m_idx"]][0],
+                                           state, note, w, h)
+    return True
+
+
+def focused_match(state):
+    """(row, ordinal) of the in-focus match, or (None, None) when there is
+    none — what the preview renderer needs to pick out the current hit."""
+    ms = state.get("_matches") or []
+    i = state.get("m_idx", 0)
+    return ms[i][:2] if 0 <= i < len(ms) else (None, None)
+
+
+def focused_source_match(state):
+    """(src_line, ordinal-on-that-line) of the in-focus match, 0-based in the
+    note's body — where to put the cursor when the note is opened. None when
+    nothing is focused."""
+    ms = state.get("_matches") or []
+    i = state.get("m_idx", 0)
+    return ms[i][2:] if 0 <= i < len(ms) else None
+
+
+def vim_match_position(state, note):
+    """(file line, ordinal-on-that-line) for the match the preview is focused
+    on — where Vim should open the note, so stepping to the 3rd hit and hitting
+    Enter enters the file on the 3rd hit. None when nothing is focused, when
+    the match list belongs to a different note, or when the note carries no
+    body offset (an unparsed file) — each of which leaves the plain
+    jump-to-the-first-match positioning in place."""
+    if not note or (state.get("_match_key") or (None,))[0] != note.get("path"):
+        return None
+    pos = focused_source_match(state)
+    body_line = note.get("body_line")
+    if pos is None or body_line is None:
+        return None
+    src_line, ordinal = pos
+    return (body_line + src_line + 1, ordinal)
+
+
 def nav_delta(k, page_h):
     """Decode a list-motion key into a cursor delta (or NAV_BOTTOM, or None
     for non-motion keys). One decoder for every list surface, so a new
@@ -4665,11 +4880,7 @@ def draw(stdscr, notes, state):
             col += disp_width(tok) + 1
 
     visible = notes[state["off"]:state["off"] + h - 2]
-    q_str = state["q"].strip()
-    if q_str.startswith('"') and q_str.endswith('"') and len(q_str) > 2:
-        tokens = [q_str[1:-1].lower()]
-    else:
-        tokens = q_str.lower().split() if q_str else []
+    tokens = search_tokens(state["q"])
 
     # When sorted by creation date, the date and (age) columns track
     # creationDate instead of modificationDate — forward and reverse alike, with
@@ -4705,7 +4916,7 @@ def draw(stdscr, notes, state):
         t = title(n)
         tg = tags(n)
 
-        hi_title = curses.color_pair(5) | (curses.A_REVERSE if selected else 0)
+        hi_title = match_attr() | (curses.A_REVERSE if selected else 0)
         title_w = min(28, list_w)
         # Fill the whole title column with the row's attribute first so the
         # focus highlight always spans the full column, regardless of any
@@ -4745,6 +4956,12 @@ def draw(stdscr, notes, state):
 
             lines = preview_body_lines(content(cur), preview_w)
 
+            # Before reading p_scroll: on a new note or a changed query this
+            # snaps the pane to the first match, which is what makes a result
+            # open on its first occurrence.
+            sync_preview_matches(state, cur, tokens, w, h)
+            focus_row, focus_ord = focused_match(state)
+
             start = state["p_scroll"]
             end = start + h - 2
             render_md = config_bool("render_markdown", True)
@@ -4760,8 +4977,10 @@ def draw(stdscr, notes, state):
                 draw_body(
                     stdscr, i + 1, mid + 1, line, preview_w,
                     curses.color_pair(4),
-                    curses.color_pair(5) | curses.A_BOLD,
+                    match_attr(),
                     tokens,
+                    focus_ord if start + i == focus_row else None,
+                    match_focus_attr(),
                 )
 
     # Footer hints as (priority, text) segments: lower number = survives
@@ -4792,8 +5011,15 @@ def draw(stdscr, notes, state):
             (4, "d trash"), (3, "ESC clear/exit"), (1, "q quit"),
         ]
     else:
+        # Match counter: only while a query is live, and it outranks most hints
+        # — it's the one segment that says where n/N will land next.
+        ms = state.get("_matches") or []
+        m_hint = (f"n/N match {state.get('m_idx', 0) + 1}/{len(ms)}"
+                  if ms and tokens else "")
         segments = [
-            (3, "n new"), (2, "/ search"), (7, "s/r sort"), (2, "⮐/e open"),
+            (2, m_hint),
+            (3, f"{action_label('new', 'o')} new"), (2, "/ search"),
+            (7, "s/r sort"), (2, "⮐/e open"),
             (5, "#/. tag" if state.get("_last_tags") else "# tag"),
             (6, "t/T tags"), (10, "b backlinks"), (4, "d trash"),
             (10, "gt trash-view"), (8, "u/^R undo"),
@@ -5050,19 +5276,21 @@ def run(stdscr, imports=(), move=False):
 
     def open_selected(note, end=False):
         """Open `note` in Vim. An active search query is carried into Vim so the
-        matches are highlighted and the cursor lands on the first one (`n` cycles
-        the rest). Trashed notes first get an interstitial saying that saving any
-        change restores them from the trash."""
+        matches are highlighted and the cursor lands on the one the preview was
+        showing — step to the 3rd hit with n/N and Vim opens on the 3rd hit,
+        with `n` carrying on from there. Trashed notes first get an interstitial
+        saying that saving any change restores them from the trash."""
         search = vim_search_pattern(state["q"])
+        at = vim_match_position(state, note)
         if state["trash_mode"]:
             if confirm_screen(stdscr, TRASH_EDIT_NOTICE):
-                restored = edit_trash_note(note, end=end, search=search)
+                restored = edit_trash_note(note, end=end, search=search, at=at)
                 refresh_notes()
                 state["_hist_path"] = None
                 if restored:
                     state["_restore_path"] = restored
         else:
-            record(open_note(note, end=end, search=search))
+            record(open_note(note, end=end, search=search, at=at))
             refresh_notes()
             state["_hist_path"] = None
             state["_restore_path"] = note["path"]
@@ -5753,6 +5981,15 @@ def run(stdscr, imports=(), move=False):
                     redo_step()
             else:
                 push_msg("nothing to redo")
+
+        # next / previous search match in the preview pane (n/N, as in Vim —
+        # which is also what n/N do once Enter opens the note there)
+        elif key_matches(k, KEY["match_next"]) or key_matches(k, KEY["match_prev"]):
+            cur_note = filtered[state["cur"]] if 0 <= state["cur"] < len(filtered) else None
+            step = 1 if key_matches(k, KEY["match_next"]) else -1
+            if not match_step(state, cur_note, search_tokens(state["q"]), w, h, step):
+                push_msg("no matches to step through" if state["q"]
+                         else "no search — / first")
 
         # new note
         elif key_matches(k, KEY["new"]):

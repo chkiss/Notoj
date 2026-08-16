@@ -64,7 +64,7 @@ take `true/false/yes/no/on/off/1/0`. The main options:
 | `list_max_w` | `80` | Max width of the left list panel; extra width goes to the preview |
 | `tag_display_order` | `freq` | Tag order for display — `freq`, `freq_asc`, `name`, `stored` |
 | `undo.persist` | `true` | Keep the undo history across sessions |
-| `color.<slot>` | — | Colors for `accent`, `date`, `tag`, `preview`, `match`, `footer_bg`, plus the `date_gradient` |
+| `color.<slot>` | — | Colors for `accent`, `date`, `tag`, `preview`, `header`, `match`, `match_focus_fg`/`_bg`, `footer_bg`, plus the `date_gradient` |
 | `key.<action>` | — | Remap any key, including the `g_` chords |
 
 [`config.example`](config.example) documents every option in full.
@@ -76,10 +76,12 @@ shows the keys that matter in the current view, and `notoj --help` prints the
 full keybinding reference. The essentials:
 
 - `/` filters as you type; Enter opens the best match, or creates a new note
-  titled with your query if nothing matches. Your search terms are carried
-  into Vim: matches are highlighted, the cursor jumps to the first one, and
-  `n`/`N` step through the rest (a quoted `"phrase"` is matched across line
-  breaks too).
+  titled with your query if nothing matches. Matches are highlighted in
+  magenta, and the preview pane opens on the first one rather than at the top
+  of the note — the hit you're on is shown as a band, the rest as text, and
+  `n`/`N` step through them (`o` creates a new note). Enter then opens the note
+  in Vim *at that hit*, not back at the first one, with `n`/`N` carrying on
+  from there (a quoted `"phrase"` is matched across line breaks too).
 - Views: `g t` trash, `g d` duplicates, `g r` resurface (open loops),
   `T` all tags, `t` notes sharing the selected note's tags, `b` backlinks
   (notes whose `[[wikilinks]]` or `[text](note.md)` links point at the
