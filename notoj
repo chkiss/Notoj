@@ -3806,7 +3806,7 @@ def init_colors():
 
     amber = 214 if curses.COLORS >= 256 else curses.COLOR_YELLOW
     accent = _cfg_color("color.accent", amber)
-    # accent = titles, recent dates, markdown headers
+    # accent = titles, recent dates
     curses.init_pair(1, accent, -1)
     curses.init_pair(2, _cfg_color("color.date", curses.COLOR_RED), -1)
     curses.init_pair(3, _cfg_color("color.tag", curses.COLOR_GREEN), -1)
@@ -3824,8 +3824,12 @@ def init_colors():
 
     # Rendered markdown headers in the preview. Their own slot rather than
     # borrowing pair 1, so "# Heading" and a match inside it stay distinct and
-    # either can be recolored on its own.
-    curses.init_pair(9, _cfg_color("color.header", accent), -1)
+    # either can be recolored on its own. A muted gold rather than the accent's
+    # full-saturation amber: headers are bold too, so the accent glared on
+    # every section line — and 214 is also the gradient's "just edited" date
+    # bucket, which headers shouldn't be sharing a color with.
+    muted_gold = 179 if curses.COLORS >= 256 else curses.COLOR_YELLOW
+    curses.init_pair(9, _cfg_color("color.header", muted_gold), -1)
 
     # Footer status bar: default fg over a gray band, distinct enough to read
     # as the screen's bottom edge so every row above it can hold content.

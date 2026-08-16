@@ -109,8 +109,9 @@ preview_scroll = page
 #   color.date      = red      # older dates
 #   color.tag       = green    # tags
 #   color.preview   = cyan     # preview body
-#   color.header    = yellow   # rendered "# Heading" lines in the preview
-#                              # (defaults to color.accent)
+#   color.header    = 179      # rendered "# Heading" lines in the preview —
+#                              # a muted gold; the accent (214) glares under
+#                              # the bold headers also carry
 #   color.match     = 205      # search-match highlight (magenta — the one hue
 #                              # not already spoken for, so a hit inside a
 #                              # "# Heading" still reads as a hit)
