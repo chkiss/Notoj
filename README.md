@@ -60,6 +60,7 @@ take `true/false/yes/no/on/off/1/0`. The main options:
 | `markdown_underscore_bold` | `false` | Style `__bold__` (off leaves `__dunder__` alone) |
 | `reshape_arabic` | `true` | Pre-shape Arabic-script text in the list and preview so it isn't isolated |
 | `preview_wrap` | `true` | Word-wrap the preview body; off clips each line at the pane edge |
+| `preview_tags` | `always` | Show a `#tag` row atop the preview when the search matched a tag — `always`, `narrow` (only when the list's tags column is hidden), `never` |
 | `preview_scroll` | `page` | Lines PgDn/PgUp scroll any preview pane — `page`, or a line count |
 | `list_max_w` | `80` | Max width of the left list panel; extra width goes to the preview |
 | `tag_display_order` | `freq` | Tag order for display — `freq`, `freq_asc`, `name`, `stored` |

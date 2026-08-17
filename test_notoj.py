@@ -4107,17 +4107,21 @@ class TestPreviewMatchList(unittest.TestCase):
     def tearDown(self):
         notoj._config_cache = self._cache
 
+    def rows(self, text, width=40):
+        return notoj.preview_source_rows(text, width)
+
     def test_rows_and_ordinals_in_reading_order(self):
         text = "foo bar\nbaz\nfoo foo"
         self.assertEqual(
-            notoj.preview_match_list(text, ["foo"], 40, False),
+            notoj.preview_match_list(self.rows(text), ["foo"], False),
             [(0, 0, 0, 0), (2, 0, 2, 0), (2, 1, 2, 1)])
 
     def test_wrapped_line_keeps_one_source_line(self):
         # Two rows on screen, one source line: the source ordinals run 0,1 —
         # they're what Vim is told to step over, and Vim doesn't wrap.
         notoj._config_cache = {"preview_wrap": "true"}
-        got = notoj.preview_match_list("foo aaaa foo", ["foo"], 8, False)
+        got = notoj.preview_match_list(self.rows("foo aaaa foo", 8),
+                                       ["foo"], False)
         self.assertEqual([m[0] for m in got], [0, 1])       # two screen rows
         self.assertEqual([m[2:] for m in got], [(0, 0), (0, 1)])
 
@@ -4125,18 +4129,82 @@ class TestPreviewMatchList(unittest.TestCase):
         # The marker characters aren't on screen, so a hit spanning them is not
         # a hit the reader can see: "**fo**o" reads as "foo".
         self.assertEqual(
-            notoj.preview_match_list("**fo**o", ["foo"], 40, True),
+            notoj.preview_match_list(self.rows("**fo**o"), ["foo"], True),
             [(0, 0, 0, 0)])
         self.assertEqual(
-            notoj.preview_match_list("**fo**o", ["foo"], 40, False), [])
+            notoj.preview_match_list(self.rows("**fo**o"), ["foo"], False), [])
 
     def test_heading_hit_is_found(self):
         self.assertEqual(
-            notoj.preview_match_list("# Foo notes", ["foo"], 40, True),
+            notoj.preview_match_list(self.rows("# Foo notes"), ["foo"], True),
             [(0, 0, 0, 0)])
 
     def test_no_query_no_matches(self):
-        self.assertEqual(notoj.preview_match_list("foo", [], 40, True), [])
+        self.assertEqual(
+            notoj.preview_match_list(self.rows("foo"), [], True), [])
+
+    def test_tag_row_is_matched_literally_and_has_no_source(self):
+        # src None marks the row as not being in the note's text — it's what
+        # keeps the Vim jump from trying to place a cursor on frontmatter.
+        rows = [("#notoj #notes", None)] + self.rows("body")
+        got = notoj.preview_match_list(rows, ["notoj"], True)
+        self.assertEqual(got, [(0, 0, None, 0)])
+
+
+class TestPreviewTagRow(unittest.TestCase):
+    """Tags live in the frontmatter, never in `content` — so a note that
+    ranked purely on a tag needs the pane to say so."""
+
+    def setUp(self):
+        self._cache = notoj._config_cache
+        self._freq = notoj.TAG_FREQ
+        notoj._config_cache = {}
+        notoj.TAG_FREQ = {}
+        self.note = make_note(title="Welcome to Nottingham", content="body",
+                              tags=["notoj", "travel"])
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+        notoj.TAG_FREQ = self._freq
+
+    def row(self, tokens, state=None):
+        return notoj.preview_tag_row(self.note, tokens, state or {})
+
+    def test_shown_when_a_tag_matches(self):
+        self.assertIn("#notoj", self.row(["notoj"]))
+
+    def test_not_shown_when_nothing_matches_the_tags(self):
+        self.assertIsNone(self.row(["body"]))
+
+    def test_not_shown_without_a_query(self):
+        self.assertIsNone(self.row([]))
+
+    def test_not_shown_for_an_untagged_note(self):
+        self.note = make_note(title="t", content="notoj", tags=[])
+        self.assertIsNone(self.row(["notoj"]))
+
+    def test_default_is_always(self):
+        # Shipped default: the row shows regardless of how wide the list is.
+        self.assertIsNotNone(self.row(["notoj"], {"_tags_col_shown": True}))
+
+    def test_narrow_defers_to_the_visible_tags_column(self):
+        notoj._config_cache = {"preview_tags": "narrow"}
+        self.assertIsNone(self.row(["notoj"], {"_tags_col_shown": True}))
+        self.assertIsNotNone(self.row(["notoj"], {"_tags_col_shown": False}))
+
+    def test_never(self):
+        notoj._config_cache = {"preview_tags": "never"}
+        self.assertIsNone(self.row(["notoj"], {"_tags_col_shown": False}))
+
+    def test_rows_prepend_it_with_no_source_line(self):
+        rows = notoj.preview_rows(self.note, ["notoj"], 40, {})
+        self.assertEqual(rows[0][1], None)
+        self.assertIn("#notoj", rows[0][0])
+        self.assertEqual(rows[1], ("body", 0))
+
+    def test_rows_without_a_tag_hit_are_the_body_alone(self):
+        self.assertEqual(notoj.preview_rows(self.note, ["body"], 40, {}),
+                         [("body", 0)])
 
 
 class TestPreviewMatchNavigation(unittest.TestCase):

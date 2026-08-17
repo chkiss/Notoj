@@ -102,6 +102,16 @@ preview_scroll = page
 # Default: 80.
 # list_max_w=80
 
+# When a search matched one of a note's TAGS, show them as a "#tag" row at the
+# top of the preview. Tags live in the frontmatter, which never reaches the
+# preview body, so without this a note that ranked purely on a tag arrives as
+# a result with nothing on screen explaining why.
+#   always  show the row whenever a tag matched (default)
+#   narrow  only when the list panel is too tight to show its tags column —
+#           i.e. exactly when the other copy of the tags has been squeezed out
+#   never   off
+# preview_tags = always
+
 # ---- Colors ----
 # Names: black red green yellow blue magenta cyan white default — or a 0-255
 # palette index on 256-color terminals.

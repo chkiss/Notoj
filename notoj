@@ -4541,11 +4541,16 @@ class PreviewRows:
         self._key = self._width = self._rows = None
 
 
-def preview_body_lines(text, width):
-    """A note's text as the rows the preview pane draws. With `preview_wrap`
-    on (the default) a line wider than the pane continues on the next row,
-    keeping its indentation; with it off each source line is one row and the
-    overflow is clipped at the pane edge.
+def preview_source_rows(text, width):
+    """A note's text as (row, source line index) pairs — the rows the preview
+    pane draws, each tagged with the line of `text` it came from. With
+    `preview_wrap` on (the default) a line wider than the pane continues on the
+    next row, keeping its indentation; with it off each source line is one row
+    and the overflow is clipped at the pane edge.
+
+    The source index is what lets a position on screen be turned back into a
+    position in the note — which row 12 of a wrapped preview can't say on its
+    own, and which is how opening in Vim lands on the right line.
 
     Memoized per (text, width) — see _PREVIEW_ROWS. The returned list is
     shared with the cache: read it, never mutate it."""
@@ -4562,14 +4567,70 @@ def preview_body_lines(text, width):
         return hit[1]
 
     # Shares wrap_preview_rows with the modal previews so one config knob and
-    # one wrap rule serve every pane; the body pane draws whole rows uniformly,
-    # so the source indices are dropped here.
-    rows = [r[0] for r in wrap_preview_rows(text.split("\n"),
-                                            width if wrap else 0)]
-    _PREVIEW_ROWS[key] = (text, rows)
+    # one wrap rule serve every pane; the `last` flag is for the panes that
+    # park something after a line's final row, which this one doesn't. Both
+    # views are cached together — deriving one from the other per call would
+    # rebuild a list per frame and undo the memoization.
+    rows = [(r[0], r[1]) for r in wrap_preview_rows(text.split("\n"),
+                                                    width if wrap else 0)]
+    _PREVIEW_ROWS[key] = (text, rows, [r[0] for r in rows])
     if len(_PREVIEW_ROWS) > _PREVIEW_ROWS_MAX:
         _PREVIEW_ROWS.popitem(last=False)
     return rows
+
+
+def preview_body_lines(text, width):
+    """Just the row text of preview_source_rows — for the panes that only paint
+    rows and never map them back to the note."""
+    preview_source_rows(text, width)          # fills / refreshes the entry
+    wrap = width > 0 and config_bool("preview_wrap", True)
+    return _PREVIEW_ROWS[(hash(text), len(text), width if wrap else 0)][2]
+
+
+PREVIEW_TAGS_DEFAULT = "always"
+
+
+def preview_tag_row(note, tokens, state):
+    """The note's tags as a row to prepend to the preview when the query
+    matched one of them, else None.
+
+    Tags live in the frontmatter, which never reaches `content` — so a note
+    that ranked purely on a tag arrived as a result with nothing on screen
+    explaining why ("Welcome to Nottingham" for a `notoj` query). This is that
+    explanation, in the pane you're already looking at.
+
+    `preview_tags`: always (default), narrow — only when the list panel is too
+    tight to be showing its tags column, so the row appears exactly when the
+    other copy of the tags has gone — or never."""
+    if note is None or not tokens:
+        return None
+    mode = (config_get("preview_tags", PREVIEW_TAGS_DEFAULT)
+            or PREVIEW_TAGS_DEFAULT).strip().lower()
+    if mode == "never" or (mode == "narrow" and state.get("_tags_col_shown")):
+        return None
+    tg = tags(note)
+    if not tg:
+        return None
+    # Written as #hashtags, the way the tag prompt and the tags view show
+    # them, so the row reads as tags rather than as a line of the note.
+    row = " ".join("#" + t for t in tg.split())
+    lc = row.lower()
+    return row if any(tok in lc for tok in tokens) else None
+
+
+def preview_rows(note, tokens, width, state):
+    """The preview pane's rows as (text, source line) pairs, the tag row (if
+    any) first with a source of None — it isn't in the note's text, so nothing
+    downstream should try to map it back there. One definition shared by the
+    drawing, the scroll clamp and the match list, so all three agree on what
+    row 0 is."""
+    if note is None:
+        return []
+    body = preview_source_rows(content(note), width)
+    tg = preview_tag_row(note, tokens, state)
+    if not tg:
+        return body      # the cached list itself: read it, never mutate it
+    return [(r[0], None) for r in wrap_preview_rows([tg], width)] + list(body)
 
 
 def preview_scroll_step(page_h):
@@ -4583,23 +4644,25 @@ def preview_scroll_step(page_h):
     return max(1, page_h)
 
 
-def preview_max_scroll(note, w, h):
-    """Highest p_scroll that still shows content — the note's wrapped length
-    minus one screenful, floored at 0. Shared by every PgDn on the notes list
-    (search mode included) so the pane stops at the end of the note instead of
-    scrolling into blank space. Counted in drawn rows, pane height h - 2."""
+def preview_max_scroll(note, state, w, h):
+    """Highest p_scroll that still shows content — the pane's row count minus
+    one screenful, floored at 0. Shared by every PgDn on the notes list (search
+    mode included) so the pane stops at the end of the note instead of
+    scrolling into blank space. Counted in drawn rows, pane height h - 2, and
+    it counts the tag row when there is one."""
     if note is None:
         return 0
     preview_w = preview_geometry(w)[3]
-    n_lines = len(preview_body_lines(content(note), preview_w))
-    return max(0, n_lines - (h - 2))
+    rows = preview_rows(note, search_tokens(state.get("q", "")),
+                        preview_w, state)
+    return max(0, len(rows) - (h - 2))
 
 
 def preview_scroll_key(k, state, note, w, h):
     """Apply a PgDn/PgUp keypress to state["p_scroll"], clamped to the note.
     True if the key was a page key and was consumed."""
     if k == curses.KEY_NPAGE:
-        state["p_scroll"] = min(preview_max_scroll(note, w, h),
+        state["p_scroll"] = min(preview_max_scroll(note, state, w, h),
                                 state["p_scroll"] + preview_scroll_step(h - 2))
         return True
     if k == curses.KEY_PPAGE:
@@ -4609,23 +4672,26 @@ def preview_scroll_key(k, state, note, w, h):
     return False
 
 
-def preview_match_list(text, tokens, width, render_md):
-    """Every token match in a note's preview rows, in reading order, as
-    (row, ordinal-on-that-row, src_line, ordinal-on-that-src-line).
+def preview_match_list(rows, tokens, render_md):
+    """Every token match in a pane's rows — as produced by preview_rows — in
+    reading order, as (row, ordinal-on-that-row, src_line, ordinal-on-src-line).
 
     The first pair is what the renderers need: the ordinal is what they count
     matches by, so the entry the navigation is on and the run drawn in the
     focus color are the same run. The second pair is the same match located in
     the note's source (which a wrapped row can't give directly), so opening the
-    note in Vim can land on the match you were looking at."""
-    if not tokens or not text:
+    note in Vim can land on the match you were looking at; it is None for a row
+    that isn't in the note's text, i.e. the tag row."""
+    if not tokens or not rows:
         return []
     out = []
     per_src = {}                  # src line -> matches counted so far on it
-    for i, (raw, src, _) in enumerate(wrap_preview_rows(text.split("\n"), width)):
+    for i, (raw, src) in enumerate(rows):
         # Match the logical (marker-stripped) text when markdown is rendered,
-        # so the counting agrees with draw_markdown_line.
-        line = "".join(e[0] for e in _md_entries(raw, 0)) if render_md else raw
+        # so the counting agrees with draw_markdown_line. The tag row is drawn
+        # literally, so it's counted literally.
+        line = ("".join(e[0] for e in _md_entries(raw, 0))
+                if render_md and src is not None else raw)
         n = len(match_spans(line, tokens))
         seen = per_src.get(src, 0)
         out.extend((i, j, src, seen + j) for j in range(n))
@@ -4639,26 +4705,27 @@ def reveal_preview_row(row, state, note, w, h):
     top = state["p_scroll"]
     if top <= row < top + (h - 2):
         return top
-    return max(0, min(preview_max_scroll(note, w, h), row - 1))
+    return max(0, min(preview_max_scroll(note, state, w, h), row - 1))
 
 
 def sync_preview_matches(state, note, tokens, w, h):
     """Keep the preview's match list, focus index and scroll in step with the
     selected note and the live query; returns the list.
 
-    Recomputed only when the note, the query or the pane width changes — which
-    is also when the focus resets to the first match and the pane snaps to it,
-    so a search result opens on its first occurrence instead of at line 1. The
-    cache key deliberately excludes p_scroll, so PgDn/PgUp scroll freely
-    afterwards without the pane snapping back."""
+    Recomputed only when the note, the query, the pane width or the tag row
+    changes — which is also when the focus resets to the first match and the
+    pane snaps to it, so a search result opens on its first occurrence instead
+    of at line 1. The cache key deliberately excludes p_scroll, so PgDn/PgUp
+    scroll freely afterwards without the pane snapping back."""
     preview_w = preview_geometry(w)[3]
     render_md = config_bool("render_markdown", True)
-    key = (note["path"] if note else None, tuple(tokens), preview_w, render_md)
+    tag_row = preview_tag_row(note, tokens, state)
+    key = (note["path"] if note else None, tuple(tokens), preview_w,
+           render_md, tag_row)
     if state.get("_match_key") != key:
         state["_match_key"] = key
-        state["_matches"] = (preview_match_list(content(note), tokens,
-                                                preview_w, render_md)
-                             if note is not None else [])
+        state["_matches"] = preview_match_list(
+            preview_rows(note, tokens, preview_w, state), tokens, render_md)
         state["m_idx"] = 0
         if state["_matches"]:
             state["p_scroll"] = reveal_preview_row(state["_matches"][0][0],
@@ -4709,6 +4776,8 @@ def vim_match_position(state, note):
     if pos is None or body_line is None:
         return None
     src_line, ordinal = pos
+    if src_line is None:
+        return None      # the tag row: no position in the note's text
     return (body_line + src_line + 1, ordinal)
 
 
@@ -4900,6 +4969,10 @@ def draw(stdscr, notes, state):
     else:
         block_end = COL_DATE + 16   # date only (16-char timestamp)
     tag_col = block_end + 2
+    # Whether this width leaves room for the tags column at all — what
+    # `preview_tags = narrow` keys off, so the preview's tag row appears
+    # exactly when the list's copy of the tags has been squeezed out.
+    state["_tags_col_shown"] = bool(show_date and tag_col < list_w)
 
     # ----------------------------
     # LEFT PANE
@@ -4943,7 +5016,11 @@ def draw(stdscr, notes, state):
             stdscr.addnstr(y, COL_AGO, LRM + ago_str, min(1 + len(ago_str), list_w - COL_AGO), attr_date)
 
         if show_date and tg and tag_col < list_w:
-            addnstr_w(stdscr, y, tag_col, tg, list_w - tag_col, attr_tag)
+            # Highlighted like the title: a tag is a first-class way to match,
+            # and an unmarked one leaves a result with no visible reason for
+            # being in the list.
+            draw_line_highlighted(stdscr, y, tag_col, tg, list_w - tag_col,
+                                  attr_tag, match_attr(), tokens)
 
     # ----------------------------
     # RIGHT PANE (preview)
@@ -4958,7 +5035,7 @@ def draw(stdscr, notes, state):
         if 0 <= cur_idx < len(notes):
             cur = notes[cur_idx]
 
-            lines = preview_body_lines(content(cur), preview_w)
+            rows = preview_rows(cur, tokens, preview_w, state)
 
             # Before reading p_scroll: on a new note or a changed query this
             # snaps the pane to the first match, which is what makes a result
@@ -4970,17 +5047,19 @@ def draw(stdscr, notes, state):
             end = start + h - 2
             render_md = config_bool("render_markdown", True)
 
-            for i, line in enumerate(lines[start:end]):
+            for i, (line, src) in enumerate(rows[start:end]):
                 if i >= h - 2:
                     break
 
-                # rows from preview_body_lines are already tab-expanded and
-                # newline-free
-                draw_body = (draw_markdown_line if render_md
+                # rows from preview_rows are already tab-expanded and
+                # newline-free. The tag row (src None) is drawn literally, in
+                # the tag color — it's frontmatter, not note text, so neither
+                # the markdown renderer nor the body color applies to it.
+                draw_body = (draw_markdown_line if render_md and src is not None
                             else draw_line_highlighted)
                 draw_body(
                     stdscr, i + 1, mid + 1, line, preview_w,
-                    curses.color_pair(4),
+                    curses.color_pair(4) if src is not None else curses.color_pair(3),
                     match_attr(),
                     tokens,
                     focus_ord if start + i == focus_row else None,
