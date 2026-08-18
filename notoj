@@ -265,6 +265,19 @@ KEYMAP = [
 HELP_KEY_W = 12   # description column starts at 4 (indent) + this
 
 
+def wrap_help(text, width):
+    """Wrap one help description to `width`.
+
+    break_on_hyphens is off. With it on, textwrap splits a compound word at its
+    hyphen to fill a line — "most-used" becomes "most-" / "used" in a narrow
+    terminal and stays whole in a wide one — so the same reference is made of
+    different WORDS at different widths. That breaks the contract the help
+    screens are built on: `--help` and the in-app `?` overlay are two renderings
+    of one KEYMAP, and resizing may re-break the lines but must never re-word
+    them."""
+    return textwrap.wrap(text, width, break_on_hyphens=False)
+
+
 def build_help(width=None):
     """The --help text, rendered from KEYMAP; long descriptions wrap to the
     terminal width with continuation lines under the description column."""
@@ -283,7 +296,7 @@ def build_help(width=None):
         ("--move", "remove each source file once its copy is committed"),
         ("--version", "print the notoj version and exit"),
     ):
-        first, *rest = textwrap.wrap(desc, max(20, width - 2 - opt_w))
+        first, *rest = wrap_help(desc, max(20, width - 2 - opt_w))
         lines.append(f"  {label:<{opt_w}}{first}")
         lines.extend(f"  {'':<{opt_w}}{r}" for r in rest)
     lines += ["", "Keybindings:"]
@@ -291,7 +304,7 @@ def build_help(width=None):
         lines.append(f"  {section}")
         for action, key, desc in entries:
             label = action_label(action, key) if action else key
-            first, *rest = textwrap.wrap(desc, desc_w)
+            first, *rest = wrap_help(desc, desc_w)
             lines.append(f"    {label:<{HELP_KEY_W}}{first}")
             lines.extend(f"    {'':<{HELP_KEY_W}}{r}" for r in rest)
         lines.append("")
@@ -2844,11 +2857,11 @@ def help_rows(width):
         rows.append(("section", "", section))
         for action, key, desc in entries:
             label = action_label(action, key) if action else key
-            for j, part in enumerate(textwrap.wrap(desc, desc_w)):
+            for j, part in enumerate(wrap_help(desc, desc_w)):
                 rows.append(("entry", label if j == 0 else "", part))
     rows.append(("blank", "", ""))
-    for part in textwrap.wrap("Key remapping and other configuration "
-                              f"settings at {CONFIG_FILE}", max(20, width - 1)):
+    for part in wrap_help("Key remapping and other configuration "
+                          f"settings at {CONFIG_FILE}", max(20, width - 1)):
         rows.append(("section", "", part))
     return rows
 

@@ -67,7 +67,8 @@ take `true/false/yes/no/on/off/1/0`. The main options:
 | `list_max_w` | `80` | Max width of the left list panel; extra width goes to the preview |
 | `tag_display_order` | `freq` | Tag order for display — `freq`, `freq_asc`, `name`, `stored` |
 | `undo.persist` | `true` | Keep the undo history across sessions |
-| `color.<slot>` | — | Colors for `accent`, `date`, `tag`, `preview`, `header`, `match`, `match_fuzzy`, `match_focus_fg`/`_bg`, `footer_bg`, plus the `date_gradient` |
+| `tag_preview` | `true` | Dimmed ghost suffix at the tag prompt previewing what `Tab` would complete to |
+| `color.<slot>` | — | Colors for `accent`, `date`, `tag`, `tag_inactive`, `tag_preview`, `preview`, `header`, `match`, `match_fuzzy`, `match_focus_fg`/`_bg`, `footer_bg`, `message_fg`/`_bg`, plus the `date_gradient` |
 | `key.<action>` | — | Remap any key, including the `g_` chords |
 
 [`config.example`](config.example) documents every option in full.
@@ -88,12 +89,18 @@ full keybinding reference. The essentials:
   `n`/`N` step through them (`o` creates a new note). Enter then opens the note
   in Vim *at that hit*, not back at the first one, with `n`/`N` carrying on
   from there (a quoted `"phrase"` is matched across line breaks too).
+- With a multi-word query, `Tab`/`Shift-Tab` cycle which term `n`/`N` step
+  through — all of them, then each one, then all again. The result list is
+  untouched, which is what retyping a shorter query can't give you: `/food`
+  ranks a different set of notes, this keeps the set and changes only what
+  counts as a match, in the panes and in Vim.
 - Views: `g t` trash, `g d` duplicates, `g r` resurface (open loops),
   `T` all tags, `t` notes sharing the selected note's tags, `b` backlinks
   (notes whose `[[wikilinks]]` or `[text](note.md)` links point at the
   selected note — the same links Vim's `gf` follows). ESC steps back.
 - `h`/`m`/`l` jump to the top/middle/bottom of the visible page in any list;
-  at the `#` tag prompt, `Tab` completes against the tags you already use.
+  at the `#` tag prompt, `Tab` completes against the tags you already use
+  (a dimmed ghost suffix previews what it would accept — `tag_preview`).
 - `g h`/`H` diff or browse a note's git history; `u`/`Ctrl-r` undo/redo
   trashes, loop-closes, tag additions, and edits — and, with `undo.persist`
   on (the default), across sessions too, prompting before it reaches into a

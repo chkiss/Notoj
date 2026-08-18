@@ -3311,11 +3311,39 @@ class TestKeymap(unittest.TestCase):
         self.assertTrue(any(r[0] == "entry" and r[1] == "" for r in rows))
         # every entry row's text is non-empty
         self.assertTrue(all(r[2] for r in rows if r[0] == "entry"))
-        # narrower width -> more wrapped rows, and no lost words
+        # narrower width -> more wrapped rows
         self.assertGreater(len(notoj.help_rows(50)), len(rows))
-        flat80 = " ".join(r[2] for r in rows if r[0] == "entry")
-        flat50 = " ".join(r[2] for r in notoj.help_rows(50) if r[0] == "entry")
-        self.assertEqual(flat80.split(), flat50.split())
+
+    @staticmethod
+    def _words(rows):
+        return " ".join(r[2] for r in rows if r[0] == "entry").split()
+
+    def test_resizing_rebreaks_lines_but_never_rewords(self):
+        # `--help` and the in-app `?` are two renderings of one KEYMAP, so a
+        # narrower terminal may move the line breaks but must not change the
+        # words. textwrap's break_on_hyphens used to violate this: "most-used"
+        # split into "most-" / "used" below a certain width and not above it.
+        #
+        # From 45 columns up. Below that the description column is pinned at
+        # its 20-column floor, and a word longer than the column (the longest
+        # here is "(tab_in_search_in_tag_view)", 27) has to break somewhere.
+        ref = self._words(notoj.help_rows(80))
+        for w in range(45, 200, 7):
+            self.assertEqual(self._words(notoj.help_rows(w)), ref, w)
+
+    def test_build_help_rewords_no_more_than_the_overlay(self):
+        ref = " ".join(notoj.build_help(80).split())
+        for w in range(60, 200, 11):
+            self.assertEqual(" ".join(notoj.build_help(w).split()), ref, w)
+
+    def test_wrap_help_keeps_a_compound_word_whole(self):
+        self.assertEqual(notoj.wrap_help("pick the most-used tag first", 20),
+                         ["pick the most-used", "tag first"])
+
+    def test_wrap_help_still_breaks_a_word_wider_than_the_column(self):
+        # Nowhere to put it otherwise; breaking beats overflowing the pane.
+        self.assertEqual(notoj.wrap_help("a supercalifragilistic word", 10),
+                         ["a supercal", "ifragilist", "ic word"])
 
 
 # ---------------------------------------------------------------------------
