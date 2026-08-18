@@ -4224,6 +4224,73 @@ class TestHighlightTokens(unittest.TestCase):
         self.assertEqual(notoj.highlight_tokens(None, ["a"]), ["a"])
 
 
+class TestMatchSummary(unittest.TestCase):
+    """The header's "why is this note in my results" line."""
+
+    def note(self, title="Syncthing setup", content="the syncthing mesh",
+             tags=("infra",)):
+        return make_note(title=title, content=content, tags=list(tags))
+
+    def test_counts_every_occurrence_in_the_note(self):
+        # title + body: the question is about the note, not about what the
+        # preview pane happens to be showing.
+        self.assertEqual(notoj.match_summary(self.note(), ["syncthing"]),
+                         [notoj.Matched("syncthing", 2, False)])
+
+    def test_tags_count(self):
+        n = self.note(title="t", content="c", tags=["notoj"])
+        self.assertEqual(notoj.match_summary(n, ["notoj"]),
+                         [notoj.Matched("notoj", 1, False)])
+
+    def test_a_term_that_matched_nothing_is_reported_as_zero(self):
+        # A note only has to match one term to rank, so in a multi-word query
+        # the zero is the informative half.
+        self.assertEqual(
+            notoj.match_summary(self.note(), ["syncthing", "zzzznope"]),
+            [notoj.Matched("syncthing", 2, False),
+             notoj.Matched("zzzznope", 0, False)])
+
+    def test_a_near_miss_reports_the_word_the_note_really_uses(self):
+        self.assertEqual(notoj.match_summary(self.note(), ["syncthign"]),
+                         [notoj.Matched("syncthing", 2, True)])
+
+    def test_terms_stay_in_the_order_typed(self):
+        got = notoj.match_summary(self.note(), ["setup", "syncthing"])
+        self.assertEqual([m.term for m in got], ["setup", "syncthing"])
+
+    def test_no_note_or_no_query(self):
+        self.assertEqual(notoj.match_summary(None, ["a"]), [])
+        self.assertEqual(notoj.match_summary(self.note(), []), [])
+
+
+class TestMatchSummaryText(unittest.TestCase):
+    def test_renders_terms_and_counts(self):
+        text, _ = notoj.match_summary_text(
+            [notoj.Matched("cat", 3, False), notoj.Matched("food", 0, False)])
+        self.assertEqual(text, "matched: cat (3), food (0)")
+
+    def test_a_correction_is_marked(self):
+        text, _ = notoj.match_summary_text([notoj.Matched("syncthing", 3, True)])
+        self.assertEqual(text, "matched: ~syncthing (3)")
+
+    def test_spans_point_at_the_terms(self):
+        text, spans = notoj.match_summary_text(
+            [notoj.Matched("cat", 3, False), notoj.Matched("food", 1, True)])
+        self.assertEqual([text[o:o + n] for o, n, _ in spans],
+                         ["cat", "~food"])
+
+    def test_format_characters_are_all_single_width(self):
+        # Regression: "×" for the count and "≈" for the mark are East-Asian
+        # Ambiguous — disp_width says two columns, the terminal draws one, and
+        # every term after the first gets recolored a column out of place.
+        text, _ = notoj.match_summary_text(
+            [notoj.Matched("a", 1, True), notoj.Matched("b", 0, False)])
+        self.assertEqual(notoj.disp_width(text), len(text))
+
+    def test_empty(self):
+        self.assertEqual(notoj.match_summary_text([]), ("", []))
+
+
 class TestHiSpec(unittest.TestCase):
     def test_focus_beats_fuzzy_beats_plain(self):
         hi = notoj.Hi(["a", "bb"], attr=1, fuzzy=frozenset(["bb"]),

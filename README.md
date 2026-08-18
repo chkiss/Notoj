@@ -77,7 +77,10 @@ shows the keys that matter in the current view, and `notoj --help` prints the
 full keybinding reference. The essentials:
 
 - `/` filters as you type; Enter opens the best match, or creates a new note
-  titled with your query if nothing matches. Matches are highlighted in
+  titled with your query if nothing matches. The header says what the selected
+  note actually matched and how often — `matched: cat (3), food (0)` — with a
+  `~word` naming the spelling behind a near-miss, so a result never leaves you
+  guessing why it's there. Matches are highlighted in
   magenta, and the preview pane opens on the first one rather than at the top
   of the note — the hit you're on is shown as a band, the rest as text, and
   `n`/`N` step through them (`o` creates a new note). Enter then opens the note

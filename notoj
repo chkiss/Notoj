@@ -4289,6 +4289,69 @@ def highlight_tokens(note, tokens):
     return list(tokens) + sorted({w for ws in fz.values() for w in ws})
 
 
+# The header's "why is this note here" summary. One entry per query term, in
+# the order typed: the text that actually matched, how many times it occurs in
+# the note, and whether it's a correction rather than the term itself.
+Matched = collections.namedtuple("Matched", "term count fuzzy")
+
+SUMMARY_PREFIX = "matched:"
+# Prefixes a term the query only came close to. ASCII on purpose: the obvious
+# "≈" (like "×" for the count) is an East-Asian *Ambiguous* character, which
+# disp_width measures as two columns and the terminal draws as one — enough to
+# put every term after it one column out when the header is recolored.
+FUZZY_MARK = "~"
+
+
+def match_summary(note, tokens):
+    """What matched in `note`, per query term — the answer to "why is this in
+    my results", which ranking alone never states.
+
+    Counts every occurrence in the note (title, tags and body), not just the
+    ones the preview can show, because the question is about the note and not
+    about the pane. A term that matched nothing is reported with a count of
+    zero: in a multi-word query that's the interesting one, since a note only
+    has to match a single term to rank at all. A term that only came close
+    reports the word the note really uses."""
+    if not note or not tokens:
+        return []
+    t, body, tag_str = search_text(note)
+    fz = fuzzy_words(note, tokens)
+    out = []
+    for tok in tokens:
+        n = t.count(tok) + tag_str.count(tok) + body.count(tok)
+        if n:
+            out.append(Matched(tok, n, False))
+            continue
+        # No literal hit: report the nearest word the note does use, picking
+        # the one it uses most.
+        best = max((w for w in fz.get(tok, ())),
+                   key=lambda w: t.count(w) + tag_str.count(w) + body.count(w),
+                   default=None)
+        if best is None:
+            out.append(Matched(tok, 0, False))
+        else:
+            out.append(Matched(best,
+                               t.count(best) + tag_str.count(best)
+                               + body.count(best), True))
+    return out
+
+
+def match_summary_text(items):
+    """(text, [(offset, length, item)]) for the header's match summary — the
+    string plus where each term sits in it, so the terms can be recolored to
+    the same palette they're highlighted with in the panes."""
+    if not items:
+        return "", []
+    text = SUMMARY_PREFIX
+    spans = []
+    for i, it in enumerate(items):
+        text += " " if i == 0 else ", "
+        term = (FUZZY_MARK + it.term) if it.fuzzy else it.term
+        spans.append((len(text), len(term), it))
+        text += "%s (%d)" % (term, it.count)
+    return text, spans
+
+
 def hi_for(note, tokens, attr, focus=None, focus_attr=None):
     """The Hi for a note's line: the query's tokens, plus the corrected
     spelling of anything the query only nearly matched in THIS note — which is
@@ -5092,6 +5155,15 @@ def draw(stdscr, notes, state):
     # The "filter:" field only shows while you're actually searching — same in
     # every view (notes / trash / duplicates / loops).
     filt = f" | filter:{state['q']}" if (state["q"] or state.get("search_mode")) else ""
+
+    # …and right behind it, what that filter actually matched in the selected
+    # note. It rides with the filter into every view, and sits ahead of the
+    # sort and the badges so it's the last thing a narrowing terminal drops.
+    tokens = search_tokens(state["q"])
+    cur_note = notes[state["cur"]] if 0 <= state["cur"] < len(notes) else None
+    summary, summary_spans = match_summary_text(match_summary(cur_note, tokens))
+    if summary:
+        filt += " | " + summary
     if state.get("tag_mode"):
         header = f"{TAG_PROMPT}{state['tag_input']}"
     elif state.get("sched_mode"):
@@ -5143,6 +5215,25 @@ def draw(stdscr, notes, state):
                 addnstr_w(stdscr, 0, q_x, state["q"], w - 1 - q_x,
                           curses.color_pair(1) | curses.A_UNDERLINE)
 
+    if summary:
+        # Recolor each matched term to the palette it's highlighted with in
+        # the panes: the match color, the muted one for a correction, and the
+        # inactive grey for a term that found nothing — so the summary is read
+        # at a glance rather than parsed.
+        anchor = header.find(summary)
+        for off, ln, it in (summary_spans if anchor >= 0 else []):
+            x = disp_width(header[:anchor + off])
+            if x >= w - 1:
+                break
+            if not it.count:
+                attr = tag_inactive_attr()
+            elif it.fuzzy:
+                attr = match_fuzzy_attr()
+            else:
+                attr = match_attr()
+            addnstr_w(stdscr, 0, x, summary[off:off + ln], w - 1 - x,
+                      attr | curses.A_UNDERLINE)
+
     if state.get("tagf") is not None:
         # Recolor the header's tag tokens so they read like the tags column:
         # tags being filtered on in the tag color, the parenthesised
@@ -5160,7 +5251,6 @@ def draw(stdscr, notes, state):
             col += disp_width(tok) + 1
 
     visible = notes[state["off"]:state["off"] + h - 2]
-    tokens = search_tokens(state["q"])
 
     # When sorted by creation date, the date and (age) columns track
     # creationDate instead of modificationDate — forward and reverse alike, with
@@ -5185,7 +5275,6 @@ def draw(stdscr, notes, state):
     # hit is in focus, and the left one is drawn first. On a new note or a
     # changed query this also snaps the preview to the first match, which is
     # what makes a result open on its first occurrence.
-    cur_note = notes[state["cur"]] if 0 <= state["cur"] < len(notes) else None
     sync_preview_matches(state, cur_note, highlight_tokens(cur_note, tokens),
                          w, h)
 
