@@ -220,7 +220,7 @@ KEYMAP = [
               "through: all of them → each one → all again (Shift-Tab walks "
               "back). The result list doesn't change — only what counts as a "
               "match does, in the panes and in Vim. In a tag view Tab stays "
-              "with the tags and this moves to Shift-Tab (tab_in_tag_view)"),
+              "with the tags and this moves to Shift-Tab (tab_in_search_in_tag_view)"),
     ]),
     ("Sorting (applies in every view; shown in the header)", [
         ("sort", "s", "cycle sort: relevance (default) → title → created → modified"),
@@ -3247,10 +3247,10 @@ def vim_search_scope():
 
 def tab_cycles_terms_in_tag_view():
     """Whether Tab cycles search terms rather than tags inside a tag-filter
-    view, where both could be cycled (`tab_in_tag_view`). Either way the other
-    one is on Shift-Tab, so nothing is unreachable — this only picks which gets
-    the unshifted key. Defaults to tags, the older meaning."""
-    v = (config_get("tab_in_tag_view", "tags") or "tags").strip().lower()
+    view, where both could be cycled (`tab_in_search_in_tag_view`). Either way
+    the other one is on Shift-Tab, so nothing is unreachable — this only picks
+    which gets the unshifted key. Defaults to tags, the older meaning."""
+    v = (config_get("tab_in_search_in_tag_view", "tags") or "tags").strip().lower()
     return v == "terms"
 
 
@@ -5471,7 +5471,7 @@ def draw(stdscr, notes, state):
     elif state.get("tagf") is not None:
         many = len(state["tagf"]["tags"]) > 1
         # Both cycles can be live here; name whichever key each one is on so
-        # the tab_in_tag_view setting doesn't have to be remembered.
+        # the tab_in_search_in_tag_view setting need not be remembered.
         terms_key = "⇥" if tab_cycles_terms_in_tag_view() else "⇧⇥"
         tags_key = "⇧⇥" if tab_cycles_terms_in_tag_view() else "⇥"
         segments = [
@@ -6390,8 +6390,8 @@ def run(stdscr, imports=(), move=False):
         elif k in (9, curses.KEY_BTAB):
             # Tab cycles a filter: which tag the view is narrowed to, or which
             # search term n/N steps through — the same all → each → all walk.
-            # Where both are available, tab_in_tag_view says which gets the
-            # unshifted key and the other takes Shift-Tab.
+            # Where both are available, tab_in_search_in_tag_view says which
+            # gets the unshifted key and the other takes Shift-Tab.
             terms = search_tokens(state["q"])
             in_tagf = state["tagf"] is not None
             tags_first = in_tagf and not tab_cycles_terms_in_tag_view()

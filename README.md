@@ -61,7 +61,7 @@ take `true/false/yes/no/on/off/1/0`. The main options:
 | `reshape_arabic` | `true` | Pre-shape Arabic-script text in the list and preview so it isn't isolated |
 | `preview_wrap` | `true` | Word-wrap the preview body; off clips each line at the pane edge |
 | `preview_tags` | `always` | Show a `#tag` row atop the preview when the search matched a tag — `always`, `narrow` (only when the list's tags column is hidden), `never` |
-| `tab_in_tag_view` | `tags` | In a tag-filter view, whether Tab cycles `tags` or search `terms` (the other takes Shift-Tab) |
+| `tab_in_search_in_tag_view` | `tags` | In a tag-filter view, whether Tab cycles `tags` or search `terms` (the other takes Shift-Tab) |
 | `vim_search_scope` | `term` | With a term singled out, hand Vim just that `term` or the whole `query` (positioning by the term either way) |
 | `preview_scroll` | `page` | Lines PgDn/PgUp scroll any preview pane — `page`, or a line count |
 | `list_max_w` | `80` | Max width of the left list panel; extra width goes to the preview |

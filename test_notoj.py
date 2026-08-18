@@ -4363,11 +4363,11 @@ class TestTabAndVimScopeConfig(unittest.TestCase):
         notoj._config_cache = {"vim_search_scope": "sideways"}
         self.assertEqual(notoj.vim_search_scope(), "term")
 
-    def test_tab_in_tag_view_defaults_to_tags(self):
+    def test_tab_in_search_in_tag_view_defaults_to_tags(self):
         self.assertFalse(notoj.tab_cycles_terms_in_tag_view())
 
-    def test_tab_in_tag_view_terms(self):
-        notoj._config_cache = {"tab_in_tag_view": "terms"}
+    def test_tab_in_search_in_tag_view_terms(self):
+        notoj._config_cache = {"tab_in_search_in_tag_view": "terms"}
         self.assertTrue(notoj.tab_cycles_terms_in_tag_view())
 
     def test_at_pat_positions_by_a_narrower_pattern(self):

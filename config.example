@@ -121,7 +121,7 @@ preview_scroll = page
 # other, and this says which. Default: tags, the older meaning of the key.
 #   tags    Tab cycles tags, Shift-Tab cycles search terms
 #   terms   Tab cycles search terms, Shift-Tab cycles tags
-# tab_in_tag_view = tags
+# tab_in_search_in_tag_view = tags
 
 # What Vim is handed when Enter opens a note while a term is singled out:
 #   term    (default) just that term, so Vim's n/N cycle exactly what notoj's
@@ -133,7 +133,7 @@ preview_scroll = page
 # ---- Colors ----
 # Names: black red green yellow blue magenta cyan white default — or a 0-255
 # palette index on 256-color terminals.
-#   color.accent    = yellow   # titles, recent dates, markdown headers
+#   color.accent    = 214      # titles, recent dates
 #   color.date      = red      # older dates
 #   color.tag       = green    # tags
 #   color.preview   = cyan     # preview body
