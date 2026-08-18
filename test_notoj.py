@@ -4033,39 +4033,70 @@ class TestMarkdownHeaderColor(unittest.TestCase):
 class TestVimMatchPosition(unittest.TestCase):
     """Where Vim opens: the match the preview was focused on, not the first."""
 
+    FM = "id: abc\ntitle: t\ntags: [alpha, notoj]\n"
+
     def note(self, path="/n/a.md", body_line=4):
-        return {"path": path, "content": "x", "body_line": body_line}
+        return {"path": path, "content": "x", "body_line": body_line,
+                "fm_text": self.FM}
 
     def state(self, matches, idx, path="/n/a.md"):
         return {"_matches": matches, "m_idx": idx,
                 "_match_key": (path, ("foo",), 40, True)}
 
+    def pos(self, st, note=None, tokens=("foo",)):
+        return notoj.vim_match_position(st, self.note() if note is None
+                                        else note, list(tokens))
+
     def test_body_offset_is_added_to_the_source_line(self):
         # Body line 2 of a note whose body starts on file line 4 is file line 7
         # (both 0-based until the +1 for Vim's 1-based lines).
-        st = self.state([(0, 0, 0, 0), (3, 0, 2, 0)], 1)
-        self.assertEqual(notoj.vim_match_position(st, self.note()), (7, 0))
+        st = self.state([notoj.Match(0, 0, 0, 0, None),
+                         notoj.Match(3, 0, 2, 0, None)], 1)
+        self.assertEqual(self.pos(st), (7, 0))
 
     def test_ordinal_within_the_line_is_carried(self):
-        st = self.state([(0, 0, 0, 0), (0, 1, 0, 1)], 1)
-        self.assertEqual(notoj.vim_match_position(st, self.note(body_line=0)),
-                         (1, 1))
+        st = self.state([notoj.Match(0, 0, 0, 0, None),
+                         notoj.Match(0, 1, 0, 1, None)], 1)
+        self.assertEqual(self.pos(st, self.note(body_line=0)), (1, 1))
+
+    def test_a_tag_hit_lands_on_the_frontmatter_tags_line(self):
+        # Not the title: the tag is the thing that matched, so that's where
+        # the cursor goes. "tags: [alpha, notoj]" is frontmatter line 2, so
+        # file line 4 with the opening --- above it.
+        st = self.state([notoj.Match(0, 0, None, 0, "notoj")], 0)
+        self.assertEqual(self.pos(st, tokens=["notoj"]), (4, 0))
+
+    def test_a_tag_hit_counts_earlier_matches_on_that_line(self):
+        # A query matching the key as well as the tag: Vim will stop on "tags"
+        # first, so the ordinal has to step past it.
+        st = self.state([notoj.Match(0, 0, None, 0, "alpha")], 0)
+        self.assertEqual(self.pos(st, tokens=["a"]), (4, 1))
+
+    def test_a_tag_hit_in_a_block_list(self):
+        note = self.note()
+        note["fm_text"] = "id: abc\ntags:\n  - alpha\n  - notoj\n"
+        st = self.state([notoj.Match(0, 0, None, 0, "notoj")], 0)
+        self.assertEqual(self.pos(st, note, ["notoj"]), (5, 0))
+
+    def test_a_tag_hit_with_no_frontmatter_recorded(self):
+        note = {"path": "/n/a.md", "body_line": 4}
+        st = self.state([notoj.Match(0, 0, None, 0, "notoj")], 0)
+        self.assertIsNone(self.pos(st, note, ["notoj"]))
 
     def test_no_matches_is_none(self):
-        self.assertIsNone(notoj.vim_match_position(self.state([], 0),
-                                                   self.note()))
+        self.assertIsNone(self.pos(self.state([], 0)))
 
     def test_match_list_for_another_note_is_ignored(self):
-        st = self.state([(0, 0, 0, 0)], 0, path="/n/other.md")
-        self.assertIsNone(notoj.vim_match_position(st, self.note()))
+        st = self.state([notoj.Match(0, 0, 0, 0, None)], 0, path="/n/other.md")
+        self.assertIsNone(self.pos(st))
 
     def test_note_without_a_body_offset_is_none(self):
         # An unparsed note falls back to the old jump-to-the-first-match.
-        st = self.state([(0, 0, 0, 0)], 0)
-        self.assertIsNone(notoj.vim_match_position(st, {"path": "/n/a.md"}))
+        st = self.state([notoj.Match(0, 0, 0, 0, None)], 0)
+        self.assertIsNone(self.pos(st, {"path": "/n/a.md"}))
 
     def test_no_note(self):
-        self.assertIsNone(notoj.vim_match_position(self.state([], 0), None))
+        self.assertIsNone(self.pos(self.state([], 0), False))
 
 
 class TestSearchTokens(unittest.TestCase):
@@ -4083,16 +4114,18 @@ class TestSearchTokens(unittest.TestCase):
 class TestMatchSpans(unittest.TestCase):
     def test_leftmost_first_and_case_insensitive(self):
         self.assertEqual(notoj.match_spans("a Foo b foo", ["foo"]),
-                         [(2, 5), (8, 11)])
+                         [(2, 5, "foo"), (8, 11, "foo")])
 
     def test_multiple_tokens_interleave_in_reading_order(self):
+        # Each span carries the token that produced it, so a caller can tell a
+        # literal hit from an approximate one.
         self.assertEqual(notoj.match_spans("bar foo bar", ["foo", "bar"]),
-                         [(0, 3), (4, 7), (8, 11)])
+                         [(0, 3, "bar"), (4, 7, "foo"), (8, 11, "bar")])
 
     def test_non_overlapping(self):
         # "aa" in "aaa" matches once; the scan resumes past the first hit
         # rather than sliding one character, so the count can't run away.
-        self.assertEqual(notoj.match_spans("aaa", ["aa"]), [(0, 2)])
+        self.assertEqual(notoj.match_spans("aaa", ["aa"]), [(0, 2, "aa")])
 
     def test_no_tokens_or_no_text(self):
         self.assertEqual(notoj.match_spans("abc", []), [])
@@ -4114,7 +4147,8 @@ class TestPreviewMatchList(unittest.TestCase):
         text = "foo bar\nbaz\nfoo foo"
         self.assertEqual(
             notoj.preview_match_list(self.rows(text), ["foo"], False),
-            [(0, 0, 0, 0), (2, 0, 2, 0), (2, 1, 2, 1)])
+            [notoj.Match(0, 0, 0, 0, None), notoj.Match(2, 0, 2, 0, None),
+             notoj.Match(2, 1, 2, 1, None)])
 
     def test_wrapped_line_keeps_one_source_line(self):
         # Two rows on screen, one source line: the source ordinals run 0,1 —
@@ -4122,33 +4156,38 @@ class TestPreviewMatchList(unittest.TestCase):
         notoj._config_cache = {"preview_wrap": "true"}
         got = notoj.preview_match_list(self.rows("foo aaaa foo", 8),
                                        ["foo"], False)
-        self.assertEqual([m[0] for m in got], [0, 1])       # two screen rows
-        self.assertEqual([m[2:] for m in got], [(0, 0), (0, 1)])
+        self.assertEqual([m.row for m in got], [0, 1])      # two screen rows
+        self.assertEqual([(m.src, m.src_ord) for m in got], [(0, 0), (0, 1)])
 
     def test_markdown_matches_the_stripped_text(self):
         # The marker characters aren't on screen, so a hit spanning them is not
         # a hit the reader can see: "**fo**o" reads as "foo".
         self.assertEqual(
             notoj.preview_match_list(self.rows("**fo**o"), ["foo"], True),
-            [(0, 0, 0, 0)])
+            [notoj.Match(0, 0, 0, 0, None)])
         self.assertEqual(
             notoj.preview_match_list(self.rows("**fo**o"), ["foo"], False), [])
 
     def test_heading_hit_is_found(self):
         self.assertEqual(
             notoj.preview_match_list(self.rows("# Foo notes"), ["foo"], True),
-            [(0, 0, 0, 0)])
+            [notoj.Match(0, 0, 0, 0, None)])
 
     def test_no_query_no_matches(self):
         self.assertEqual(
             notoj.preview_match_list(self.rows("foo"), [], True), [])
 
-    def test_tag_row_is_matched_literally_and_has_no_source(self):
-        # src None marks the row as not being in the note's text — it's what
-        # keeps the Vim jump from trying to place a cursor on frontmatter.
+    def test_tag_row_is_matched_literally_and_names_its_tag(self):
+        # src None marks the row as not being in the note's *body*; the tag
+        # name is what locates it in the frontmatter instead.
         rows = [("#notoj #notes", None)] + self.rows("body")
         got = notoj.preview_match_list(rows, ["notoj"], True)
-        self.assertEqual(got, [(0, 0, None, 0)])
+        self.assertEqual(got, [notoj.Match(0, 0, None, 0, "notoj")])
+
+    def test_tag_row_hit_on_the_second_tag_names_that_tag(self):
+        rows = [("#alpha #notoj", None)]
+        got = notoj.preview_match_list(rows, ["notoj"], True)
+        self.assertEqual(got[0].tag, "notoj")
 
 
 class TestPreviewTagRow(unittest.TestCase):
@@ -4206,6 +4245,31 @@ class TestPreviewTagRow(unittest.TestCase):
         self.assertEqual(notoj.preview_rows(self.note, ["body"], 40, {}),
                          [("body", 0)])
 
+    def test_column_matches_name_their_tag_and_have_no_row(self):
+        # row None = "not in the preview pane"; the focus band goes on the
+        # list's tags column instead.
+        got = notoj.column_tag_matches(self.note, ["notoj"])
+        self.assertEqual(got, [notoj.Match(None, 0, None, None, "notoj")])
+
+    def test_column_matches_none_without_a_hit(self):
+        self.assertEqual(notoj.column_tag_matches(self.note, ["zzz"]), [])
+
+    def test_tag_hit_is_navigable_from_the_column_alone(self):
+        # preview_tags=narrow + a visible tags column: the pane has no tag row,
+        # but n/N must still be able to step onto the tag.
+        notoj._config_cache = {"preview_tags": "narrow"}
+        st = {"p_scroll": 0, "_tags_col_shown": True, "q": "notoj"}
+        ms = notoj.sync_preview_matches(st, self.note, ["notoj"], 100, 12)
+        self.assertEqual([m.tag for m in ms], ["notoj"])
+        self.assertIsNone(ms[0].row)
+        self.assertEqual(st["p_scroll"], 0)       # nothing in the pane to reveal
+
+    def test_tag_hit_is_not_doubled_when_the_pane_shows_it(self):
+        notoj._config_cache = {"preview_tags": "always"}
+        st = {"p_scroll": 0, "_tags_col_shown": True, "q": "notoj"}
+        ms = notoj.sync_preview_matches(st, self.note, ["notoj"], 100, 12)
+        self.assertEqual([(m.row, m.tag) for m in ms], [(0, "notoj")])
+
 
 class TestPreviewMatchNavigation(unittest.TestCase):
     """n/N stepping and the open-on-first-match snap."""
@@ -4231,7 +4295,7 @@ class TestPreviewMatchNavigation(unittest.TestCase):
     def test_first_match_is_focused(self):
         self.assertEqual(len(self.sync()), 2)
         self.assertEqual(self.state["m_idx"], 0)
-        self.assertEqual(notoj.focused_match(self.state), (0, 0))
+        self.assertEqual(notoj.focused_match(self.state)[:2], (0, 0))
 
     def test_opens_scrolled_to_the_first_match(self):
         self.state["p_scroll"] = 99
@@ -4247,7 +4311,7 @@ class TestPreviewMatchNavigation(unittest.TestCase):
         self.assertTrue(notoj.match_step(self.state, self.note, ["foo"],
                                          self.W, self.H, 1))
         self.assertEqual(self.state["m_idx"], 1)
-        self.assertEqual(notoj.focused_match(self.state), (31, 0))
+        self.assertEqual(notoj.focused_match(self.state)[:2], (31, 0))
         self.assertEqual(self.state["p_scroll"], 22)   # clamped to the last page
 
     def test_n_wraps_back_to_the_first(self):

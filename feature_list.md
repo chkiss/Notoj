@@ -23,6 +23,7 @@
 * `o` creates a blank new note directly (explicit shortcut, complementary to search-to-create)
 * `n`/`N` step the preview to the next/previous match, which the preview opens on
 * Matching tags are highlighted in the list's tags column, and shown as a `#tag` row atop the preview (`preview_tags`) — so a note that ranked on a tag says why
+* `n`/`N` step onto tag hits wherever they're drawn (preview row or tags column), and opening one puts the cursor on the tag in the frontmatter, not on the title
 * ESC or Enter exits search mode
 * Keyboard-only operation
 

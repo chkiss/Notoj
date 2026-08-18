@@ -521,6 +521,10 @@ def load_md(path):
             # `content` can be turned back into a line number in the file —
             # what lets Vim open on the match the preview was showing.
             "body_line": text.count("\n", 0, body_start),
+            # The frontmatter as written, for the same reason: a match on a
+            # tag has to be located in the file, and the tags may be a flow
+            # list on one line or a block list spread over several.
+            "fm_text": text[4:end],
             "title": body_title or meta.get("title") or "",
             "tags": meta.get("tags") or [],
             "system_tags": meta.get("system_tags") or [],
@@ -4078,8 +4082,57 @@ def search_tokens(q):
     return q.lower().split()
 
 
+def tag_at(tag_text, pos):
+    """The tag whose word covers character `pos` of a tags string ("#a #b" or
+    "a b") — which tag a highlighted run belongs to."""
+    start = tag_text.rfind(" ", 0, pos) + 1
+    end = tag_text.find(" ", pos)
+    return tag_text[start:end if end != -1 else len(tag_text)].lstrip("#")
+
+
+def _tags_fm_lines(fm_lines):
+    """Indices of the frontmatter lines that hold the `tags` value — the
+    `tags:` line itself, plus the `  - item` lines under it when it's written
+    as a block list rather than a flow list."""
+    out, in_block = [], False
+    for i, line in enumerate(fm_lines):
+        if in_block and line.startswith("  - "):
+            out.append(i)
+            continue
+        in_block = False
+        if line.partition(":")[0].strip() == "tags":
+            out.append(i)
+            in_block = not line.partition(":")[2].strip()
+    return out
+
+
+def tag_file_position(note, tag, tokens):
+    """(1-based file line, ordinal on that line) of `tag` in the note's
+    frontmatter — where Vim should open when the search matched a tag, so the
+    cursor lands on the tag itself instead of falling back to the title.
+
+    The ordinal counts the query's own matches earlier on the line, because
+    that's what Vim will be stepping over: the frontmatter key ("tags") can
+    match the query too."""
+    fm = note.get("fm_text") if note else None
+    if not fm or not tag:
+        return None
+    lines = fm.split("\n")
+    for i in _tags_fm_lines(lines):
+        raw = lines[i]
+        j = raw.lower().find(tag.lower())
+        if j < 0:
+            continue
+        for k, (s, _e, _t) in enumerate(match_spans(raw, tokens)):
+            if s >= j:
+                # +1 for the opening "---" above the frontmatter, +1 for Vim's
+                # 1-based lines.
+                return (i + 2, k)
+    return None
+
+
 def match_spans(text, tokens):
-    """The (start, end) character spans `text` matches on, leftmost first and
+    """The (start, end, token) spans `text` matches on, leftmost first and
     non-overlapping — one definition of "the matches on this line", shared by
     both renderers and by the n/N navigation so the k-th match a renderer
     paints is the k-th match n/N counts."""
@@ -4098,7 +4151,7 @@ def match_spans(text, tokens):
         if best is None:
             break
         mi, tok = best
-        spans.append((mi, mi + len(tok)))
+        spans.append((mi, mi + len(tok), tok))
         pos = mi + len(tok)
     return spans
 
@@ -4122,7 +4175,7 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr,
     pos = 0
     col = x
     rem = max_w                       # remaining budget, in display columns
-    for k, (mi, me) in enumerate(spans):
+    for k, (mi, me, _tok) in enumerate(spans):
         if rem <= 0:
             break
         if mi > pos:
@@ -4235,7 +4288,7 @@ def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi_attr, tokens,
         # it looks like it is.
         spans = match_spans("".join(e[0] for e in entries), tokens)
         hot = [None] * len(entries)
-        for k, (start, end) in enumerate(spans):
+        for k, (start, end, _tok) in enumerate(spans):
             attr = focus_attr if (k == focus and focus_attr is not None) else hi_attr
             for j in range(start, end):
                 hot[j] = attr
@@ -4672,16 +4725,20 @@ def preview_scroll_key(k, state, note, w, h):
     return False
 
 
+# One navigable search hit. `row`/`ord` place it on screen — the ordinal is
+# what the renderers count matches by, so the entry the navigation is on and
+# the run drawn in the focus color are the same run; row None means the hit
+# isn't in the preview pane at all but in the list's tags column. `src`/
+# `src_ord` place the same hit in the note's text (which a wrapped row can't
+# give on its own), so opening in Vim lands on it; src is None for a hit that
+# isn't in the body. `tag` names the tag a hit belongs to, for the hits that
+# are tags — that's how they're located in the frontmatter.
+Match = collections.namedtuple("Match", "row ord src src_ord tag")
+
+
 def preview_match_list(rows, tokens, render_md):
     """Every token match in a pane's rows — as produced by preview_rows — in
-    reading order, as (row, ordinal-on-that-row, src_line, ordinal-on-src-line).
-
-    The first pair is what the renderers need: the ordinal is what they count
-    matches by, so the entry the navigation is on and the run drawn in the
-    focus color are the same run. The second pair is the same match located in
-    the note's source (which a wrapped row can't give directly), so opening the
-    note in Vim can land on the match you were looking at; it is None for a row
-    that isn't in the note's text, i.e. the tag row."""
+    reading order."""
     if not tokens or not rows:
         return []
     out = []
@@ -4692,18 +4749,33 @@ def preview_match_list(rows, tokens, render_md):
         # literally, so it's counted literally.
         line = ("".join(e[0] for e in _md_entries(raw, 0))
                 if render_md and src is not None else raw)
-        n = len(match_spans(line, tokens))
+        spans = match_spans(line, tokens)
         seen = per_src.get(src, 0)
-        out.extend((i, j, src, seen + j) for j in range(n))
-        per_src[src] = seen + n
+        out.extend(Match(i, j, src, seen + j,
+                         tag_at(line, s) if src is None else None)
+                   for j, (s, _e, _t) in enumerate(spans))
+        per_src[src] = seen + len(spans)
     return out
+
+
+def column_tag_matches(note, tokens):
+    """Hits on the note's tags as shown in the list's tags column, for when the
+    preview isn't carrying a tag row. A tag is a real match wherever it's
+    drawn, so n/N steps through these too — and lands the highlight on the
+    column instead of the pane."""
+    tg = tags(note) if note else ""
+    if not tg or not tokens:
+        return []
+    return [Match(None, j, None, None, tag_at(tg, s))
+            for j, (s, _e, _t) in enumerate(match_spans(tg, tokens))]
 
 
 def reveal_preview_row(row, state, note, w, h):
     """The p_scroll that brings preview `row` into view, moving the pane as
-    little as it can and keeping a line of context above the row."""
+    little as it can and keeping a line of context above the row. A hit that
+    isn't in the pane (row None — the tags column) leaves the scroll alone."""
     top = state["p_scroll"]
-    if top <= row < top + (h - 2):
+    if row is None or top <= row < top + (h - 2):
         return top
     return max(0, min(preview_max_scroll(note, state, w, h), row - 1))
 
@@ -4721,15 +4793,21 @@ def sync_preview_matches(state, note, tokens, w, h):
     render_md = config_bool("render_markdown", True)
     tag_row = preview_tag_row(note, tokens, state)
     key = (note["path"] if note else None, tuple(tokens), preview_w,
-           render_md, tag_row)
+           render_md, tag_row, state.get("_tags_col_shown"))
     if state.get("_match_key") != key:
         state["_match_key"] = key
-        state["_matches"] = preview_match_list(
+        ms = preview_match_list(
             preview_rows(note, tokens, preview_w, state), tokens, render_md)
+        if not tag_row and state.get("_tags_col_shown"):
+            # The tags aren't in the pane but they are on the row, so the hit
+            # is still visible and still worth stepping onto. Tags come first
+            # for the same reason they're drawn above the body: they're the
+            # note's frontmatter.
+            ms = column_tag_matches(note, tokens) + ms
+        state["_matches"] = ms
         state["m_idx"] = 0
-        if state["_matches"]:
-            state["p_scroll"] = reveal_preview_row(state["_matches"][0][0],
-                                                   state, note, w, h)
+        if ms:
+            state["p_scroll"] = reveal_preview_row(ms[0].row, state, note, w, h)
     return state["_matches"]
 
 
@@ -4740,45 +4818,37 @@ def match_step(state, note, tokens, w, h, delta):
     if not ms:
         return False
     state["m_idx"] = (state.get("m_idx", 0) + delta) % len(ms)
-    state["p_scroll"] = reveal_preview_row(ms[state["m_idx"]][0],
+    state["p_scroll"] = reveal_preview_row(ms[state["m_idx"]].row,
                                            state, note, w, h)
     return True
 
 
 def focused_match(state):
-    """(row, ordinal) of the in-focus match, or (None, None) when there is
-    none — what the preview renderer needs to pick out the current hit."""
+    """The in-focus Match, or None when there isn't one."""
     ms = state.get("_matches") or []
     i = state.get("m_idx", 0)
-    return ms[i][:2] if 0 <= i < len(ms) else (None, None)
+    return ms[i] if 0 <= i < len(ms) else None
 
 
-def focused_source_match(state):
-    """(src_line, ordinal-on-that-line) of the in-focus match, 0-based in the
-    note's body — where to put the cursor when the note is opened. None when
-    nothing is focused."""
-    ms = state.get("_matches") or []
-    i = state.get("m_idx", 0)
-    return ms[i][2:] if 0 <= i < len(ms) else None
-
-
-def vim_match_position(state, note):
+def vim_match_position(state, note, tokens):
     """(file line, ordinal-on-that-line) for the match the preview is focused
     on — where Vim should open the note, so stepping to the 3rd hit and hitting
-    Enter enters the file on the 3rd hit. None when nothing is focused, when
-    the match list belongs to a different note, or when the note carries no
-    body offset (an unparsed file) — each of which leaves the plain
+    Enter enters the file on the 3rd hit. A hit on a tag resolves to the
+    frontmatter line the tag is written on, not the title. None when nothing is
+    focused, when the match list belongs to a different note, or when the note
+    carries no body offset (an unparsed file) — each of which leaves the plain
     jump-to-the-first-match positioning in place."""
     if not note or (state.get("_match_key") or (None,))[0] != note.get("path"):
         return None
-    pos = focused_source_match(state)
-    body_line = note.get("body_line")
-    if pos is None or body_line is None:
+    m = focused_match(state)
+    if m is None:
         return None
-    src_line, ordinal = pos
-    if src_line is None:
-        return None      # the tag row: no position in the note's text
-    return (body_line + src_line + 1, ordinal)
+    if m.tag:
+        return tag_file_position(note, m.tag, tokens)
+    body_line = note.get("body_line")
+    if m.src is None or body_line is None:
+        return None
+    return (body_line + m.src + 1, m.src_ord)
 
 
 def nav_delta(k, page_h):
@@ -4974,6 +5044,13 @@ def draw(stdscr, notes, state):
     # exactly when the list's copy of the tags has been squeezed out.
     state["_tags_col_shown"] = bool(show_date and tag_col < list_w)
 
+    # Resolve the match list before anything is painted: both panes ask which
+    # hit is in focus, and the left one is drawn first. On a new note or a
+    # changed query this also snaps the preview to the first match, which is
+    # what makes a result open on its first occurrence.
+    cur_note = notes[state["cur"]] if 0 <= state["cur"] < len(notes) else None
+    sync_preview_matches(state, cur_note, tokens, w, h)
+
     # ----------------------------
     # LEFT PANE
     # ----------------------------
@@ -5018,9 +5095,15 @@ def draw(stdscr, notes, state):
         if show_date and tg and tag_col < list_w:
             # Highlighted like the title: a tag is a first-class way to match,
             # and an unmarked one leaves a result with no visible reason for
-            # being in the list.
+            # being in the list. On the selected row it also carries the focus
+            # band when n/N has stepped onto a tag that the preview isn't
+            # showing — the hit has to be visible wherever it lives.
+            fm = focused_match(state) if selected else None
             draw_line_highlighted(stdscr, y, tag_col, tg, list_w - tag_col,
-                                  attr_tag, match_attr(), tokens)
+                                  attr_tag, match_attr(), tokens,
+                                  fm.ord if fm is not None and fm.row is None
+                                  else None,
+                                  match_focus_attr())
 
     # ----------------------------
     # RIGHT PANE (preview)
@@ -5036,12 +5119,8 @@ def draw(stdscr, notes, state):
             cur = notes[cur_idx]
 
             rows = preview_rows(cur, tokens, preview_w, state)
-
-            # Before reading p_scroll: on a new note or a changed query this
-            # snaps the pane to the first match, which is what makes a result
-            # open on its first occurrence.
-            sync_preview_matches(state, cur, tokens, w, h)
-            focus_row, focus_ord = focused_match(state)
+            fm = focused_match(state)
+            focus_row, focus_ord = (fm.row, fm.ord) if fm else (None, None)
 
             start = state["p_scroll"]
             end = start + h - 2
@@ -5364,7 +5443,7 @@ def run(stdscr, imports=(), move=False):
         with `n` carrying on from there. Trashed notes first get an interstitial
         saying that saving any change restores them from the trash."""
         search = vim_search_pattern(state["q"])
-        at = vim_match_position(state, note)
+        at = vim_match_position(state, note, search_tokens(state["q"]))
         if state["trash_mode"]:
             if confirm_screen(stdscr, TRASH_EDIT_NOTICE):
                 restored = edit_trash_note(note, end=end, search=search, at=at)
