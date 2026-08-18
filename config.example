@@ -125,6 +125,11 @@ preview_scroll = page
 #   color.match     = 205      # search-match highlight (magenta — the one hue
 #                              # not already spoken for, so a hit inside a
 #                              # "# Heading" still reads as a hit)
+#   color.match_fuzzy = 175    # an APPROXIMATE hit: the word the note really
+#                              # uses where the query was a near-miss
+#                              # ("syncthing" for a typed "syncthign"). Same
+#                              # hue, muted — it is the match, but it isn't
+#                              # what you typed.
 # The in-focus match — the one n/N is sitting on — wears that color as a band
 # instead of as text (Vim's CurSearch vs Search); reverse video without 256
 # colors. Override either end (256-color only):

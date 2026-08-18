@@ -3405,6 +3405,16 @@ class VimSearchPatternTests(unittest.TestCase):
             notoj.vim_search_pattern('"a  b   c"'), r"\c\Va\_s\+b\_s\+c"
         )
 
+    def test_near_miss_words_are_ored_in(self):
+        # Without this the pattern matches nothing in the file at all.
+        self.assertEqual(notoj.vim_search_pattern("syncthign", ["syncthing"]),
+                         r"\c\Vsyncthign\|syncthing")
+
+    def test_a_quoted_phrase_takes_no_corrections(self):
+        # Quoting asks for exactly that text; a guess would betray it.
+        self.assertEqual(notoj.vim_search_pattern('"cat food"', ["cats"]),
+                         r"\c\Vcat\_s\+food")
+
     def test_backslash_is_escaped_for_very_nomagic(self):
         self.assertEqual(notoj.vim_search_pattern(r"back\slash"), r"\c\Vback\\slash")
 
@@ -3502,6 +3512,21 @@ class VimSearchIntegrationTests(unittest.TestCase):
         pat = notoj.vim_search_pattern("foo")
         _, line, col = self._run(body, pat, at=(2, 9))
         self.assertEqual((line, col), (2, 9))
+
+    def test_a_typo_query_highlights_the_word_the_note_actually_uses(self):
+        # The regression this exists for: ranking matched "syncthing" from a
+        # typed "syncthign", but the pattern handed to Vim was the typo, so
+        # hlsearch lit nothing, `n` reported no matches, and the cursor fell
+        # back to line 1. With the correction ORed in, it all works.
+        body = "alpha\nthe syncthing mesh\ngamma\n"
+        typo = notoj.vim_search_pattern("syncthign")
+        _, line, _ = self._run(body, typo)
+        self.assertEqual(line, 1)                     # nothing found: fallback
+
+        fixed = notoj.vim_search_pattern("syncthign", ["syncthing"])
+        reg, line, col = self._run(body, fixed)
+        self.assertEqual(reg, fixed)
+        self.assertEqual((line, col), (2, 5))         # on the corrected word
 
     def test_phrase_matches_across_a_line_break(self):
         body = "intro\nthe cat\nfood bowl\n"
@@ -4109,6 +4134,108 @@ class TestSearchTokens(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(notoj.search_tokens("  "), [])
         self.assertEqual(notoj.search_tokens(None), [])
+
+
+class TestEditDistance(unittest.TestCase):
+    def test_substitution_deletion_insertion(self):
+        self.assertEqual(notoj._edit_dist("notoj", "notoi"), 1)
+        self.assertEqual(notoj._edit_dist("notoj", "noto"), 1)
+        self.assertEqual(notoj._edit_dist("notoj", "notooj"), 1)
+
+    def test_transposition_is_one_edit(self):
+        # Damerau, not plain Levenshtein: swapping two adjacent letters is the
+        # commonest typo there is, and Levenshtein charges two for it — which
+        # put every transposition out of reach of a threshold of one.
+        self.assertEqual(notoj._edit_dist("notoj", "ntooj"), 1)
+        self.assertEqual(notoj._edit_dist("syncthing", "syncthign"), 1)
+
+    def test_over_budget_pairs_are_rejected_cheaply(self):
+        self.assertEqual(notoj._edit_dist("notoj", "nottingham"), 99)
+        self.assertEqual(notoj._edit_dist("abcd", "wxyz"), 99)
+
+    def test_limit_raises_what_counts(self):
+        self.assertEqual(notoj._edit_dist("syncthing", "sinctring", 2), 2)
+        self.assertEqual(notoj._edit_dist("syncthing", "sinctring", 1), 99)
+
+    def test_identical(self):
+        self.assertEqual(notoj._edit_dist("notoj", "notoj"), 0)
+
+
+class TestFuzzyThreshold(unittest.TestCase):
+    def test_scales_with_length(self):
+        self.assertEqual(notoj.fuzzy_threshold("abc"), 0)      # too short to guess
+        self.assertEqual(notoj.fuzzy_threshold("abcd"), 1)
+        self.assertEqual(notoj.fuzzy_threshold("abcdefg"), 1)
+        self.assertEqual(notoj.fuzzy_threshold("abcdefgh"), 2)
+        self.assertEqual(notoj.fuzzy_threshold("abcdefghijkl"), 3)
+
+
+class TestFuzzyWords(unittest.TestCase):
+    def note(self, title="Syncthing setup", content="body", tags=None):
+        return make_note(title=title, content=content, tags=tags or ["infra"])
+
+    def test_finds_the_word_behind_a_typo(self):
+        self.assertEqual(notoj.fuzzy_words(self.note(), ["syncthign"]),
+                         {"syncthign": ["syncthing"]})
+
+    def test_a_literal_hit_is_not_a_near_miss(self):
+        # "setup" is right there; nothing to correct.
+        self.assertEqual(notoj.fuzzy_words(self.note(), ["setup"]), {})
+
+    def test_words_containing_a_token_are_left_out(self):
+        # "sync" matches "syncthing" as a substring already, so the ordinary
+        # highlighting covers it — offering it as a correction would paint the
+        # whole word as a guess.
+        self.assertEqual(notoj.fuzzy_words(self.note(), ["sync"]), {})
+
+    def test_tags_are_in_the_pool(self):
+        self.assertEqual(notoj.fuzzy_words(self.note(tags=["notoj"]),
+                                           ["notoi"]),
+                         {"notoi": ["notoj"]})
+
+    def test_punctuation_does_not_eat_the_edit_budget(self):
+        # The title word is "(deprecated)"; a typo of the word itself should
+        # still find it, which it can't if the brackets count as edits.
+        n = self.note(title="Old plan (deprecated)")
+        self.assertEqual(notoj.fuzzy_words(n, ["depracated"]),
+                         {"depracated": ["deprecated"]})
+
+    def test_short_tokens_are_never_fuzzy(self):
+        self.assertEqual(notoj.fuzzy_words(self.note(title="cat"), ["car"]), {})
+
+    def test_result_is_cached_per_query(self):
+        n = self.note()
+        first = notoj.fuzzy_words(n, ["syncthign"])
+        self.assertIs(notoj.fuzzy_words(n, ["syncthign"]), first)
+        self.assertEqual(notoj.fuzzy_words(n, ["setup"]), {})   # key changed
+
+
+class TestHighlightTokens(unittest.TestCase):
+    def test_adds_the_corrected_word(self):
+        n = make_note(title="Syncthing setup", content="x")
+        self.assertEqual(notoj.highlight_tokens(n, ["syncthign"]),
+                         ["syncthign", "syncthing"])
+
+    def test_plain_query_is_unchanged(self):
+        n = make_note(title="Syncthing setup", content="x")
+        self.assertEqual(notoj.highlight_tokens(n, ["setup"]), ["setup"])
+
+    def test_no_note(self):
+        self.assertEqual(notoj.highlight_tokens(None, ["a"]), ["a"])
+
+
+class TestHiSpec(unittest.TestCase):
+    def test_focus_beats_fuzzy_beats_plain(self):
+        hi = notoj.Hi(["a", "bb"], attr=1, fuzzy=frozenset(["bb"]),
+                      fuzzy_attr=2, focus=1, focus_attr=4)
+        self.assertEqual(hi.attr_for(0, "a"), 1)      # plain
+        self.assertEqual(hi.attr_for(2, "bb"), 2)     # approximate
+        self.assertEqual(hi.attr_for(1, "bb"), 4)     # in focus, whatever it is
+
+    def test_at_moves_the_focus(self):
+        hi = notoj.Hi(["a"], attr=1, focus=None, focus_attr=4)
+        self.assertEqual(hi.at(0).attr_for(0, "a"), 4)
+        self.assertEqual(hi.at(None).attr_for(0, "a"), 1)
 
 
 class TestMatchSpans(unittest.TestCase):

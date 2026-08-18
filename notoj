@@ -741,6 +741,60 @@ def search_text(n):
     return c
 
 
+# Words a query token can be measured against: letters, digits and the
+# apostrophes inside them. Splitting on anything else keeps the punctuation
+# that clings to real titles — "interview:", "(deprecated)", em dashes — from
+# costing a near-miss its edit budget.
+_WORD_RE = re.compile(r"[^\W_]+(?:'[^\W_]+)*", re.UNICODE)
+
+
+def search_words(n):
+    """The note's title and tag words, lowercased and punctuation-stripped —
+    the pool a mistyped query token is compared against. Cached on the note
+    dict alongside search_text, since it's walked per keystroke."""
+    c = n.get("_search_words")
+    if c is None:
+        t, _body, tag_str = search_text(n)
+        c = n["_search_words"] = frozenset(_WORD_RE.findall(t)
+                                           + _WORD_RE.findall(tag_str))
+    return c
+
+
+def fuzzy_words(n, tokens):
+    """The note's own words that a query token nearly — but not exactly —
+    matched: {token: [word, ...]}.
+
+    These are the corrected spellings, and they're what makes an approximate
+    hit usable rather than merely rankable. Highlighting them shows what the
+    match was; adding them to the Vim pattern is what lets `n` and 'hlsearch'
+    find anything at all when the literal query appears nowhere in the file.
+
+    Words that already contain a token literally are left out — those are
+    ordinary matches and the plain highlighting has them covered."""
+    key = tuple(tokens)
+    c = n.get("_fuzzy")
+    if c is not None and c[0] == key:
+        return c[1]
+    out = {}
+    if tokens:
+        t, body, tag_str = search_text(n)
+        pool = None
+        for tok in tokens:
+            limit = fuzzy_threshold(tok)
+            # A token the note already contains isn't a near-miss — it's a
+            # match, and the ordinary highlighting has it.
+            if not limit or tok in t or tok in tag_str or tok in body:
+                continue
+            if pool is None:
+                pool = [w for w in search_words(n)
+                        if not any(t2 in w for t2 in tokens)]
+            near = [w for w in pool if _edit_dist(tok, w, limit) <= limit]
+            if near:
+                out[tok] = sorted(near)
+    n["_fuzzy"] = (key, out)
+    return out
+
+
 def is_recent(n):
     m = n.get("modificationDate", 0)
     return m and (datetime.now().timestamp() - float(m)) < 3600
@@ -764,18 +818,42 @@ def sort_notes(notes, key, rev):
 
 
 
-def _edit_dist(a, b):
-    # The only caller accepts distance <= 1, so a length gap > 1 can't match —
-    # skip the O(mn) DP for those pairs (this runs per keypress in search).
-    if abs(len(a) - len(b)) > 1:
+def _edit_dist(a, b, limit=1):
+    """Damerau-Levenshtein distance between `a` and `b`, capped: a pair that
+    can't come in at or under `limit` returns 99 without doing the work.
+
+    Damerau, not plain Levenshtein, because a swap of adjacent letters is the
+    single commonest typing error and plain Levenshtein scores it as two edits
+    — with a threshold of one, "syncthign" could never find "syncthing"."""
+    if abs(len(a) - len(b)) > limit:
         return 99
-    dp = list(range(len(b) + 1))
-    for ca in a:
-        ndp = [dp[0] + 1]
-        for j, cb in enumerate(b):
-            ndp.append(min(dp[j] + (ca != cb), dp[j + 1] + 1, ndp[j] + 1))
-        dp = ndp
-    return dp[-1]
+    prev2, prev = None, list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1,
+                           prev[j - 1] + (ca != cb)))
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)   # transposition
+        # Every later row is >= this row's minimum, so once the whole row is
+        # over budget the pair can't come back. Most candidate words fail on
+        # their first or second row, and this runs across the whole corpus per
+        # keystroke — without the bail, a raised threshold costs real latency.
+        if min(cur) > limit:
+            return 99
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def fuzzy_threshold(tok):
+    """How many edits a query token is allowed, scaling with its length: a
+    12-letter word mistyped in two places is still recognisably that word,
+    while allowing two edits on a four-letter one would match half the corpus.
+    0 means "no fuzzy matching" — too short to guess at."""
+    n = len(tok)
+    if n < 4:
+        return 0
+    return 1 + (n >= 8) + (n >= 12)
 
 
 def save_cursor(path):
@@ -1047,7 +1125,6 @@ def rank_notes(notes, q):
 
     for n in notes:
         t, body, tag_str = search_text(n)
-        t_words = t.split()
 
         score = 0
 
@@ -1066,11 +1143,10 @@ def rank_notes(notes, q):
             if tok in body:
                 score += 20
 
-            if len(tok) >= 4:
-                for word in t_words:
-                    if _edit_dist(tok, word) <= 1:
-                        score += 30
-                        break
+        # Near-misses: a token that matched no word exactly but is one or two
+        # edits from one the note actually uses. Scored per token, below every
+        # literal hit — a typo should surface the note, not outrank a real one.
+        score += 30 * len(fuzzy_words(n, tokens))
 
         if score > 0:
             age = now - (n.get("modificationDate") or 0)
@@ -2556,8 +2632,7 @@ def hist_view(stdscr, n):
             draw_line_highlighted(
                 scr, y, dw, c["msg"], list_w - 1 - dw,
                 curses.color_pair(1) | curses.A_BOLD | base,
-                match_attr() | base,
-                [q] if q else [])
+                Hi([q] if q else [], match_attr() | base))
 
     def draw_preview(scr, x0, pw, ph, cur, off):
         diff = vs["diff"]
@@ -2621,7 +2696,7 @@ def tags_view(stdscr, notes, focus=None, ui=None):
         draw_line_highlighted(
             scr, y, 0, f"{count:>{count_w}}  #{tag}  ({ago(last)})",
             list_w - 1, curses.color_pair(3) | base,
-            match_attr() | base, [q] if q else [])
+            Hi([q] if q else [], match_attr() | base))
 
     def tagged_for(sel):
         # Filtering every note by the selected tag is too costly to redo on
@@ -2703,8 +2778,7 @@ def backlinks_view(stdscr, notes, note):
         base = curses.A_REVERSE if selected else 0
         t = title(m)
         draw_line_highlighted(scr, y, 0, t, list_w - 1, attr | base,
-                              match_attr() | base,
-                              [q] if q else [])
+                              Hi([q] if q else [], match_attr() | base))
         tw = disp_width(t) + 2
         if tw < list_w - 1:
             ts = m.get("modificationDate")
@@ -2727,11 +2801,8 @@ def backlinks_view(stdscr, notes, note):
             return
         for i, (line, _, _) in enumerate(prev.rows(cur, pw)[off:off + ph]):
             draw_line_highlighted(
-                scr, i + 1, x0, line, pw,
-                curses.color_pair(4),
-                match_attr(),
-                [hi_token] if hi_token else [],
-            )
+                scr, i + 1, x0, line, pw, curses.color_pair(4),
+                Hi([hi_token] if hi_token else [], match_attr()))
 
     def on_key(k, st):
         if k == 27:
@@ -2810,8 +2881,7 @@ def help_view(stdscr):
         if kind == "blank":
             return
         base = curses.A_REVERSE if selected else 0
-        hi = match_attr() | base
-        toks = [q] if q else []
+        hi = Hi([q] if q else [], match_attr() | base)
         if kind == "section":
             addnstr_w(scr, y, 0, text, list_w - 1, curses.A_BOLD | base)
         else:
@@ -2819,9 +2889,9 @@ def help_view(stdscr):
             # don't shove the description column out of alignment.
             key_field = key + " " * max(0, key_w - disp_width(key))
             draw_line_highlighted(scr, y, 2, key_field, max(1, list_w - 3),
-                                  curses.color_pair(3) | base, hi, toks)
+                                  curses.color_pair(3) | base, hi)
             draw_line_highlighted(scr, y, 2 + key_w, text,
-                                  max(1, list_w - 3 - key_w), base, hi, toks)
+                                  max(1, list_w - 3 - key_w), base, hi)
 
     return modal_list(stdscr, {
         "count": lambda: len(rows_now()),
@@ -3157,14 +3227,20 @@ def vim_source_args():
     return ["-c", "source " + esc]
 
 
-def vim_search_pattern(q):
+def vim_search_pattern(q, extra=()):
     """Translate a notoj search query into a Vim search pattern, so opening a
     matched note can highlight the hits and drop the cursor on the first one.
     Mirrors rank_notes: a quoted phrase stays contiguous with any whitespace
     between its words (\\s\\+), while a token query ORs its terms so `n` cycles
     through every hit. Built in \\V ("very nomagic") so the typed text is taken
     literally — only backslashes need doubling — with a leading \\c for
-    case-insensitivity. Returns None when there's nothing to search for."""
+    case-insensitivity. Returns None when there's nothing to search for.
+
+    `extra` holds the words a token only *nearly* matched in this note — the
+    corrected spellings. They're ORed in as alternatives because the typed
+    query appears nowhere in such a file: without them Vim highlights nothing,
+    `n` reports no matches, and the cursor falls back to the title. A quoted
+    phrase is exact by definition, so nothing is added to one."""
     q = (q or "").strip()
     if not q:
         return None
@@ -3177,7 +3253,7 @@ def vim_search_pattern(q):
         # quoted-phrase search joins the note's running text in rank_notes.
         body = r"\_s\+".join(lit(w) for w in words)
     else:
-        toks = q.split()
+        toks = q.split() + [e for e in extra if e]
         if not toks:
             return None
         body = r"\|".join(lit(t) for t in toks)
@@ -3826,6 +3902,14 @@ def init_colors():
     match = _cfg_color("color.match", magenta)
     curses.init_pair(5, match, -1)
 
+    # Approximate hits: the word the note actually uses where the query was a
+    # near-miss ("syncthing" for a typed "syncthign"). Same hue as an exact
+    # match — it IS the match — but muted, because the text on screen isn't
+    # what was typed.
+    curses.init_pair(12, _cfg_color("color.match_fuzzy",
+                                    175 if curses.COLORS >= 256
+                                    else curses.COLOR_MAGENTA), -1)
+
     # Rendered markdown headers in the preview. Their own slot rather than
     # borrowing pair 1, so "# Heading" and a match inside it stay distinct and
     # either can be recolored on its own. A muted gold rather than the accent's
@@ -3940,6 +4024,11 @@ def md_header_attr():
 def match_attr():
     """Attr for a search match that isn't the one in focus."""
     return curses.color_pair(5) | curses.A_BOLD
+
+
+def match_fuzzy_attr():
+    """Attr for an approximate hit — the corrected word behind a near-miss."""
+    return curses.color_pair(12)
 
 
 def match_focus_attr():
@@ -4156,11 +4245,62 @@ def match_spans(text, tokens):
     return spans
 
 
-def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr,
-                          tokens, focus=None, focus_attr=None):
-    """Render text at (y, x), switching to hi_attr on token-match substrings.
-    `focus` is the ordinal of the match on this line that is in focus (the one
-    n/N sits on); it's drawn in focus_attr instead.
+_Hi = collections.namedtuple("Hi", "tokens attr fuzzy fuzzy_attr focus focus_attr")
+
+
+class Hi(_Hi):
+    """How to paint one line's search hits: the substrings to look for, and
+    the attribute for a plain hit, for an approximate one, and for the hit in
+    focus. `fuzzy` holds the corrected spellings — they're searched for
+    literally like any other token, but drawn as the guesses they are."""
+
+    __slots__ = ()
+
+    def __new__(cls, tokens, attr, fuzzy=(), fuzzy_attr=None,
+                focus=None, focus_attr=None):
+        return _Hi.__new__(cls, tokens, attr, fuzzy, fuzzy_attr,
+                           focus, focus_attr)
+
+    def attr_for(self, k, tok):
+        """The attribute for the k-th hit on the line, matched by `tok`."""
+        if k == self.focus and self.focus_attr is not None:
+            return self.focus_attr
+        if self.fuzzy_attr is not None and tok in self.fuzzy:
+            return self.fuzzy_attr
+        return self.attr
+
+    def at(self, focus):
+        """The same spec with the focus moved (or cleared)."""
+        return self._replace(focus=focus)
+
+
+def highlight_tokens(note, tokens):
+    """The substrings to look for in a note: the query's own tokens, plus the
+    corrected spelling of anything the query only nearly matched there.
+
+    Everything downstream — the highlighting, the n/N match list, the pattern
+    handed to Vim — works off this one list, so an approximate hit is a hit
+    everywhere or nowhere."""
+    if not note or not tokens:
+        return list(tokens)
+    fz = fuzzy_words(note, tokens)
+    if not fz:
+        return list(tokens)
+    return list(tokens) + sorted({w for ws in fz.values() for w in ws})
+
+
+def hi_for(note, tokens, attr, focus=None, focus_attr=None):
+    """The Hi for a note's line: the query's tokens, plus the corrected
+    spelling of anything the query only nearly matched in THIS note — which is
+    what makes a fuzzy hit visible instead of a result with nothing marked."""
+    fz = fuzzy_words(note, tokens) if note else {}
+    words = sorted({w for ws in fz.values() for w in ws})
+    return Hi(list(tokens) + words, attr, frozenset(words),
+              match_fuzzy_attr(), focus, focus_attr)
+
+
+def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi):
+    """Render text at (y, x), switching attribute on the hits `hi` describes.
 
     Column accounting is by display width, so wide glyphs (emoji, em-dash, CJK,
     arrows) advance the cursor by their true width and the line is clipped to
@@ -4168,14 +4308,14 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr,
     text = clip_to_width(text, max_w)
     if not text:
         return
-    spans = match_spans(text, tokens)
+    spans = match_spans(text, hi.tokens) if hi else []
     if not spans:
         addnstr_w(stdscr, y, x, text, max_w, base_attr)
         return
     pos = 0
     col = x
     rem = max_w                       # remaining budget, in display columns
-    for k, (mi, me, _tok) in enumerate(spans):
+    for k, (mi, me, tok) in enumerate(spans):
         if rem <= 0:
             break
         if mi > pos:
@@ -4188,8 +4328,7 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi_attr,
             if rem <= 0:
                 break
         seg = text[mi:me]
-        attr = focus_attr if (k == focus and focus_attr is not None) else hi_attr
-        addnstr_w(stdscr, y, col, seg, rem, attr)
+        addnstr_w(stdscr, y, col, seg, rem, hi.attr_for(k, tok))
         w = disp_width(seg)
         col += w
         rem -= w
@@ -4274,22 +4413,20 @@ def _md_entries(raw, base_attr):
     return out
 
 
-def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi_attr, tokens,
-                       focus=None, focus_attr=None):
-    """Like draw_line_highlighted but renders inline markdown; token matches
-    still win, overriding the markdown attribute on the matched run. `focus`
-    is the ordinal of the in-focus match on this line, drawn in focus_attr."""
+def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi):
+    """Like draw_line_highlighted but renders inline markdown; search hits
+    still win, overriding the markdown attribute on the matched run."""
     entries = _md_entries(raw, base_attr)
     if not entries:
         return
-    if tokens:
+    if hi and hi.tokens:
         # Matched against the logical (marker-stripped) text, which is what the
         # reader sees — so a hit inside **bold** or a `# Heading` is found where
         # it looks like it is.
-        spans = match_spans("".join(e[0] for e in entries), tokens)
+        spans = match_spans("".join(e[0] for e in entries), hi.tokens)
         hot = [None] * len(entries)
-        for k, (start, end, _tok) in enumerate(spans):
-            attr = focus_attr if (k == focus and focus_attr is not None) else hi_attr
+        for k, (start, end, tok) in enumerate(spans):
+            attr = hi.attr_for(k, tok)
             for j in range(start, end):
                 hot[j] = attr
         entries = [(e[0], e[1], hot[k] if hot[k] is not None else e[2])
@@ -5049,7 +5186,8 @@ def draw(stdscr, notes, state):
     # changed query this also snaps the preview to the first match, which is
     # what makes a result open on its first occurrence.
     cur_note = notes[state["cur"]] if 0 <= state["cur"] < len(notes) else None
-    sync_preview_matches(state, cur_note, tokens, w, h)
+    sync_preview_matches(state, cur_note, highlight_tokens(cur_note, tokens),
+                         w, h)
 
     # ----------------------------
     # LEFT PANE
@@ -5070,7 +5208,11 @@ def draw(stdscr, notes, state):
         t = title(n)
         tg = tags(n)
 
-        hi_title = match_attr() | (curses.A_REVERSE if selected else 0)
+        # Per row, because the corrected spelling behind a near-miss is a
+        # property of the note, not of the query: two rows can have ranked for
+        # the same typo through different words of their own.
+        row_hi = hi_for(n, tokens,
+                        match_attr() | (curses.A_REVERSE if selected else 0))
         title_w = min(28, list_w)
         # Fill the whole title column with the row's attribute first so the
         # focus highlight always spans the full column, regardless of any
@@ -5081,7 +5223,7 @@ def draw(stdscr, notes, state):
         except curses.error:
             pass
         t_clip = clip_to_width(t, title_w)
-        draw_line_highlighted(stdscr, y, 0, t_clip, title_w, attr_title, hi_title, tokens)
+        draw_line_highlighted(stdscr, y, 0, t_clip, title_w, attr_title, row_hi)
 
         if show_date:
             m = fmt(n.get(date_field))
@@ -5099,11 +5241,12 @@ def draw(stdscr, notes, state):
             # band when n/N has stepped onto a tag that the preview isn't
             # showing — the hit has to be visible wherever it lives.
             fm = focused_match(state) if selected else None
+            tag_hi = Hi(row_hi.tokens, match_attr(), row_hi.fuzzy,
+                        match_fuzzy_attr(),
+                        fm.ord if fm is not None and fm.row is None else None,
+                        match_focus_attr())
             draw_line_highlighted(stdscr, y, tag_col, tg, list_w - tag_col,
-                                  attr_tag, match_attr(), tokens,
-                                  fm.ord if fm is not None and fm.row is None
-                                  else None,
-                                  match_focus_attr())
+                                  attr_tag, tag_hi)
 
     # ----------------------------
     # RIGHT PANE (preview)
@@ -5118,9 +5261,12 @@ def draw(stdscr, notes, state):
         if 0 <= cur_idx < len(notes):
             cur = notes[cur_idx]
 
-            rows = preview_rows(cur, tokens, preview_w, state)
+            cur_tokens = highlight_tokens(cur, tokens)
+            rows = preview_rows(cur, cur_tokens, preview_w, state)
             fm = focused_match(state)
             focus_row, focus_ord = (fm.row, fm.ord) if fm else (None, None)
+            body_hi = hi_for(cur, tokens, match_attr(),
+                             focus_attr=match_focus_attr())
 
             start = state["p_scroll"]
             end = start + h - 2
@@ -5139,10 +5285,7 @@ def draw(stdscr, notes, state):
                 draw_body(
                     stdscr, i + 1, mid + 1, line, preview_w,
                     curses.color_pair(4) if src is not None else curses.color_pair(3),
-                    match_attr(),
-                    tokens,
-                    focus_ord if start + i == focus_row else None,
-                    match_focus_attr(),
+                    body_hi.at(focus_ord if start + i == focus_row else None),
                 )
 
     # Footer hints as (priority, text) segments: lower number = survives
@@ -5440,10 +5583,16 @@ def run(stdscr, imports=(), move=False):
         """Open `note` in Vim. An active search query is carried into Vim so the
         matches are highlighted and the cursor lands on the one the preview was
         showing — step to the 3rd hit with n/N and Vim opens on the 3rd hit,
-        with `n` carrying on from there. Trashed notes first get an interstitial
-        saying that saving any change restores them from the trash."""
-        search = vim_search_pattern(state["q"])
-        at = vim_match_position(state, note, search_tokens(state["q"]))
+        with `n` carrying on from there. A note that ranked on a near-miss
+        carries the corrected word into Vim as well, so an approximate hit is
+        highlighted and reachable there too. Trashed notes first get an
+        interstitial saying that saving any change restores them from the
+        trash."""
+        toks = search_tokens(state["q"])
+        fz = fuzzy_words(note, toks) if note else {}
+        search = vim_search_pattern(
+            state["q"], sorted({w for ws in fz.values() for w in ws}))
+        at = vim_match_position(state, note, highlight_tokens(note, toks))
         if state["trash_mode"]:
             if confirm_screen(stdscr, TRASH_EDIT_NOTICE):
                 restored = edit_trash_note(note, end=end, search=search, at=at)
@@ -6149,7 +6298,8 @@ def run(stdscr, imports=(), move=False):
         elif key_matches(k, KEY["match_next"]) or key_matches(k, KEY["match_prev"]):
             cur_note = filtered[state["cur"]] if 0 <= state["cur"] < len(filtered) else None
             step = 1 if key_matches(k, KEY["match_next"]) else -1
-            if not match_step(state, cur_note, search_tokens(state["q"]), w, h, step):
+            toks = highlight_tokens(cur_note, search_tokens(state["q"]))
+            if not match_step(state, cur_note, toks, w, h, step):
                 push_msg("no matches to step through" if state["q"]
                          else "no search — / first")
 

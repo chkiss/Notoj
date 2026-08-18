@@ -65,7 +65,7 @@ take `true/false/yes/no/on/off/1/0`. The main options:
 | `list_max_w` | `80` | Max width of the left list panel; extra width goes to the preview |
 | `tag_display_order` | `freq` | Tag order for display — `freq`, `freq_asc`, `name`, `stored` |
 | `undo.persist` | `true` | Keep the undo history across sessions |
-| `color.<slot>` | — | Colors for `accent`, `date`, `tag`, `preview`, `header`, `match`, `match_focus_fg`/`_bg`, `footer_bg`, plus the `date_gradient` |
+| `color.<slot>` | — | Colors for `accent`, `date`, `tag`, `preview`, `header`, `match`, `match_fuzzy`, `match_focus_fg`/`_bg`, `footer_bg`, plus the `date_gradient` |
 | `key.<action>` | — | Remap any key, including the `g_` chords |
 
 [`config.example`](config.example) documents every option in full.

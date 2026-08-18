@@ -31,8 +31,9 @@
 
 * Live search updates on every keystroke
 * Substring matching
-* Fuzzy matching
-* Typo tolerance
+* Fuzzy matching against title and tag words, punctuation ignored
+* Typo tolerance: substitutions, deletions, insertions and adjacent transpositions, with the edit budget scaling with the length of the word
+* A near-miss shows the word the note actually uses, muted to mark it a guess — and that corrected word is carried into Vim, so `n` and `hlsearch` find it there too
 * Title weighting
 * Result ranking by:
 
