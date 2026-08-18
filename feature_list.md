@@ -34,6 +34,7 @@
 * Fuzzy matching against title and tag words, punctuation ignored
 * Typo tolerance: substitutions, deletions, insertions and adjacent transpositions, with the edit budget scaling with the length of the word
 * A near-miss shows the word the note actually uses, muted to mark it a guess — and that corrected word is carried into Vim, so `n` and `hlsearch` find it there too
+* `⇥`/`⇧⇥` cycle which term of a multi-word query `n`/`N` step through (all → each → all); the result list is untouched, so narrowing navigation never costs you the ranking
 * The header names what the selected note matched, per term, with occurrence counts — including the terms that matched nothing (`matched: cat (3), food (0)`), each colored as it is in the panes
 * Title weighting
 * Result ranking by:

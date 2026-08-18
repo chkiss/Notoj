@@ -112,6 +112,24 @@ preview_scroll = page
 #   never   off
 # preview_tags = always
 
+# Tab cycles which term of a multi-word query n/N steps through: all of them ->
+# each one -> all again (Shift-Tab walks back). The RESULT LIST never changes —
+# only what counts as a match does — which is the thing retyping a shorter
+# query can't give you.
+#
+# Inside a tag-filter view both cycles are live: Tab takes one, Shift-Tab the
+# other, and this says which. Default: tags, the older meaning of the key.
+#   tags    Tab cycles tags, Shift-Tab cycles search terms
+#   terms   Tab cycles search terms, Shift-Tab cycles tags
+# tab_in_tag_view = tags
+
+# What Vim is handed when Enter opens a note while a term is singled out:
+#   term    (default) just that term, so Vim's n/N cycle exactly what notoj's
+#           were cycling a keystroke earlier
+#   query   the whole query — every term stays highlighted and reachable in
+#           Vim — with the narrowed term only placing the cursor
+# vim_search_scope = term
+
 # ---- Colors ----
 # Names: black red green yellow blue magenta cyan white default — or a 0-255
 # palette index on 256-color terminals.

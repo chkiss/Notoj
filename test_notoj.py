@@ -4235,24 +4235,24 @@ class TestMatchSummary(unittest.TestCase):
         # title + body: the question is about the note, not about what the
         # preview pane happens to be showing.
         self.assertEqual(notoj.match_summary(self.note(), ["syncthing"]),
-                         [notoj.Matched("syncthing", 2, False)])
+                         [notoj.Matched("syncthing", "syncthing", 2, False)])
 
     def test_tags_count(self):
         n = self.note(title="t", content="c", tags=["notoj"])
         self.assertEqual(notoj.match_summary(n, ["notoj"]),
-                         [notoj.Matched("notoj", 1, False)])
+                         [notoj.Matched("notoj", "notoj", 1, False)])
 
     def test_a_term_that_matched_nothing_is_reported_as_zero(self):
         # A note only has to match one term to rank, so in a multi-word query
         # the zero is the informative half.
         self.assertEqual(
             notoj.match_summary(self.note(), ["syncthing", "zzzznope"]),
-            [notoj.Matched("syncthing", 2, False),
-             notoj.Matched("zzzznope", 0, False)])
+            [notoj.Matched("syncthing", "syncthing", 2, False),
+             notoj.Matched("zzzznope", "zzzznope", 0, False)])
 
     def test_a_near_miss_reports_the_word_the_note_really_uses(self):
         self.assertEqual(notoj.match_summary(self.note(), ["syncthign"]),
-                         [notoj.Matched("syncthing", 2, True)])
+                         [notoj.Matched("syncthign", "syncthing", 2, True)])
 
     def test_terms_stay_in_the_order_typed(self):
         got = notoj.match_summary(self.note(), ["setup", "syncthing"])
@@ -4266,16 +4266,18 @@ class TestMatchSummary(unittest.TestCase):
 class TestMatchSummaryText(unittest.TestCase):
     def test_renders_terms_and_counts(self):
         text, _ = notoj.match_summary_text(
-            [notoj.Matched("cat", 3, False), notoj.Matched("food", 0, False)])
+            [notoj.Matched("cat", "cat", 3, False),
+             notoj.Matched("food", "food", 0, False)])
         self.assertEqual(text, "matched: cat (3), food (0)")
 
     def test_a_correction_is_marked(self):
-        text, _ = notoj.match_summary_text([notoj.Matched("syncthing", 3, True)])
+        text, _ = notoj.match_summary_text([notoj.Matched("syncthign", "syncthing", 3, True)])
         self.assertEqual(text, "matched: ~syncthing (3)")
 
     def test_spans_point_at_the_terms(self):
         text, spans = notoj.match_summary_text(
-            [notoj.Matched("cat", 3, False), notoj.Matched("food", 1, True)])
+            [notoj.Matched("cat", "cat", 3, False),
+             notoj.Matched("fud", "food", 1, True)])
         self.assertEqual([text[o:o + n] for o, n, _ in spans],
                          ["cat", "~food"])
 
@@ -4284,11 +4286,102 @@ class TestMatchSummaryText(unittest.TestCase):
         # Ambiguous — disp_width says two columns, the terminal draws one, and
         # every term after the first gets recolored a column out of place.
         text, _ = notoj.match_summary_text(
-            [notoj.Matched("a", 1, True), notoj.Matched("b", 0, False)])
+            [notoj.Matched("a", "a", 1, True),
+             notoj.Matched("b", "b", 0, False)])
         self.assertEqual(notoj.disp_width(text), len(text))
 
     def test_empty(self):
         self.assertEqual(notoj.match_summary_text([]), ("", []))
+
+
+class TestTermFilter(unittest.TestCase):
+    """Tab narrows which query term n/N steps through, without touching the
+    result list — the thing retyping the query can't do."""
+
+    TOKENS = ["cat", "food", "bowl"]
+
+    def test_all_terms_by_default(self):
+        self.assertIsNone(notoj.active_term({}, self.TOKENS))
+        self.assertIsNone(notoj.active_term({"qf": -1}, self.TOKENS))
+
+    def test_cycle_walks_all_then_each_then_all(self):
+        st = {}
+        seen = []
+        for _ in range(5):
+            notoj.cycle_term(st, self.TOKENS)
+            seen.append(notoj.active_term(st, self.TOKENS))
+        self.assertEqual(seen, ["cat", "food", "bowl", None, "cat"])
+
+    def test_shift_tab_walks_back(self):
+        st = {}
+        notoj.cycle_term(st, self.TOKENS, -1)
+        self.assertEqual(notoj.active_term(st, self.TOKENS), "bowl")
+
+    def test_single_term_query_has_nothing_to_cycle(self):
+        st = {}
+        self.assertFalse(notoj.cycle_term(st, ["cat"]))
+        self.assertIsNone(notoj.active_term(st, ["cat"]))
+
+    def test_a_stale_index_reads_as_all(self):
+        # The filter outlives the keystroke that set it; a shorter query must
+        # not inherit it.
+        self.assertIsNone(notoj.active_term({"qf": 2}, ["cat"]))
+
+    def test_narrowing_narrows_the_tokens_everywhere(self):
+        n = make_note(title="cat food", content="a bowl of food")
+        st = {"qf": 1}
+        self.assertEqual(notoj.highlight_tokens(n, self.TOKENS, st), ["food"])
+        self.assertEqual(notoj.highlight_tokens(n, self.TOKENS, {}),
+                         self.TOKENS)
+
+    def test_corrections_are_worked_out_against_the_whole_query(self):
+        # "syncthing" is only a near-miss of "syncthign"; narrowing to it must
+        # still offer the same correction, and narrowing away must drop it.
+        n = make_note(title="Syncthing setup", content="x")
+        toks = ["syncthign", "setup"]
+        self.assertEqual(notoj.highlight_tokens(n, toks, {"qf": 0}),
+                         ["syncthign", "syncthing"])
+        self.assertEqual(notoj.highlight_tokens(n, toks, {"qf": 1}), ["setup"])
+
+
+class TestTabAndVimScopeConfig(unittest.TestCase):
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    def test_vim_scope_defaults_to_the_narrowed_term(self):
+        self.assertEqual(notoj.vim_search_scope(), "term")
+
+    def test_vim_scope_query(self):
+        notoj._config_cache = {"vim_search_scope": "query"}
+        self.assertEqual(notoj.vim_search_scope(), "query")
+
+    def test_vim_scope_junk_falls_back(self):
+        notoj._config_cache = {"vim_search_scope": "sideways"}
+        self.assertEqual(notoj.vim_search_scope(), "term")
+
+    def test_tab_in_tag_view_defaults_to_tags(self):
+        self.assertFalse(notoj.tab_cycles_terms_in_tag_view())
+
+    def test_tab_in_tag_view_terms(self):
+        notoj._config_cache = {"tab_in_tag_view": "terms"}
+        self.assertTrue(notoj.tab_cycles_terms_in_tag_view())
+
+    def test_at_pat_positions_by_a_narrower_pattern(self):
+        # vim_search_scope=query: @/ keeps the whole query so everything stays
+        # highlighted, while the cursor is placed by the one term.
+        args = notoj._vim_position_args(False, False, r"\c\Vcat\|food",
+                                        at=(4, 1), at_pat=r"\c\Vfood")
+        jump = args[-1]
+        self.assertIn(r"search('\c\Vfood', 'cW')", jump)
+        self.assertNotIn("search(@/", jump)
+
+    def test_without_at_pat_it_positions_by_the_register(self):
+        args = notoj._vim_position_args(False, False, r"\c\Vcat", at=(4, 0))
+        self.assertIn("search(@/, 'cW')", args[-1])
 
 
 class TestHiSpec(unittest.TestCase):

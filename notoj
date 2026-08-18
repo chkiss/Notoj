@@ -216,6 +216,11 @@ KEYMAP = [
         ("match_next", "n", "jump the preview to the next search match (wraps); "
               "the preview already opens on the first one"),
         ("match_prev", "N", "jump the preview to the previous search match"),
+        (None, "⇥ / ⇧⇥", "cycle which term of a multi-word query n/N steps "
+              "through: all of them → each one → all again (Shift-Tab walks "
+              "back). The result list doesn't change — only what counts as a "
+              "match does, in the panes and in Vim. In a tag view Tab stays "
+              "with the tags and this moves to Shift-Tab (tab_in_tag_view)"),
     ]),
     ("Sorting (applies in every view; shown in the header)", [
         ("sort", "s", "cycle sort: relevance (default) → title → created → modified"),
@@ -3227,6 +3232,28 @@ def vim_source_args():
     return ["-c", "source " + esc]
 
 
+def vim_search_scope():
+    """What Vim is told to search when Tab has narrowed navigation to one term
+    (`vim_search_scope`):
+
+      term   (default) Vim gets that term alone, so its `n`/`N` cycle exactly
+             what notoj's were cycling a keystroke ago.
+      query  Vim gets the whole query — every term stays highlighted and
+             reachable there — and the narrowed term only places the cursor.
+    """
+    v = (config_get("vim_search_scope", "term") or "term").strip().lower()
+    return "query" if v == "query" else "term"
+
+
+def tab_cycles_terms_in_tag_view():
+    """Whether Tab cycles search terms rather than tags inside a tag-filter
+    view, where both could be cycled (`tab_in_tag_view`). Either way the other
+    one is on Shift-Tab, so nothing is unreachable — this only picks which gets
+    the unshifted key. Defaults to tags, the older meaning."""
+    v = (config_get("tab_in_tag_view", "tags") or "tags").strip().lower()
+    return v == "terms"
+
+
 def vim_search_pattern(q, extra=()):
     """Translate a notoj search query into a Vim search pattern, so opening a
     matched note can highlight the hits and drop the cursor on the first one.
@@ -3260,7 +3287,7 @@ def vim_search_pattern(q, extra=()):
     return r"\c\V" + body
 
 
-def _vim_position_args(src, end, search, at=None):
+def _vim_position_args(src, end, search, at=None, at_pat=None):
     """The -c args that place the cursor (and, with an active search, highlight
     the matches) for a spawned Vim.
 
@@ -3292,10 +3319,15 @@ def _vim_position_args(src, end, search, at=None):
             # past it. 'W' (no wrap) means running out of matches just leaves
             # the cursor on the last one instead of looping back to the top of
             # the file.
+            # Positioning normally goes by @/ itself. `at_pat` overrides it so
+            # the cursor can be placed by a narrower pattern than the one
+            # 'hlsearch' is lighting up — that's vim_search_scope=query, where
+            # Vim shows every term but opens on the one Tab singled out.
+            pat = ("'%s'" % at_pat.replace("'", "''")) if at_pat else "@/"
             args += ["-c", "silent! keepjumps call cursor(%d, 1) | "
-                           "silent! call search(@/, 'cW') | "
-                           "for _ in range(%d) | silent! call search(@/, 'W') "
-                           "| endfor" % (line, ordinal)]
+                           "silent! call search(%s, 'cW') | "
+                           "for _ in range(%d) | silent! call search(%s, 'W') "
+                           "| endfor" % (line, pat, ordinal, pat)]
         else:
             jump = "silent! keepjumps call cursor(1, 1) | if search(@/, 'cw') == 0"
             jump += " | call NotojOpenAtTitle() | endif" if src else " | endif"
@@ -3305,7 +3337,7 @@ def _vim_position_args(src, end, search, at=None):
     return args
 
 
-def edit_in_editor(n, end, search, at=None):
+def edit_in_editor(n, end, search, at=None, at_pat=None):
     """Suspend curses and open the note in the configured editor, positioned
     by `end`/`search`/`at`. True when the file was written (its mtime moved); a
     missing editor or a quit without writing is False. The one launch
@@ -3319,7 +3351,7 @@ def edit_in_editor(n, end, search, at=None):
     cmd = list(ed)
     if is_vimlike(ed):
         src = vim_source_args()
-        cmd += src + _vim_position_args(src, end, search, at)
+        cmd += src + _vim_position_args(src, end, search, at, at_pat)
     cmd.append(path)
     suspend_curses()
     launch(cmd)   # a missing editor leaves mtime unchanged → False
@@ -3329,7 +3361,7 @@ def edit_in_editor(n, end, search, at=None):
         return False
 
 
-def open_note(n, end=False, search=None, at=None):
+def open_note(n, end=False, search=None, at=None, at_pat=None):
     path = n["path"]
     before = None
     if os.path.exists(path):
@@ -3338,7 +3370,7 @@ def open_note(n, end=False, search=None, at=None):
                 before = f.read()
         except Exception:
             before = None
-    if edit_in_editor(n, end, search, at):
+    if edit_in_editor(n, end, search, at, at_pat):
         final = check_rename(n) or path
         git_commit(f"edit: {title(n)}")
         if before is not None and os.path.exists(final):
@@ -3357,7 +3389,7 @@ def open_note(n, end=False, search=None, at=None):
     return None
 
 
-def edit_trash_note(n, end=False, search=None, at=None):
+def edit_trash_note(n, end=False, search=None, at=None, at_pat=None):
     """Open a trashed note in Vim. Any saved change restores the note from the
     trash into the notes dir (then the usual title-rename pipeline runs);
     quitting Vim without writing leaves it in the trash. Returns the restored
@@ -3365,7 +3397,7 @@ def edit_trash_note(n, end=False, search=None, at=None):
     path = n["path"]
     if not os.path.exists(path):
         return None
-    if not edit_in_editor(n, end, search, at):
+    if not edit_in_editor(n, end, search, at, at_pat):
         return None
     restored = do_restore(path, os.path.join(NOTES_DIR, os.path.basename(path)))
     if not restored:
@@ -4274,25 +4306,59 @@ class Hi(_Hi):
         return self._replace(focus=focus)
 
 
-def highlight_tokens(note, tokens):
-    """The substrings to look for in a note: the query's own tokens, plus the
-    corrected spelling of anything the query only nearly matched there.
+def active_term(state, tokens):
+    """The single query term Tab has narrowed navigation to, or None while all
+    of them are in play. Out-of-range indices read as "all", so a filter left
+    over from a longer query can't outlive it."""
+    i = (state or {}).get("qf", -1)
+    return tokens[i] if 0 <= i < len(tokens) else None
+
+
+def cycle_term(state, tokens, delta=1):
+    """Step the term filter: all → first → … → last → all, the same cycle Tab
+    walks in a tag-filter view. False when there's nothing to cycle."""
+    n = len(tokens)
+    if n < 2:
+        state["qf"] = -1
+        return False
+    i = state.get("qf", -1)
+    i = (i if -1 <= i < n else -1) + delta
+    state["qf"] = -1 if i >= n else (n - 1 if i < -1 else i)
+    return True
+
+
+def note_terms(note, tokens, state=None):
+    """(terms, corrections) for a note: the query terms in play — all of them,
+    or the one Tab singled out — and the corrected spellings of whatever those
+    terms only nearly matched here.
+
+    Corrections are always worked out against the WHOLE query, so narrowing
+    changes which terms are live and never what a term means."""
+    fz = fuzzy_words(note, tokens) if note else {}
+    term = active_term(state, tokens)
+    keep = [term] if term is not None else list(tokens)
+    return keep, sorted({w for t in keep for w in fz.get(t, ())})
+
+
+def highlight_tokens(note, tokens, state=None):
+    """The substrings to look for in a note: the query's live tokens plus the
+    corrections behind any near-miss.
 
     Everything downstream — the highlighting, the n/N match list, the pattern
     handed to Vim — works off this one list, so an approximate hit is a hit
-    everywhere or nowhere."""
+    everywhere or nowhere, and a narrowed term is narrowed everywhere."""
     if not note or not tokens:
         return list(tokens)
-    fz = fuzzy_words(note, tokens)
-    if not fz:
-        return list(tokens)
-    return list(tokens) + sorted({w for ws in fz.values() for w in ws})
+    keep, words = note_terms(note, tokens, state)
+    return keep + words
 
 
 # The header's "why is this note here" summary. One entry per query term, in
-# the order typed: the text that actually matched, how many times it occurs in
-# the note, and whether it's a correction rather than the term itself.
-Matched = collections.namedtuple("Matched", "term count fuzzy")
+# the order typed: the term as typed, the text that actually matched, how many
+# times that occurs in the note, and whether it's a correction rather than the
+# term itself. `token` and `term` differ only for a correction — it's what ties
+# an entry back to the term Tab can narrow to.
+Matched = collections.namedtuple("Matched", "token term count fuzzy")
 
 SUMMARY_PREFIX = "matched:"
 # Prefixes a term the query only came close to. ASCII on purpose: the obvious
@@ -4320,7 +4386,7 @@ def match_summary(note, tokens):
     for tok in tokens:
         n = t.count(tok) + tag_str.count(tok) + body.count(tok)
         if n:
-            out.append(Matched(tok, n, False))
+            out.append(Matched(tok, tok, n, False))
             continue
         # No literal hit: report the nearest word the note does use, picking
         # the one it uses most.
@@ -4328,9 +4394,9 @@ def match_summary(note, tokens):
                    key=lambda w: t.count(w) + tag_str.count(w) + body.count(w),
                    default=None)
         if best is None:
-            out.append(Matched(tok, 0, False))
+            out.append(Matched(tok, tok, 0, False))
         else:
-            out.append(Matched(best,
+            out.append(Matched(tok, best,
                                t.count(best) + tag_str.count(best)
                                + body.count(best), True))
     return out
@@ -4352,13 +4418,12 @@ def match_summary_text(items):
     return text, spans
 
 
-def hi_for(note, tokens, attr, focus=None, focus_attr=None):
-    """The Hi for a note's line: the query's tokens, plus the corrected
+def hi_for(note, tokens, attr, focus=None, focus_attr=None, state=None):
+    """The Hi for a note's line: the query's live tokens, plus the corrected
     spelling of anything the query only nearly matched in THIS note — which is
     what makes a fuzzy hit visible instead of a result with nothing marked."""
-    fz = fuzzy_words(note, tokens) if note else {}
-    words = sorted({w for ws in fz.values() for w in ws})
-    return Hi(list(tokens) + words, attr, frozenset(words),
+    keep, words = note_terms(note, tokens, state)
+    return Hi(keep + words, attr, frozenset(words),
               match_fuzzy_attr(), focus, focus_attr)
 
 
@@ -5161,7 +5226,11 @@ def draw(stdscr, notes, state):
     # sort and the badges so it's the last thing a narrowing terminal drops.
     tokens = search_tokens(state["q"])
     cur_note = notes[state["cur"]] if 0 <= state["cur"] < len(notes) else None
+    # Built from the whole query even when Tab has narrowed navigation: the
+    # summary is the note's answer, and the terms it isn't stepping through
+    # right now are greyed rather than dropped.
     summary, summary_spans = match_summary_text(match_summary(cur_note, tokens))
+    live = active_term(state, tokens)
     if summary:
         filt += " | " + summary
     if state.get("tag_mode"):
@@ -5218,14 +5287,15 @@ def draw(stdscr, notes, state):
     if summary:
         # Recolor each matched term to the palette it's highlighted with in
         # the panes: the match color, the muted one for a correction, and the
-        # inactive grey for a term that found nothing — so the summary is read
-        # at a glance rather than parsed.
+        # inactive grey for a term that found nothing — or, once Tab has
+        # narrowed the navigation, for every term it isn't stepping through.
         anchor = header.find(summary)
         for off, ln, it in (summary_spans if anchor >= 0 else []):
             x = disp_width(header[:anchor + off])
             if x >= w - 1:
                 break
-            if not it.count:
+            dropped = live is not None and it.token != live
+            if not it.count or dropped:
                 attr = tag_inactive_attr()
             elif it.fuzzy:
                 attr = match_fuzzy_attr()
@@ -5275,8 +5345,8 @@ def draw(stdscr, notes, state):
     # hit is in focus, and the left one is drawn first. On a new note or a
     # changed query this also snaps the preview to the first match, which is
     # what makes a result open on its first occurrence.
-    sync_preview_matches(state, cur_note, highlight_tokens(cur_note, tokens),
-                         w, h)
+    sync_preview_matches(state, cur_note,
+                         highlight_tokens(cur_note, tokens, state), w, h)
 
     # ----------------------------
     # LEFT PANE
@@ -5301,7 +5371,8 @@ def draw(stdscr, notes, state):
         # property of the note, not of the query: two rows can have ranked for
         # the same typo through different words of their own.
         row_hi = hi_for(n, tokens,
-                        match_attr() | (curses.A_REVERSE if selected else 0))
+                        match_attr() | (curses.A_REVERSE if selected else 0),
+                        state=state)
         title_w = min(28, list_w)
         # Fill the whole title column with the row's attribute first so the
         # focus highlight always spans the full column, regardless of any
@@ -5350,12 +5421,12 @@ def draw(stdscr, notes, state):
         if 0 <= cur_idx < len(notes):
             cur = notes[cur_idx]
 
-            cur_tokens = highlight_tokens(cur, tokens)
+            cur_tokens = highlight_tokens(cur, tokens, state)
             rows = preview_rows(cur, cur_tokens, preview_w, state)
             fm = focused_match(state)
             focus_row, focus_ord = (fm.row, fm.ord) if fm else (None, None)
             body_hi = hi_for(cur, tokens, match_attr(),
-                             focus_attr=match_focus_attr())
+                             focus_attr=match_focus_attr(), state=state)
 
             start = state["p_scroll"]
             end = start + h - 2
@@ -5399,8 +5470,15 @@ def draw(stdscr, notes, state):
         ]
     elif state.get("tagf") is not None:
         many = len(state["tagf"]["tags"]) > 1
+        # Both cycles can be live here; name whichever key each one is on so
+        # the tab_in_tag_view setting doesn't have to be remembered.
+        terms_key = "⇥" if tab_cycles_terms_in_tag_view() else "⇧⇥"
+        tags_key = "⇧⇥" if tab_cycles_terms_in_tag_view() else "⇥"
         segments = [
-            (2, "⇥ cycle tag" if many else ""), (3, "/ search"),
+            (2, f"{tags_key} cycle tag" if many else ""),
+            (2, f"{terms_key} term:{live or 'all'}"
+                if len(tokens) > 1 else ""),
+            (3, "/ search"),
             (2, "⮐/e open"), (4, "t refilter"), (5, "# tag"),
             (4, "d trash"), (3, "ESC clear/exit"), (1, "q quit"),
         ]
@@ -5410,8 +5488,11 @@ def draw(stdscr, notes, state):
         ms = state.get("_matches") or []
         m_hint = (f"n/N match {state.get('m_idx', 0) + 1}/{len(ms)}"
                   if ms and tokens else "")
+        # …and, for a multi-term query, which term those matches are of. The
+        # color change in the header says it too, but only if you were looking.
+        t_hint = (("⇥ term:" + (live or "all")) if len(tokens) > 1 else "")
         segments = [
-            (2, m_hint),
+            (2, m_hint), (2, t_hint),
             (3, f"{action_label('new', 'o')} new"), (2, "/ search"),
             (7, "s/r sort"), (2, "⮐/e open"),
             (5, "#/. tag" if state.get("_last_tags") else "# tag"),
@@ -5514,6 +5595,7 @@ def run(stdscr, imports=(), move=False):
         "p_scroll": 0,
         "q": "",
         "q_pos": 0,             # insertion-cursor index into q while searching
+        "qf": -1,               # term n/N is narrowed to (Tab); -1 = all of them
         "sort": "relevance",
         "rev": True,
         "search_mode": False,
@@ -5679,18 +5761,36 @@ def run(stdscr, imports=(), move=False):
         trash."""
         toks = search_tokens(state["q"])
         fz = fuzzy_words(note, toks) if note else {}
-        search = vim_search_pattern(
-            state["q"], sorted({w for ws in fz.values() for w in ws}))
-        at = vim_match_position(state, note, highlight_tokens(note, toks))
+        term = active_term(state, toks)
+        at_pat = None
+        if term is None:
+            search = vim_search_pattern(
+                state["q"], sorted({w for ws in fz.values() for w in ws}))
+        else:
+            # Tab has narrowed navigation to one term. Under the default
+            # vim_search_scope=term Vim gets that term alone, so its n/N cycle
+            # is the one just being used; under =query it gets the whole query
+            # and the narrower pattern only places the cursor.
+            term_pat = vim_search_pattern(term, fz.get(term, ()))
+            if vim_search_scope() == "query":
+                search = vim_search_pattern(
+                    state["q"], sorted({w for ws in fz.values() for w in ws}))
+                at_pat = term_pat
+            else:
+                search = term_pat
+        at = vim_match_position(state, note,
+                                highlight_tokens(note, toks, state))
         if state["trash_mode"]:
             if confirm_screen(stdscr, TRASH_EDIT_NOTICE):
-                restored = edit_trash_note(note, end=end, search=search, at=at)
+                restored = edit_trash_note(note, end=end, search=search,
+                                           at=at, at_pat=at_pat)
                 refresh_notes()
                 state["_hist_path"] = None
                 if restored:
                     state["_restore_path"] = restored
         else:
-            record(open_note(note, end=end, search=search, at=at))
+            record(open_note(note, end=end, search=search, at=at,
+                             at_pat=at_pat))
             refresh_notes()
             state["_hist_path"] = None
             state["_restore_path"] = note["path"]
@@ -6016,6 +6116,7 @@ def run(stdscr, imports=(), move=False):
                 # First ESC: clear the search filter, stay in the current view
                 # and fall back to its natural order (relevance with no query).
                 state["q"] = ""
+                state["qf"] = -1
                 state["sort"] = "relevance"
                 if cur_path:
                     state["_restore_path"] = cur_path
@@ -6086,6 +6187,7 @@ def run(stdscr, imports=(), move=False):
             elif r == "changed":
                 state["cur"] = 0
                 state["off"] = 0
+                state["qf"] = -1        # a new query starts on all its terms
             elif r == "submit":
                 state["search_mode"] = False
                 if filtered:
@@ -6099,6 +6201,7 @@ def run(stdscr, imports=(), move=False):
                     dest = new_note(state["q"].strip())
                     refresh_notes()
                     state["q"] = ""
+                    state["qf"] = -1
                     state["q_pos"] = 0
                     state["cur"] = 0
                     state["off"] = 0
@@ -6118,6 +6221,7 @@ def run(stdscr, imports=(), move=False):
             # the relevance sort (best matches first) until you pick another.
             state["search_mode"] = True
             state["q"] = ""
+            state["qf"] = -1
             state["q_pos"] = 0
             state["cur"] = 0
             state["off"] = 0
@@ -6276,21 +6380,34 @@ def run(stdscr, imports=(), move=False):
                 state["review_mode"] = False
                 state["sort"] = "relevance"
                 state["q"] = ""
+                state["qf"] = -1
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
                 # The source note matches its own tag set, so keep it selected.
                 state["_restore_path"] = note["path"]
 
-        elif k == 9 and state["tagf"] is not None:  # Tab — cycle active tag
-            tf = state["tagf"]
-            tf["idx"] = tf["idx"] + 1 if tf["idx"] + 1 < len(tf["tags"]) else -1
-            cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
-            state["cur"] = 0
-            state["off"] = 0
-            state["p_scroll"] = 0
-            if cur_path:
-                state["_restore_path"] = cur_path   # keep selection if it still matches
+        elif k in (9, curses.KEY_BTAB):
+            # Tab cycles a filter: which tag the view is narrowed to, or which
+            # search term n/N steps through — the same all → each → all walk.
+            # Where both are available, tab_in_tag_view says which gets the
+            # unshifted key and the other takes Shift-Tab.
+            terms = search_tokens(state["q"])
+            in_tagf = state["tagf"] is not None
+            tags_first = in_tagf and not tab_cycles_terms_in_tag_view()
+            wants_tags = in_tagf and ((k == 9) == tags_first)
+            if wants_tags:
+                tf = state["tagf"]
+                tf["idx"] = tf["idx"] + 1 if tf["idx"] + 1 < len(tf["tags"]) else -1
+                cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
+                state["cur"] = 0
+                state["off"] = 0
+                state["p_scroll"] = 0
+                if cur_path:
+                    state["_restore_path"] = cur_path   # keep selection if it still matches
+            elif not cycle_term(state, terms, 1 if k == 9 else -1):
+                push_msg("one search term — nothing to cycle" if terms
+                         else "no search — / first")
 
         elif key_matches(k, KEY["help"]):
             if help_view(stdscr) is MODAL_QUIT:
@@ -6312,6 +6429,7 @@ def run(stdscr, imports=(), move=False):
                 state["trash_mode"] = False
                 state["tagf"] = None
                 state["q"] = ""
+                state["qf"] = -1
                 state["sort"] = "relevance"
                 state["cur"] = 0
                 state["off"] = 0
@@ -6332,6 +6450,7 @@ def run(stdscr, imports=(), move=False):
                 state["review_mode"] = False
                 state["sort"] = "relevance"
                 state["q"] = ""
+                state["qf"] = -1
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0
@@ -6387,7 +6506,7 @@ def run(stdscr, imports=(), move=False):
         elif key_matches(k, KEY["match_next"]) or key_matches(k, KEY["match_prev"]):
             cur_note = filtered[state["cur"]] if 0 <= state["cur"] < len(filtered) else None
             step = 1 if key_matches(k, KEY["match_next"]) else -1
-            toks = highlight_tokens(cur_note, search_tokens(state["q"]))
+            toks = highlight_tokens(cur_note, search_tokens(state["q"]), state)
             if not match_step(state, cur_note, toks, w, h, step):
                 push_msg("no matches to step through" if state["q"]
                          else "no search — / first")
