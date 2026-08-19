@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import atexit
 import collections
+import calendar
 import curses
 import fcntl
 import hashlib
@@ -401,6 +402,18 @@ def slugify(title):
 def iso_to_ts(s):
     if not s:
         return 0.0
+    # Fast path for the exact stamp notoj writes itself. strptime costs ~20us
+    # and load() calls this twice per note, so on a big vault the general
+    # parser is a measurable share of startup. Anything not of this exact
+    # shape falls through to strptime unchanged.
+    try:
+        if (len(s) == 20 and s[4] == "-" and s[7] == "-" and s[10] == "T"
+                and s[13] == ":" and s[16] == ":" and s[19] == "Z"):
+            return float(calendar.timegm((
+                int(s[0:4]), int(s[5:7]), int(s[8:10]),
+                int(s[11:13]), int(s[14:16]), int(s[17:19]), 0, 0, 0)))
+    except ValueError:
+        pass
     try:
         dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         return dt.timestamp()
@@ -507,14 +520,31 @@ def derive_title(body):
     return ""
 
 
-def load_md(path):
+def read_note_text(path):
+    """A note's text, read the tolerant way: utf-8-sig drops a leading BOM if
+    present, and CRLF/CR are normalized to LF. Returns None if unreadable.
+
+    load(), load_md() and sync_hashtags() all need the same bytes, and used to
+    open the file once each. This is the single read they share; the callers
+    below take an optional `text` so an already-read note is not read again.
+    """
     try:
-        # utf-8-sig drops a leading BOM if present; normalize CRLF/CR to LF.
-        # ensure_canonical() persists this on disk during adoption, but reading
-        # tolerantly here keeps a not-yet-canonicalized file loadable too.
         with open(path, "r", encoding="utf-8-sig") as f:
             text = f.read()
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    except Exception:
+        return None
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def load_md(path, text=None):
+    try:
+        # ensure_canonical() persists BOM/CRLF normalization on disk during
+        # adoption, but reading tolerantly here keeps a not-yet-canonicalized
+        # file loadable too.
+        if text is None:
+            text = read_note_text(path)
+        if text is None:
+            return None
 
         if not text.startswith("---\n"):
             return None
@@ -565,22 +595,26 @@ def ensure_canonical(path):
     start with "\\ufeff---", and CRLF makes the first line "---\\r" — so the
     note is left unadopted or, worse, gets a second frontmatter block prepended.
     Running this first in the adoption pipeline makes every downstream parse see
-    plain LF text. Preserves mtime so the cleanup never reads as a fresh edit."""
+    plain LF text. Preserves mtime so the cleanup never reads as a fresh edit.
+
+    Returns the canonical text when it rewrote the file, else None, so a caller
+    that is about to parse the note can use it instead of reading again. None
+    means "nothing was changed", not "nothing is there"."""
     try:
         with open(path, "rb") as f:
             raw = f.read()
     except Exception:
-        return
+        return None
 
     had_bom = raw.startswith(b"\xef\xbb\xbf")
     body = raw[3:] if had_bom else raw
     if not had_bom and b"\r" not in body:
-        return
+        return None
 
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
-        return  # not UTF-8 — leave it alone rather than corrupt it
+        return None  # not UTF-8 — leave it alone rather than corrupt it
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     try:
@@ -588,7 +622,8 @@ def ensure_canonical(path):
         atomic_write(path, text)
         os.utime(path, (st.st_atime, st.st_mtime))
     except Exception:
-        pass
+        return None
+    return text
 
 
 def ensure_frontmatter(path):
@@ -671,13 +706,22 @@ def load():
     for f in glob.glob(os.path.join(NOTES_DIR, "*.md")):
         if CONFLICT_RE.match(os.path.basename(f)):
             continue  # Syncthing conflict copy — handled by find_conflicts()/`c`, never adopted as a note
-        ensure_canonical(f)
-        n = load_md(f)
+        # One read per note, reused by every step below. Each step that
+        # rewrites the file drops it back to None so the next parse re-reads
+        # rather than working from text that is now stale on disk. Those
+        # rewrites are the rare adoption paths; the common case is a settled
+        # note that is opened exactly once.
+        text = ensure_canonical(f)
+        if text is None:
+            text = read_note_text(f)
+        n = load_md(f, text)
         if n is None:
             ensure_frontmatter(f)
+            text = None
             n = load_md(f)
         if n and not n.get("id"):
             ensure_id(f)
+            text = None
             n = load_md(f)
         if n:
             # Catch inline #hashtags on notes that predate this session: the
@@ -685,7 +729,7 @@ def load():
             # while running, so a note already on disk at startup is otherwise
             # loaded verbatim and never gets its body tags synced. Reload only
             # when the sync actually rewrote the file.
-            if sync_hashtags_keep_date(f):
+            if sync_hashtags_keep_date(f, text):
                 n = load_md(f)
             notes.append(n)
 
@@ -1277,6 +1321,13 @@ def extract_hashtags(text):
             continue
         if in_fence:
             continue
+        # Only ~3% of lines in a real vault contain a '#' at all, and a line
+        # without one can neither hold a tag nor a stray '#'. Skipping them
+        # here is the difference between three regex passes over every line
+        # in the vault and over the few that could match. Must stay BELOW the
+        # fence bookkeeping above: a ``` line has no '#' and still toggles.
+        if "#" not in line:
+            continue
         # Drop inline code spans before the stray-'#' check, so backticking a
         # literal both untags it and stops it poisoning the rest of the line.
         line = INLINE_CODE_RE.sub("", line)
@@ -1312,14 +1363,16 @@ def rewrite_tags_field(fm_text, tags):
     return "\n".join(out)
 
 
-def sync_hashtags(path):
+def sync_hashtags(path, text=None):
     """Add any inline #hashtags found in the note body to the YAML tags field.
 
+    `text` is the note as already read, to save re-opening it; omit it and the
+    file is read here as before.
+
     Returns True if the file was rewritten (new tags adopted), else False."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-    except Exception:
+    if text is None:
+        text = read_note_text(path)
+    if text is None:
         return False
 
     if not text.startswith("---\n"):
@@ -1353,7 +1406,7 @@ def sync_hashtags(path):
         return False
 
 
-def sync_hashtags_keep_date(path):
+def sync_hashtags_keep_date(path, text=None):
     """sync_hashtags, preserving the file's mtime so a newly-adopted inline tag
     doesn't read as a fresh edit — which would float the note in date-sorted
     views and later bump its `modified:` during normalization (same reasoning as
@@ -1366,7 +1419,7 @@ def sync_hashtags_keep_date(path):
         mtime = os.path.getmtime(path)
     except OSError:
         mtime = None
-    changed = sync_hashtags(path)
+    changed = sync_hashtags(path, text)
     if changed and mtime is not None:
         try:
             os.utime(path, (mtime, mtime))

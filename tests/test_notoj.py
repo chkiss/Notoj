@@ -4733,5 +4733,84 @@ class TestDateAttr(unittest.TestCase):
         self.assertEqual(notoj.date_attr(now - 99999, now), curses_stub.color_pair(2))
 
 
+class TestSingleReadLoadPath(unittest.TestCase):
+    """load() reads each note once and hands the text down. These guard the
+    seams that created: a fast path that must agree with the slow one, and
+    parsers that must actually use the text they are given."""
+
+    NOTE = ("---\nid: abc\ncreated: 2013-10-08T13:08:43Z\n"
+            "modified: 2020-02-29T00:00:00Z\ntitle: T\ntags: []\n---\n\nBody\n")
+
+    def test_iso_fast_path_agrees_with_strptime(self):
+        # The shapes the fast path claims, including a leap day and the epoch.
+        for stamp in ("2013-10-08T13:08:43Z", "2020-02-29T00:00:00Z",
+                      "1970-01-01T00:00:00Z", "2026-12-31T23:59:59Z"):
+            expected = datetime.strptime(
+                stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+            self.assertEqual(notoj.iso_to_ts(stamp), expected, stamp)
+
+    def test_iso_rejects_lookalikes_of_the_right_length(self):
+        # 20 characters but not the shape: must not be misread as a date.
+        for stamp in ("2013-10-08T13:08:43X", "2013/10/08T13:08:43Z",
+                      "20xx-10-08T13:08:43Z"):
+            self.assertEqual(notoj.iso_to_ts(stamp), 0.0, stamp)
+
+    def test_load_md_given_text_matches_reading_the_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "n.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.NOTE)
+            self.assertEqual(notoj.load_md(path), notoj.load_md(path, self.NOTE))
+
+    def test_load_md_uses_the_text_it_is_given(self):
+        # If the parameter were ignored this would return the file's title.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "n.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.NOTE)
+            handed = self.NOTE.replace("Body", "Handed in")
+            self.assertEqual(notoj.load_md(path, handed)["content"].strip(),
+                             "Handed in")
+
+    def test_read_note_text_normalizes_bom_and_crlf(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "n.md")
+            with open(path, "wb") as f:
+                f.write("\ufeff---\r\nid: a\r\n---\r\n\r\nBody\r\n".encode("utf-8"))
+            text = notoj.read_note_text(path)
+            self.assertFalse(text.startswith("\ufeff"))
+            self.assertNotIn("\r", text)
+
+    def test_read_note_text_returns_none_when_unreadable(self):
+        self.assertIsNone(notoj.read_note_text("/nonexistent/nope.md"))
+
+    def test_sync_hashtags_uses_the_text_it_is_given(self):
+        # The file on disk has no inline tag; the text handed in does. The tag
+        # from the text is the one that must be adopted.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "n.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.NOTE)
+            self.assertTrue(
+                notoj.sync_hashtags(path, self.NOTE.replace("Body", "Body #fromtext")))
+            self.assertIn("fromtext", notoj.load_md(path)["tags"])
+
+    def test_ensure_canonical_returns_text_only_when_it_rewrites(self):
+        with tempfile.TemporaryDirectory() as d:
+            clean = os.path.join(d, "clean.md")
+            with open(clean, "w", encoding="utf-8") as f:
+                f.write(self.NOTE)
+            self.assertIsNone(notoj.ensure_canonical(clean))   # nothing to do
+
+            crlf = os.path.join(d, "crlf.md")
+            with open(crlf, "wb") as f:
+                f.write(self.NOTE.replace("\n", "\r\n").encode("utf-8"))
+            returned = notoj.ensure_canonical(crlf)
+            self.assertIsNotNone(returned)
+            self.assertNotIn("\r", returned)
+            with open(crlf, encoding="utf-8") as f:      # and it matches disk
+                self.assertEqual(returned, f.read())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
