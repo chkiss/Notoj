@@ -37,7 +37,8 @@ curses_stub.color_pair = lambda n: n << 8   # distinct int per pair, for | attrs
 sys.modules.setdefault("curses", curses_stub)
 
 _here = os.path.dirname(os.path.abspath(__file__))
-_notoj_path = os.path.join(_here, "notoj")
+_root = os.path.dirname(_here)
+_notoj_path = os.path.join(_root, "notoj")
 loader = importlib.machinery.SourceFileLoader("notoj", _notoj_path)
 notoj = types.ModuleType("notoj")
 notoj.__file__ = _notoj_path

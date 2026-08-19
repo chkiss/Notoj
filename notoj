@@ -6596,7 +6596,7 @@ def offer_simplenote_import(notes_dir):
     if glob.glob(os.path.join(notes_dir, "*.md")):
         return
 
-    script = os.path.join(SCRIPT_DIR, "simplenote_convert_to_md.py")
+    script = os.path.join(SCRIPT_DIR, "scripts", "simplenote_convert_to_md.py")
     if not os.path.exists(script):
         return
 

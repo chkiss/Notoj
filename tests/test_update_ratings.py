@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 _here = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _here)
+sys.path.insert(0, os.path.join(os.path.dirname(_here), "scripts"))
 import update_ratings as ur  # noqa: E402
 
 

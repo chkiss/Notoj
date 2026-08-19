@@ -1,0 +1,31 @@
+# Both suites are stdlib unittest, so there is nothing to install: the job is
+# a checkout and two python invocations. Kept on the oldest Python the README
+# claims support for (3.8) as well as a current one, because "stdlib only" is
+# a promise that quietly breaks the first time a 3.9+ syntax slips in.
+
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Core app tests
+        run: python3 tests/test_notoj.py
+
+      - name: Rating-table tests
+        run: python3 tests/test_update_ratings.py

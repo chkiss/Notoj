@@ -4,16 +4,25 @@ set -e
 # --md-handler / --no-md-handler: register (or skip registering) notoj as the
 # default application for markdown files. Without a flag, an interactive run
 # asks; a non-interactive run (curl | bash) skips and prints how to enable.
+#
+# --auto-update / --no-auto-update: install (or skip) a notoj() shell function
+# that pulls this repo in the background on every launch. Same rule: an
+# interactive run asks, a non-interactive one declines. Pulling code from the
+# internet before each run is convenient and is also a real trust decision, so
+# it is never turned on without a yes.
 MD_HANDLER=ask
+AUTO_UPDATE=ask
 for arg in "$@"; do
     case "$arg" in
-        --md-handler)    MD_HANDLER=yes ;;
-        --no-md-handler) MD_HANDLER=no ;;
+        --md-handler)     MD_HANDLER=yes ;;
+        --no-md-handler)  MD_HANDLER=no ;;
+        --auto-update)    AUTO_UPDATE=yes ;;
+        --no-auto-update) AUTO_UPDATE=no ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
 
-REPO="git@github.com:chkiss/Notoj.git"
+REPO="https://github.com/chkiss/Notoj.git"
 INSTALL_DIR="$HOME/Notoj"
 BIN_DIR="$HOME/.local/bin"
 SHELL_FUNC='notoj() { git -C ~/Notoj pull --ff-only -q 2>/dev/null & ~/Notoj/notoj "$@"; }'
@@ -48,18 +57,58 @@ if ! grep -qF "$PATH_LINE" "$RC" 2>/dev/null; then
     echo "Added PATH export to $RC"
 fi
 
-# Add shell function if missing
-if ! grep -qF 'notoj()' "$RC" 2>/dev/null; then
-    echo "" >> "$RC"
-    echo "$SHELL_FUNC" >> "$RC"
-    echo "Added notoj() function to $RC"
+# Auto-update on launch. The symlink alone runs notoj perfectly well; the
+# shell function only exists to pull first, so declining simply means no
+# function is installed. Re-running the installer with the other answer
+# switches it either way, which is why an existing function is removed
+# before a new one is written.
+has_shell_func() { grep -qF 'notoj() { git -C' "$RC" 2>/dev/null; }
+remove_shell_func() {
+    [ -f "$RC" ] || return 0
+    grep -vF 'notoj() { git -C' "$RC" > "$RC.notoj.tmp" && mv "$RC.notoj.tmp" "$RC"
+}
+
+if [ "$AUTO_UPDATE" = ask ]; then
+    if [ -t 0 ]; then
+        if has_shell_func; then
+            echo "Auto-update is currently ON (notoj pulls this repo before each launch)."
+            read -r -p "Keep pulling updates automatically on launch? [Y/n] " reply
+            case "$reply" in [Nn]*) AUTO_UPDATE=no ;; *) AUTO_UPDATE=yes ;; esac
+        else
+            echo "notoj can pull this repo in the background each time you launch it,"
+            echo "so you always run the newest commit. It runs whatever it pulls."
+            read -r -p "Pull updates automatically on launch? [y/N] " reply
+            case "$reply" in [Yy]*) AUTO_UPDATE=yes ;; *) AUTO_UPDATE=no ;; esac
+        fi
+    elif has_shell_func; then
+        AUTO_UPDATE=yes          # non-interactive re-run: leave an existing choice alone
+    else
+        AUTO_UPDATE=no
+        echo "Skipping launch-time auto-update (re-run with --auto-update to enable)"
+    fi
+fi
+
+if [ "$AUTO_UPDATE" = yes ]; then
+    if has_shell_func; then
+        echo "Auto-update already enabled in $RC"
+    else
+        echo "" >> "$RC"
+        echo "$SHELL_FUNC" >> "$RC"
+        echo "Added notoj() auto-update function to $RC"
+    fi
+elif has_shell_func; then
+    remove_shell_func
+    echo "Removed the notoj() auto-update function from $RC"
+    echo "Update by hand with: git -C $INSTALL_DIR pull"
+else
+    echo "Auto-update off. Update by hand with: git -C $INSTALL_DIR pull"
 fi
 
 # Optionally register notoj as the default application for markdown files:
 # a double-clicked .md opens notoj in a terminal, imported (or, if it is
 # already a note, just selected). Needs xdg-mime, so headless systems skip it.
 if ! command -v xdg-mime >/dev/null 2>&1; then
-    [ "$MD_HANDLER" = yes ] && echo "xdg-mime not found — skipping .md handler registration" >&2
+    [ "$MD_HANDLER" = yes ] && echo "xdg-mime not found, skipping .md handler registration" >&2
     MD_HANDLER=no
 fi
 if [ "$MD_HANDLER" = ask ]; then
