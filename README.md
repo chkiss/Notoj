@@ -22,17 +22,17 @@ bash ~/Notoj/install.sh && source ~/.bashrc
 `install.sh` is idempotent: clones or updates `~/Notoj`, symlinks `notoj`
 into `~/.local/bin`, and adds it to `$PATH` in your bashrc/zshrc.
 
-It then asks two questions, both of which can be answered ahead of time with a
-flag, and both of which a non-interactive run (`curl | bash`) declines.
+It then asks two questions, each answerable ahead of time with a flag.
 
-**Auto-update.** notoj can install a `notoj()` shell function that pulls this
-repo in the background on every launch, so you always run the newest commit.
-That means the app fetches and runs code from the internet before each start,
-which is a trust decision rather than a detail, so it is off unless you say
-yes. `--auto-update` enables it non-interactively, `--no-auto-update` declines,
-and re-running the installer with the other answer switches it either way. With
-it off, update by hand with `git -C ~/Notoj pull`. The symlink runs notoj
-perfectly well on its own; the function exists only to pull first.
+**Auto-update, on by default.** notoj installs a `notoj()` shell function that
+pulls this repo in the background on every launch, so you always run the newest
+commit. The prompt defaults to yes and a non-interactive run (`curl | bash`)
+takes it. Worth knowing what you are agreeing to: the app fetches and runs code
+from this repository before each start. Decline with `--no-auto-update`, or by
+answering `n`, at install time or any time after: re-running the installer with
+the other answer switches it either way. With it off, update by hand with
+`git -C ~/Notoj pull`. The symlink runs notoj perfectly well on its own; the
+function exists only to pull first.
 
 **Markdown handler.** It also offers to make notoj the default application for markdown files, so
 double-clicking a `.md` in a file manager opens notoj in a terminal and

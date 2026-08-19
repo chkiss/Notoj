@@ -6,10 +6,9 @@ set -e
 # asks; a non-interactive run (curl | bash) skips and prints how to enable.
 #
 # --auto-update / --no-auto-update: install (or skip) a notoj() shell function
-# that pulls this repo in the background on every launch. Same rule: an
-# interactive run asks, a non-interactive one declines. Pulling code from the
-# internet before each run is convenient and is also a real trust decision, so
-# it is never turned on without a yes.
+# that pulls this repo in the background on every launch. This one defaults to
+# ON: an interactive run asks with yes as the default, and a non-interactive
+# run takes it. --no-auto-update declines, at install time or later.
 MD_HANDLER=ask
 AUTO_UPDATE=ask
 for arg in "$@"; do
@@ -77,14 +76,12 @@ if [ "$AUTO_UPDATE" = ask ]; then
         else
             echo "notoj can pull this repo in the background each time you launch it,"
             echo "so you always run the newest commit. It runs whatever it pulls."
-            read -r -p "Pull updates automatically on launch? [y/N] " reply
-            case "$reply" in [Yy]*) AUTO_UPDATE=yes ;; *) AUTO_UPDATE=no ;; esac
+            read -r -p "Pull updates automatically on launch? [Y/n] " reply
+            case "$reply" in [Nn]*) AUTO_UPDATE=no ;; *) AUTO_UPDATE=yes ;; esac
         fi
-    elif has_shell_func; then
-        AUTO_UPDATE=yes          # non-interactive re-run: leave an existing choice alone
     else
-        AUTO_UPDATE=no
-        echo "Skipping launch-time auto-update (re-run with --auto-update to enable)"
+        AUTO_UPDATE=yes          # non-interactive: the default, same as the prompt's
+        echo "Enabling launch-time auto-update (re-run with --no-auto-update to turn it off)"
     fi
 fi
 
