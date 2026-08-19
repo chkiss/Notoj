@@ -1,5 +1,6 @@
 """Tests for notoj — pure-logic and filesystem functions."""
 
+import contextlib
 import importlib.machinery
 import os
 import shutil
@@ -362,6 +363,20 @@ class TestLoadMd(unittest.TestCase):
             f.write(content)
         return path
 
+    @contextlib.contextmanager
+    def _notes_dir(self, d):
+        """Point notoj's module-global NOTES_DIR at a temp dir for the block.
+
+        Renames resolve their destination through unique_dest(), which falls
+        back to NOTES_DIR — empty at import, so a test that renames a note
+        without this writes the result into the repo working tree."""
+        old = notoj.NOTES_DIR
+        notoj.NOTES_DIR = d
+        try:
+            yield
+        finally:
+            notoj.NOTES_DIR = old
+
     def test_valid_note(self):
         with tempfile.TemporaryDirectory() as d:
             path = self._write(d, "note.md", (
@@ -450,8 +465,11 @@ class TestLoadMd(unittest.TestCase):
             self.assertEqual(n["title"], "Fallback Title")
 
     def test_body_title_overrides_frontmatter(self):
+        # The filename is the slug of the title notoj last adopted, so this is
+        # a plain body edit: the first line moved on, title: has not been
+        # touched, and the derived title wins as it always has.
         with tempfile.TemporaryDirectory() as d:
-            path = self._write(d, "note.md", (
+            path = self._write(d, "Old Title.md", (
                 "---\n"
                 "id: abc\n"
                 "title: Old Title\n"
@@ -465,6 +483,187 @@ class TestLoadMd(unittest.TestCase):
             ))
             n = notoj.load_md(path)
             self.assertEqual(n["title"], "New Title")
+            self.assertFalse(n["title_conflict"])
+
+    def _retitled_note(self, d, name="Old Title.md"):
+        """A note retitled by hand: title: says one thing, the first body line
+        (and so the filename notoj derived from it) still says the old one."""
+        return self._write(d, name, (
+            "---\n"
+            "id: abc\n"
+            "title: Hand Typed Title\n"
+            "created: 2013-10-08T13:08:43Z\n"
+            "modified: 2013-10-08T13:08:43Z\n"
+            "version: 1\n"
+            "tags: []\n"
+            "---\n"
+            "\n"
+            "Old Title\n"
+            "\n"
+            "body text\n"
+        ))
+
+    def test_hand_edited_title_is_flagged_and_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            n = notoj.load_md(self._retitled_note(d))
+            self.assertTrue(n["title_conflict"])
+            # The typed title is what the list and search show, not the line
+            # the edit was about to be reverted to.
+            self.assertEqual(n["title"], "Hand Typed Title")
+            self.assertEqual(n["body_title"], "Old Title")
+
+    def test_collision_suffix_is_not_a_hand_edit(self):
+        # unique_dest appends " (2)" without the title changing, so the stem
+        # comparison has to look past it.
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, "Old Title (2).md", (
+                "---\n"
+                "id: abc\n"
+                "title: Old Title\n"
+                "created: 2013-10-08T13:08:43Z\n"
+                "modified: 2013-10-08T13:08:43Z\n"
+                "version: 1\n"
+                "tags: []\n"
+                "---\n"
+                "\n"
+                "New Title\n"
+            ))
+            n = notoj.load_md(path)
+            self.assertFalse(n["title_conflict"])
+            self.assertEqual(n["title"], "New Title")
+
+    def test_missing_title_field_is_not_a_hand_edit(self):
+        # An externally-produced file with no title: at all backfills normally.
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, "whatever.md", (
+                "---\n"
+                "id: abc\n"
+                "tags: []\n"
+                "---\n"
+                "\n"
+                "Real Title\n"
+            ))
+            n = notoj.load_md(path)
+            self.assertFalse(n["title_conflict"])
+            self.assertEqual(n["title"], "Real Title")
+
+    def test_normalize_external_note_preserves_hand_edited_title(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = self._retitled_note(d)
+            with self._notes_dir(d):
+                out = notoj.normalize_external_note(path)
+            # Neither reverted nor renamed out from under the user.
+            self.assertEqual(os.path.basename(out), "Old Title.md")
+            text = open(out, encoding="utf-8").read()
+            self.assertIn("title: Hand Typed Title", text)
+            self.assertIn("\nOld Title\n", text)
+
+    def test_resolve_title_conflict_rewrites_first_line_and_renames(self):
+        with tempfile.TemporaryDirectory() as d:
+            n = notoj.load_md(self._retitled_note(d))
+            out = notoj.resolve_title_conflict(n)
+            # Syncing settles the conflict *and* lets the filename catch up.
+            self.assertEqual(os.path.basename(out), "Hand Typed Title.md")
+            after = notoj.load_md(out)
+            self.assertFalse(after["title_conflict"])
+            self.assertEqual(after["body_title"], "Hand Typed Title")
+            self.assertIn("body text", after["content"])
+
+    def _title_lines(self, path):
+        text = open(path, encoding="utf-8").read()
+        fm = text[4:text.find("\n---\n", 4)].splitlines()
+        return [l for l in fm if l.startswith("title:")]
+
+    def test_check_rename_writes_exactly_one_title_line(self):
+        # Regression: notoj writes id: before title:, and the "note has no
+        # title yet" fallback keyed off the id: line fired before the loop
+        # reached the real title: line — so every retitle left two of them.
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, "Old Title.md", (
+                "---\n"
+                "id: abc\n"
+                "title: Old Title\n"
+                "created: 2013-10-08T13:08:43Z\n"
+                "modified: 2013-10-08T13:08:43Z\n"
+                "version: 1\n"
+                "tags: []\n"
+                "---\n"
+                "\n"
+                "New Title\n"
+            ))
+            with self._notes_dir(d):
+                out = notoj.check_rename(notoj.load_md(path))
+            self.assertEqual(self._title_lines(out), ["title: New Title"])
+
+    def test_check_rename_still_inserts_a_missing_title(self):
+        # The fallback the duplicate fix narrowed must keep working for a note
+        # whose frontmatter genuinely carries no title: line.
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, "x.md", (
+                "---\n"
+                "id: abc\n"
+                "created: 2013-10-08T13:08:43Z\n"
+                "modified: 2013-10-08T13:08:43Z\n"
+                "version: 1\n"
+                "tags: []\n"
+                "---\n"
+                "\n"
+                "Real Title\n"
+            ))
+            with self._notes_dir(d):
+                out = notoj.check_rename(notoj.load_md(path))
+            self.assertEqual(self._title_lines(out), ["title: Real Title"])
+
+    def test_duplicate_title_lines_collapse_to_the_resolved_value(self):
+        # parse_frontmatter assigns as it goes, so the LAST duplicate is the
+        # value the note already reads as; collapsing to the first would
+        # silently retitle it.
+        for fn in (notoj.check_rename, notoj.normalize_external_note):
+            with self.subTest(fn=fn.__name__), tempfile.TemporaryDirectory() as d:
+                path = self._write(d, "dup.md", (
+                    "---\n"
+                    "id: abc\n"
+                    "title: Stale Duplicate\n"
+                    "title: Real Body Title\n"
+                    "created: 2013-10-08T13:08:43Z\n"
+                    "modified: 2013-10-08T13:08:43Z\n"
+                    "version: 1\n"
+                    "tags: []\n"
+                    "---\n"
+                    "\n"
+                    "Real Body Title\n"
+                ))
+                self.assertEqual(notoj.load_md(path)["title"], "Real Body Title")
+                with self._notes_dir(d):
+                    out = (fn(notoj.load_md(path)) if fn is notoj.check_rename
+                           else fn(path))
+                self.assertEqual(self._title_lines(out), ["title: Real Body Title"])
+
+    def test_rename_to_title_leaves_a_conflicted_note_alone(self):
+        # The filename is the only record of the last adopted title, which is
+        # what tells a hand edit from a body edit — renaming would erase it.
+        with tempfile.TemporaryDirectory() as d:
+            path = self._retitled_note(d)
+            self.assertEqual(notoj.rename_to_title(path), path)
+            self.assertTrue(notoj.load_md(path)["title_conflict"])
+
+    def test_resolve_title_conflict_keeps_heading_marker(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = self._write(d, "Old Title.md", (
+                "---\n"
+                "id: abc\n"
+                "title: Hand Typed Title\n"
+                "created: 2013-10-08T13:08:43Z\n"
+                "modified: 2013-10-08T13:08:43Z\n"
+                "version: 1\n"
+                "tags: []\n"
+                "---\n"
+                "\n"
+                "## Old Title\n"
+            ))
+            out = notoj.resolve_title_conflict(notoj.load_md(path))
+            self.assertIn("## Hand Typed Title",
+                          open(out, encoding="utf-8").read())
 
     def test_unicode_body(self):
         with tempfile.TemporaryDirectory() as d:

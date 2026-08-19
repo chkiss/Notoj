@@ -131,7 +131,7 @@ def action_keycode(action, default_label):
 # remappable to a different 2-key chord via key.<action> = <two chars>.
 CHORD_DEFAULTS = {"goto_top": "gg", "dups_view": "gd",
                   "trash_view": "gt", "resurface": "gr",
-                  "hist_diff": "gh"}
+                  "hist_diff": "gh", "title_conflicts": "g!"}
 CHORD_ACTIONS = set(CHORD_DEFAULTS)
 
 
@@ -251,6 +251,11 @@ KEYMAP = [
     ("Other views", [
         ("trash_view", "g t", "trash (u restores; editing a trashed note restores it)"),
         ("dups_view", "g d", "duplicates (notes sharing a title)"),
+        ("title_conflicts", "g !", "resolve notes whose frontmatter title: was retitled by "
+              "hand while the first line (which the title is normally derived from) was "
+              "left alone — for each, sync the first line to the title, keep both, or "
+              "open it. Such notes are marked with a red ! in the list and counted in "
+              "the header"),
         ("backlinks", "b", "backlinks: notes linking to the selected one via [[wikilinks]] "
               "or [text](note.md) links (Enter jumps to the linking note; / searches)"),
         ("help", "?", "this key reference"),
@@ -520,6 +525,33 @@ def derive_title(body):
     return ""
 
 
+def title_hand_edited(path, fm_title, derived):
+    """Whether the frontmatter `title:` looks hand-edited away from the body's
+    first line — the one case where adopting the derived title would silently
+    throw away what the user typed.
+
+    The title is normally derived from the first body line, so `title:` is
+    notoj's own output and is never worth preserving. The exception is a note
+    someone retitled by editing the frontmatter and not the first line: adopting
+    the derived title there reverts their edit and renames the file back.
+
+    With no pre-edit copy to compare against (an external editor's change
+    arrives as a finished file), the durable signal is the *filename*: notoj
+    names every note after the slug of the title it last adopted, so a `title:`
+    that still slugifies to the file's stem is notoj's, while one that doesn't
+    was typed by hand since. A collision suffix — " (2)", " (3)" — is stripped
+    first, since unique_dest adds it without the title changing.
+
+    An empty/absent `title:` is never a hand edit (that's an un-adopted file
+    with a partial frontmatter block, which backfills normally). Measured
+    against the author's 1244-note corpus this flags nothing that isn't one."""
+    if not fm_title or not derived or derived == fm_title:
+        return False
+    stem = os.path.splitext(os.path.basename(path))[0]
+    base = re.sub(r" \(\d+\)$", "", stem)
+    return slugify(fm_title) not in (stem, base)
+
+
 def read_note_text(path):
     """A note's text, read the tolerant way: utf-8-sig drops a leading BOM if
     present, and CRLF/CR are normalized to LF. Returns None if unreadable.
@@ -561,6 +593,13 @@ def load_md(path, text=None):
             body_start += 1
 
         body_title = derive_title(body)
+        fm_title = meta.get("title") or ""
+        # A hand-edited title: outranks the first body line here, so the list,
+        # search and preview show what the user typed rather than the line
+        # their edit was about to be reverted to. normalize_external_note
+        # leaves both the field and the filename alone in this state; the
+        # flag is what the UI prompts on when the note is opened.
+        conflict = title_hand_edited(path, fm_title, body_title)
 
         return {
             "path": path,
@@ -573,7 +612,11 @@ def load_md(path, text=None):
             # tag has to be located in the file, and the tags may be a flow
             # list on one line or a block list spread over several.
             "fm_text": text[4:end],
-            "title": body_title or meta.get("title") or "",
+            "title": (fm_title if conflict else body_title) or fm_title or "",
+            # Set when title: was retitled by hand and the first body line was
+            # not: the two disagree and neither has been clobbered yet.
+            "title_conflict": conflict,
+            "body_title": body_title,
             "tags": meta.get("tags") or [],
             "system_tags": meta.get("system_tags") or [],
             "modificationDate": iso_to_ts(meta.get("modified")),
@@ -1068,7 +1111,12 @@ def normalize_external_note(path):
     has_modified = any(line.startswith("modified:") for line in fm_lines)
     has_version = any(line.startswith("version:") for line in fm_lines)
 
-    title_changed = bool(new_title) and new_title != old_title
+    # A title: retitled by hand is left standing: adopting the derived title
+    # would revert the edit and rename the file back under it. The note keeps
+    # both values until the conflict is resolved — load_md flags it and the UI
+    # prompts on open. Everything else (modified, backfill) proceeds normally.
+    title_changed = (bool(new_title) and new_title != old_title
+                     and not title_hand_edited(path, old_title, new_title))
     modified_changed = file_mtime_iso != old_modified
     # Externally-produced files often arrive with only a partial frontmatter
     # block — e.g. an id/title/tags header and none of the housekeeping dates.
@@ -1085,16 +1133,23 @@ def normalize_external_note(path):
         restore_mtime(path)
         return path
 
+    title_lines = [l for l in fm_lines if l.startswith("title:")]
+    # Collapsing keeps the LAST duplicate's text: parse_frontmatter assigns as
+    # it goes, so that's the value this note already resolves to everywhere —
+    # keeping the first would silently retitle it.
+    keep_title = title_lines[-1] if title_lines else None
+
     new_yaml_lines = []
     title_written = False
     for line in fm_lines:
         if line.startswith("title:"):
             # Collapse any duplicate title lines to a single one; rewrite it
-            # when the derived title changed, else keep the line verbatim.
+            # when the derived title changed, else keep the resolved value.
             if title_written:
                 continue
             new_yaml_lines.append(
-                f"title: {yaml_scalar(new_title)}" if title_changed else line
+                f"title: {yaml_scalar(new_title)}" if title_changed
+                else keep_title
             )
             title_written = True
         elif line.startswith("modified:"):
@@ -1104,7 +1159,8 @@ def normalize_external_note(path):
         # it on adoption keeps the edit count from being double-bumped on sync.
         else:
             new_yaml_lines.append(line)
-            if line.startswith("id:") and title_changed and not title_written:
+            # Only for a block with no title: line of its own (see check_rename).
+            if line.startswith("id:") and title_changed and not title_lines:
                 new_yaml_lines.append(f"title: {yaml_scalar(new_title)}")
                 title_written = True
 
@@ -3069,14 +3125,39 @@ def check_rename(n):
 
     new_first_line = derive_title(body)
 
-    title_changed = bool(new_first_line) and new_first_line != (meta.get("title") or "")
+    fm_title = meta.get("title") or ""
+    # Same guard as normalize_external_note, for an edit made through notoj:
+    # a title: the user retitled by hand survives instead of being reverted to
+    # the first body line. The Vim layer catches this at :w and offers to sync
+    # the two, so reaching here means Vim was opted out of (NOTOJ_NO_TITLE_GUARD,
+    # a non-Vim default_editor) or the user chose to keep both values.
+    title_changed = (bool(new_first_line) and new_first_line != fm_title
+                     and not title_hand_edited(path, fm_title, new_first_line))
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    fm_lines = text[4:fm_end].splitlines()
+    # Which title: lines the block already has decides whether the id: fallback
+    # below is allowed to synthesize one. Deciding it up front (rather than from
+    # `title_written` mid-loop) is the whole fix for the duplicate-title bug:
+    # notoj writes id: before title:, so the fallback always reached the id:
+    # line first, wrote a title there, and then wrote a second one when the loop
+    # arrived at the real title: line.
+    title_lines = [l for l in fm_lines if l.startswith("title:")]
+    # A block that already carries duplicates collapses to one. Keep the LAST
+    # one's text: parse_frontmatter assigns as it goes, so the last occurrence
+    # is the value every reader already resolved this note to — collapsing to
+    # the first would silently retitle the note.
+    keep_title = title_lines[-1] if title_lines else None
 
     new_yaml_lines = []
     title_written = False
-    for line in text[4:fm_end].splitlines():
-        if line.startswith("title:") and title_changed:
-            new_yaml_lines.append(f"title: {yaml_scalar(new_first_line)}")
+    for line in fm_lines:
+        if line.startswith("title:"):
+            if title_written:
+                continue
+            new_yaml_lines.append(
+                f"title: {yaml_scalar(new_first_line)}" if title_changed
+                else keep_title)
             title_written = True
         elif line.startswith("modified:"):
             new_yaml_lines.append(f"modified: {now_iso}")
@@ -3088,7 +3169,9 @@ def check_rename(n):
             new_yaml_lines.append(f"version: {v}")
         else:
             new_yaml_lines.append(line)
-            if line.startswith("id:") and title_changed and not title_written:
+            # Only for a block with no title: line of its own — otherwise the
+            # loop writes the real one when it gets to it.
+            if line.startswith("id:") and title_changed and not title_lines:
                 new_yaml_lines.append(f"title: {yaml_scalar(new_first_line)}")
                 title_written = True
 
@@ -3104,6 +3187,13 @@ def check_rename(n):
 
     if new_path != path:
         os.rename(path, new_path)
+    elif not title_hand_edited(path, fm_title, new_first_line):
+        # The title didn't change, but the filename may still be stale — the
+        # Vim guard's "sync first line to the new title" leaves the two fields
+        # agreeing on a title the file isn't named after, and undo/redo can do
+        # the same. Skipped while a conflict is unresolved, where the old name
+        # is the signal that keeps the hand edit from being reverted.
+        new_path = rename_to_title(path)
 
     sync_hashtags(new_path)
     schedule_inline_loop(new_path)
@@ -3209,6 +3299,97 @@ function! NotojOpenAtTitle() abort
   endif
 endfunction
 
+" ---- title-clobber guard -------------------------------------------------
+" notoj derives a note's title from the first body line and writes it into the
+" frontmatter, so retitling a note by editing `title:` alone is reverted on the
+" next save — and the file renamed back under the old name. Vim is the one
+" place that still holds both the before and the after, so the mismatch is
+" caught here, at :w, while it can still be resolved without guessing.
+
+" Line number of the frontmatter's first `title:` field, 0 if there is none.
+function! s:NotojFmTitleLine() abort
+  if getline(1) !=# '---'
+    return 0
+  endif
+  let l:i = 2
+  while l:i <= line('$')
+    if getline(l:i) ==# '---'
+      return 0
+    endif
+    if getline(l:i) =~# '^title:'
+      return l:i
+    endif
+    let l:i += 1
+  endwhile
+  return 0
+endfunction
+
+" The `title:` value, unquoted the way parse_frontmatter unquotes it.
+function! s:NotojFmTitle() abort
+  let l:ln = s:NotojFmTitleLine()
+  if l:ln == 0
+    return ''
+  endif
+  let l:v = substitute(getline(l:ln), '^title:\s*', '', '')
+  let l:v = substitute(l:v, '^\s*\(.\{-}\)\s*$', '\1', '')
+  if l:v =~# '^".*"$'
+    let l:v = substitute(l:v[1:-2], '\\\(["\\]\)', '\1', 'g')
+  endif
+  return l:v
+endfunction
+
+" The first body line as derived_title() sees it: heading marker stripped.
+function! s:NotojDerived() abort
+  let l:tl = s:NotojTitleLine()
+  let l:s = substitute(getline(l:tl), '^\s*\(.\{-}\)\s*$', '\1', '')
+  return substitute(l:s, '^#\{1,6}\s\+', '', '')
+endfunction
+
+" Record what the note looked like on entry, so the write can tell which of the
+" two lines the user actually touched.
+function! s:NotojSnapshot() abort
+  let b:notoj_fm_title = s:NotojFmTitle()
+  let b:notoj_derived = s:NotojDerived()
+endfunction
+
+function! s:NotojTitleGuard() abort
+  if !empty($NOTOJ_NO_TITLE_GUARD) || !exists('b:notoj_fm_title')
+    return
+  endif
+  let l:fm = s:NotojFmTitle()
+  let l:derived = s:NotojDerived()
+  " Only the case notoj would silently resolve against the user: they changed
+  " title: and the two now disagree. A body-only edit (title: untouched) is the
+  " normal path and adopts the new first line, as it always has.
+  if l:fm ==# b:notoj_fm_title || l:fm ==# l:derived || empty(l:fm)
+    return
+  endif
+  let l:choice = confirm(
+        \ "notoj takes a note's title from its first line, so this title: edit"
+        \ . " would be reverted on save.\n\n"
+        \ . "  title:     " . l:fm . "\n"
+        \ . "  first line: " . l:derived,
+        \ "&Sync first line to the new title\n"
+        \ . "&Keep both (leave first line alone)\n"
+        \ . "&Cancel the write", 1, "Question")
+  if l:choice == 1
+    " Carry any heading marker the line already had, so syncing a '# Heading'
+    " first line doesn't quietly demote it to plain text.
+    let l:tl = s:NotojTitleLine()
+    let l:pre = matchstr(getline(l:tl), '^\s*#\{1,6}\s\+')
+    call setline(l:tl, l:pre . l:fm)
+    call s:NotojSnapshot()
+  elseif l:choice == 2
+    " Both values stay as typed. notoj won't clobber either (title_hand_edited
+    " detects the same mismatch from the filename) and shows the note as
+    " conflicted until it's resolved there.
+    call s:NotojSnapshot()
+  else
+    throw 'Notoj: write cancelled — title: and first line disagree'
+  endif
+endfunction
+" --------------------------------------------------------------------------
+
 function! s:NotojSetup() abort
   if !empty($NOTOJ_NOTES_DIR)
     let &l:path = $NOTOJ_NOTES_DIR
@@ -3216,6 +3397,17 @@ function! s:NotojSetup() abort
   nnoremap <buffer> <silent> gf :call NotojFollow()<CR>
   if !exists('w:notoj_wikilink_match')
     let w:notoj_wikilink_match = matchadd('notojWikiLink', '\[\[[^][]*\]\]')
+  endif
+  " Guard notes only — a markdown file outside the notes dir has no frontmatter
+  " contract to protect.
+  if !empty($NOTOJ_NOTES_DIR)
+        \ && expand('%:p:h') ==# fnamemodify($NOTOJ_NOTES_DIR, ':p:h')
+        \ && s:NotojFmTitleLine() > 0
+    call s:NotojSnapshot()
+    augroup notoj_title_guard
+      autocmd! * <buffer>
+      autocmd BufWritePre <buffer> call s:NotojTitleGuard()
+    augroup END
   endif
 endfunction
 
@@ -3507,9 +3699,15 @@ def rename_to_title(path):
     """Rename a note file so its name matches its title's slug. Undo/redo of
     an edit rewrites the content from history, which can leave the filename
     carrying the other version's title; this re-syncs them. Returns the
-    resulting path (the input path when the name already agrees)."""
+    resulting path (the input path when the name already agrees).
+
+    A note with an unresolved title conflict is left alone: there the filename
+    is the only record of the title notoj last adopted, which is what
+    title_hand_edited() reads to tell the hand edit from a body edit. Renaming
+    it to the hand-typed title would erase that signal and let the next scan
+    revert the edit — the exact thing the conflict is holding open."""
     n = load_md(path)
-    if not n:
+    if not n or n.get("title_conflict"):
         return path
     stem = slugify(title(n))
     d = os.path.dirname(path) or "."
@@ -3887,6 +4085,94 @@ TRASH_EDIT_NOTICE = [
 ]
 
 
+def title_conflict_notice(n):
+    """The interstitial for a note whose `title:` was retitled by hand while
+    its first line was left alone — the edit notoj would otherwise revert."""
+    return [
+        "This note's title and first line disagree.",
+        "",
+        "notoj takes a note's title from its first line, so the frontmatter",
+        "title below was going to be reverted. It has been kept as typed",
+        "instead.",
+        "",
+        f"  title:      {n.get('title') or ''}",
+        f"  first line: {n.get('body_title') or ''}",
+        "",
+        "s  rewrite the first line to match the title",
+        "k  keep both for now (stays pending, listed in the header)",
+        "e  edit the note as-is, changing neither",
+    ]
+
+
+def choice_screen(stdscr, lines, keys):
+    """Full-screen interstitial offering more than yes/no. `keys` maps a
+    character to the value returned for it; ESC/q returns None. Same drawing
+    and dead-terminal guard as confirm_screen, which stays the two-answer
+    shorthand."""
+    stdscr.timeout(-1)   # block for the answer; the main loop resets this
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    for i, line in enumerate(lines):
+        if i + 1 >= h - 1:
+            break
+        addnstr_w(stdscr, i + 1, 2, line, max(1, w - 3),
+                  curses.A_BOLD if i == 0 else curses.A_NORMAL)
+    stdscr.refresh()
+    eof_spins = 0
+    while True:
+        t_wait = time.monotonic()
+        k = stdscr.getch()
+        if k == -1:
+            if time.monotonic() - t_wait < 0.01:
+                eof_spins += 1
+                if eof_spins > 50:
+                    return None
+            else:
+                eof_spins = 0
+            continue
+        eof_spins = 0
+        if k in (27, ord("q")):
+            return None
+        if 0 <= k < 0x110000:
+            hit = keys.get(chr(k).lower())
+            if hit is not None:
+                return hit
+
+
+def resolve_title_conflict(n):
+    """Rewrite a conflicted note's first body line to match its hand-edited
+    `title:`, which brings the two back into agreement so the normal
+    derive-and-rename pipeline takes over from the user's title on the next
+    save. Any heading marker on the line is preserved. Returns the note's new
+    path on success, None when there was nothing to rewrite."""
+    path = n["path"]
+    text = read_note_text(path)
+    if text is None or not text.startswith("---\n"):
+        return None
+    fm_end = text.find("\n---\n", 4)
+    if fm_end == -1:
+        return None
+
+    new_title = (parse_frontmatter(text[4:fm_end]).get("title") or "").strip()
+    if not new_title:
+        return None
+
+    head, body = text[:fm_end + 5], text[fm_end + 5:]
+    lines = body.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip():
+            marker = re.match(r"^\s*#{1,6}\s+", line)
+            lines[i] = (marker.group(0) if marker else "") + new_title
+            break
+    else:
+        return None
+
+    atomic_write(path, head + "\n".join(lines))
+    # The two now agree, so the conflict is over and the filename — still the
+    # old title's slug — is free to catch up with what the user typed.
+    return rename_to_title(path)
+
+
 def confirm_screen(stdscr, lines):
     """Full-screen interstitial. Returns True to proceed (Enter / y), False to
     cancel (ESC / n / q)."""
@@ -3999,6 +4285,12 @@ def init_colors():
     magenta = 205 if curses.COLORS >= 256 else curses.COLOR_MAGENTA
     match = _cfg_color("color.match", magenta)
     curses.init_pair(5, match, -1)
+
+    # The list's alert marker — today the "!" on a note whose frontmatter
+    # title: and first line disagree. Red, the one hue that reads as "wrong"
+    # rather than as a category: it shares the color with dates, but a single
+    # glyph in a gutter of its own is never mistaken for one.
+    curses.init_pair(13, _cfg_color("color.alert", curses.COLOR_RED), -1)
 
     # Approximate hits: the word the note actually uses where the query was a
     # near-miss ("syncthing" for a typed "syncthign"). Same hue as an exact
@@ -4127,6 +4419,15 @@ def match_attr():
 def match_fuzzy_attr():
     """Attr for an approximate hit — the corrected word behind a near-miss."""
     return curses.color_pair(12)
+
+
+ALERT_MARK = "!"
+ALERT_GUTTER = 2          # marker + one space, carved out of the title column
+
+
+def alert_attr():
+    """Attr for the list's alert marker (see init_pair 13)."""
+    return curses.color_pair(13) | curses.A_BOLD
 
 
 def match_focus_attr():
@@ -5283,6 +5584,8 @@ def draw(stdscr, notes, state):
     conflict_badge = f" | [{len(conflicts)} conflict(s)]" if conflicts else ""
     dup_badge = f" | [{len(state['_dups'])} dup(s) — gd]" if state.get("_dups") else ""
     loop_badge = f" | [{state['_loops_due']} loop(s) due — gr]" if state.get("_loops_due") else ""
+    tc = state.get("_title_conflicts") or []
+    title_badge = f" | [{len(tc)} retitle(s) — g!]" if tc else ""
     # The "filter:" field only shows while you're actually searching — same in
     # every view (notes / trash / duplicates / loops).
     filt = f" | filter:{state['q']}" if (state["q"] or state.get("search_mode")) else ""
@@ -5317,7 +5620,7 @@ def draw(stdscr, notes, state):
         header = f"tagged {tagf_label(state['tagf'])} ({len(notes)} notes){filt} | sort:{sort}{conflict_badge}"
     else:
         sort = sort_label(state["sort"], state["rev"], state["q"], "modified 🞃", False)
-        header = f"notes{filt} | sort:{sort}{conflict_badge}{dup_badge}{loop_badge}"
+        header = f"notes{filt} | sort:{sort}{conflict_badge}{dup_badge}{loop_badge}{title_badge}"
 
     # Header rule: underline the top row edge to edge. Unlike the content rows
     # (whose mixed colors made a row-wide underline look patchy), everything
@@ -5388,6 +5691,15 @@ def draw(stdscr, notes, state):
 
     visible = notes[state["off"]:state["off"] + h - 2]
 
+    # Alert gutter: two columns carved off the front of the title column for a
+    # red "!" on notes whose frontmatter title: and first line disagree. Taken
+    # from the title column rather than added to the row, so the date, age and
+    # tag columns stay where they are. Keyed off the whole view and not just
+    # the rows on screen, so titles don't jog sideways as you scroll past the
+    # flagged one — and absent entirely (costing nothing) when the view has
+    # none, which is the normal case.
+    gutter = ALERT_GUTTER if any(n.get("title_conflict") for n in notes) else 0
+
     # When sorted by creation date, the date and (age) columns track
     # creationDate instead of modificationDate — forward and reverse alike, with
     # the same format and recency color.
@@ -5448,8 +5760,15 @@ def draw(stdscr, notes, state):
             stdscr.addnstr(y, 0, " " * title_w, title_w, attr_title)
         except curses.error:
             pass
-        t_clip = clip_to_width(t, title_w)
-        draw_line_highlighted(stdscr, y, 0, t_clip, title_w, attr_title, row_hi)
+        # The marker sits in the band the fill above already painted, so on the
+        # selected row it inverts with the rest of the row instead of punching
+        # a hole in the highlight.
+        if gutter and n.get("title_conflict"):
+            addnstr_w(stdscr, y, 0, ALERT_MARK, gutter,
+                      alert_attr() | (curses.A_REVERSE if selected else 0))
+        t_clip = clip_to_width(t, title_w - gutter)
+        draw_line_highlighted(stdscr, y, gutter, t_clip, title_w - gutter,
+                              attr_title, row_hi)
 
         if show_date:
             m = fmt(n.get(date_field))
@@ -5566,6 +5885,7 @@ def draw(stdscr, notes, state):
             (10, "gt trash-view"), (8, "u/^R undo"),
             (9, "h/H hist" if hc >= 2 else ""),
             (2, "c conflicts" if conflicts else ""),
+            (2, "g! retitles" if tc else ""),
             (3, "? help"), (1, "q quit"),
         ]
     footer = fit_hints(segments, w - 1)
@@ -5695,6 +6015,7 @@ def run(stdscr, imports=(), move=False):
         "_hist_dirty": False,
         "_hist_cache": {},      # path -> commit count (lazy; cleared on change)
         "_conflicts": [],
+        "_title_conflicts": [],
         "_filter_cache": {},    # memoized rank/filter, rebuilt only on real input change
     }
 
@@ -5706,6 +6027,7 @@ def run(stdscr, imports=(), move=False):
     state["_dups"] = find_duplicates(notes)
     state["_loops_due"] = len(find_loops(notes, state["_review"]))
     state["_conflicts"] = find_conflicts()
+    state["_title_conflicts"] = [n for n in notes if n.get("title_conflict")]
 
     saved = load_cursor()
     if saved:
@@ -5730,6 +6052,10 @@ def run(stdscr, imports=(), move=False):
         set_tag_freq(notes)
         state["_trash"] = None
         state["_dups"] = find_duplicates(notes)
+        # Pending hand-retitles. Surfaced every scan rather than only when the
+        # note is opened: a conflict on a note you don't happen to open would
+        # otherwise sit unresolved (and unmentioned) indefinitely.
+        state["_title_conflicts"] = [n for n in notes if n.get("title_conflict")]
         # Inline "#loop <when>" scheduling writes the review file from inside
         # the update pipeline, so reload it rather than trust the in-memory copy.
         state["_review"] = load_review()
@@ -5855,6 +6181,23 @@ def run(stdscr, imports=(), move=False):
                 if restored:
                     state["_restore_path"] = restored
         else:
+            # A title: retitled by hand outside notoj (Obsidian, a phone, a
+            # sync) reaches here unresolved — the scan deliberately left both
+            # values standing rather than reverting the edit. Settle it now,
+            # while the note is in front of the user.
+            if note.get("title_conflict"):
+                pick = choice_screen(stdscr, title_conflict_notice(note),
+                                     {"s": "sync", "k": "keep", "e": "edit"})
+                if pick is None:
+                    return
+                if pick == "sync":
+                    resolved = resolve_title_conflict(note)
+                    if resolved:
+                        # Syncing renames the file to the new title, so pick the
+                        # note back up by its new path, not the stale one.
+                        refresh_notes()
+                        note = next((m for m in notes
+                                     if m["path"] == resolved), note)
             record(open_note(note, end=end, search=search, at=at,
                              at_pat=at_pat))
             refresh_notes()
@@ -6330,6 +6673,33 @@ def run(stdscr, imports=(), move=False):
                 state["off"] = 0
                 state["p_scroll"] = 0
                 state["sort"] = "relevance"
+
+            elif act == "title_conflicts":
+                # Walk every pending hand-retitle in one pass, so they're
+                # cleared from wherever you are rather than one-at-a-time as
+                # each note happens to be opened. ESC/q stops the walk and
+                # leaves the rest pending.
+                pending = list(state.get("_title_conflicts") or [])
+                if not pending:
+                    push_msg("no retitled notes to resolve")
+                for note in pending:
+                    # Each resolution rewrites and renames, so re-read the note
+                    # by path rather than trusting the pre-walk snapshot.
+                    cur = load_md(note["path"])
+                    if not cur or not cur.get("title_conflict"):
+                        continue
+                    pick = choice_screen(stdscr, title_conflict_notice(cur),
+                                         {"s": "sync", "k": "keep", "e": "edit"})
+                    if pick is None:
+                        break
+                    if pick == "sync":
+                        resolve_title_conflict(cur)
+                    elif pick == "edit":
+                        record(open_note(cur))
+                refresh_notes()
+                state["cur"] = 0
+                state["off"] = 0
+                state["p_scroll"] = 0
 
             elif act == "trash_view":
                 state["trash_mode"] = not state["trash_mode"]

@@ -143,6 +143,14 @@ Notes are markdown files with YAML frontmatter (`id`, `created`, `modified`,
 
 - The first body line is the title, and the filename follows it: editing
   that line renames the file automatically.
+- Retitling a note by editing the frontmatter `title:` and *not* the first
+  line is caught rather than reverted. In Vim, `:w` asks whether to sync the
+  first line to the new title, keep both, or cancel the write (set
+  `NOTOJ_NO_TITLE_GUARD=1` to skip the prompt). A retitle arriving from
+  another editor is detected on scan — the file is left exactly as written
+  and the note lists under the typed title, marked with a red `!` in the
+  list and counted in the header (`[2 retitle(s) — g!]`). `g !` walks the
+  pending ones, offering the same choice for each.
 - Inline `#hashtags` sync into the frontmatter `tags:` field on save.
   Fenced code blocks and `` `code` `` spans are exempt, so backtick a literal
   like `` `#B5B5B5` `` to keep it content. Add `notag: true` to the

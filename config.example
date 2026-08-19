@@ -159,6 +159,8 @@ preview_scroll = page
 #                              # prompt cursor (the tag you'd get on Tab)
 #                              # date gradient fades to for the oldest notes
 #   color.footer_bg = 239      # footer status-bar band (256-color only)
+#   color.alert     = 1        # the list's "!" marker (red) on a note whose
+#                              # frontmatter title: and first line disagree
 # Status/alert bar — the amber band that shows cross-session undo prompts and
 # stale-skip notices. Defaults to the inverse of the title look (the accent
 # and footer-band colors swapped: default-fg text on an amber band). Override
@@ -204,7 +206,7 @@ preview_scroll = page
 #   Other:    hist_browse(H)  conflict(c)  quit(q)
 # Two-key chords rebind to another TWO-key chord (value = the two characters):
 #   Chords:   goto_top(gg)  dups_view(gd)  trash_view(gt)  resurface(gr)
-#             hist_diff(gh)
+#             hist_diff(gh)  title_conflicts(g!)
 # Don't bind a single-key action to a chord's first key (the chord wins).
 # Examples:
 #   key.quit = Q
