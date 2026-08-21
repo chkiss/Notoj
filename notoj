@@ -49,7 +49,14 @@ VERSION = os.environ.get("NOTOJ_VERSION", "0.6.0")
 # Config (~/.config/notoj/config) — simple `key = value` lines, # comments.
 # ----------------------------
 
-CONFIG_FILE = os.path.expanduser("~/.config/notoj/config")
+def _config_file():
+    """Path of the config file: $XDG_CONFIG_HOME/notoj/config when that env
+    var is set, else ~/.config/notoj/config."""
+    root = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(root, "notoj", "config")
+
+
+CONFIG_FILE = _config_file()   # import-time snapshot; see _config_file()
 
 _config_cache = None
 
@@ -61,7 +68,7 @@ def _read_config():
     if _config_cache is None:
         _config_cache = {}
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(_config_file(), "r", encoding="utf-8") as f:
                 for line in f:
                     s = line.strip()
                     if not s or s.startswith("#") or "=" not in s:
@@ -994,11 +1001,32 @@ def set_cursor_style(code):
 
 
 def set_term_title(text):
-    """Set the terminal tab/window title via OSC 0 (also names a tmux pane)."""
+    """Set the terminal tab/window title. OSC 0 everywhere except GNU
+    screen, which ignores it and wants its native ESC-k sequence; tmux
+    relays OSC 0 to the outer terminal (and names the pane)."""
     try:
-        sys.stdout.write("\033]0;%s\007" % text)
+        sys.stdout.write(_title_seq(text))
         sys.stdout.flush()
     except (OSError, ValueError):
+        pass
+
+
+def _title_seq(text):
+    """The escape sequence that names a window on the running terminal."""
+    if os.environ.get("TMUX"):
+        return "\033]0;%s\007" % text
+    if os.environ.get("STY") or \
+            os.environ.get("TERM", "").startswith("screen"):
+        return "\033k%s\033\\" % text
+    return "\033]0;%s\007" % text
+
+
+def _curs_set(vis):
+    """curs_set that tolerates terminals without cursor-visibility support
+    (vt100, some consoles raise ERR instead of hiding the cursor)."""
+    try:
+        curses.curs_set(vis)
+    except curses.error:
         pass
 
 
@@ -1007,10 +1035,7 @@ def show_input_cursor(stdscr, col, row=0):
     field — the one routine behind the main filter bar, the modal "/" search,
     and the tag/schedule prompts, so every input shows its cursor the same
     way."""
-    try:
-        curses.curs_set(1)
-    except curses.error:
-        pass
+    _curs_set(1)
     stdscr.move(row, col)
     stdscr.refresh()
     set_cursor_style(1)  # blinking block (DECSCUSR)
@@ -1018,7 +1043,7 @@ def show_input_cursor(stdscr, col, row=0):
 
 def hide_input_cursor(stdscr):
     """No text field active: hide the terminal cursor, restore its style."""
-    curses.curs_set(0)
+    _curs_set(0)
     set_cursor_style(0)  # restore terminal default
     stdscr.refresh()
 
@@ -2584,7 +2609,7 @@ def modal_list(stdscr, view):
                 stdscr.hline(h - 1, 0, ord(" ") | footer_attr(), w)
             except curses.error:
                 pass
-            foot = ("type to filter  ⮐ select  ESC clear search"
+            foot = ("type to filter  ⏎ select  ESC clear search"
                     if sq is not None else view["footer"]())
             addnstr_w(stdscr, h - 1, 0, foot, w - 1, footer_attr())
 
@@ -2792,7 +2817,7 @@ def hist_view(stdscr, n):
         "preview_lines": prev.count,
         "header": lambda w: f"history: {title(n)}",
         "footer": lambda: ("j/k select  / search  PgDn/PgUp scroll diff  "
-                           "Shift=half  Ctrl/Alt=line  ⮐ vimdiff  q back"),
+                           "Shift=half  Ctrl/Alt=line  ⏎ vimdiff  q back"),
         "draw_row": draw_row,
         "draw_preview": draw_preview,
         "on_key": on_key,
@@ -2885,7 +2910,7 @@ def tags_view(stdscr, notes, focus=None, ui=None):
         "header": lambda w: (f"tags ({len(vs['items'])})  "
                              f"sort:{TAG_SORTS[vs['mode_i']]}"),
         "footer": lambda: ("j/k select  / search  s sort  "
-                           "⮐ filter notes by tag  ESC back  q quit"),
+                           "⏎ filter notes by tag  ESC back  q quit"),
         "draw_row": draw_row,
         "draw_preview": draw_preview,
         "on_key": on_key,
@@ -2949,7 +2974,7 @@ def backlinks_view(stdscr, notes, note):
                    "match": lambda m, ql: ql in title(m).lower()},
         "preview_lines": lambda sel: prev.count(sel) if links else 0,
         "header": lambda w: f"backlinks: {title(note)} ({len(links)})",
-        "footer": lambda: "j/k select  / search  ⮐ go to note  ESC back  q quit",
+        "footer": lambda: "j/k select  / search  ⏎ go to note  ESC back  q quit",
         "draw_row": draw_row,
         "draw_preview": draw_preview,
         "on_key": on_key,
@@ -2973,7 +2998,7 @@ def help_rows(width):
                 rows.append(("entry", label if j == 0 else "", part))
     rows.append(("blank", "", ""))
     for part in wrap_help("Key remapping and other configuration "
-                          f"settings at {CONFIG_FILE}", max(20, width - 1)):
+                          f"settings at {_config_file()}", max(20, width - 1)):
         rows.append(("section", "", part))
     return rows
 
@@ -4268,16 +4293,31 @@ def parse_span(s):
 
 def init_colors():
     global _footer_band, _message_band, _date_gradient
-    curses.start_color()
-    curses.use_default_colors()
+    # Monochrome terminals (vt100, dumb consoles): start_color/use_default_
+    # colors/init_pair raise instead of no-op'ing — curses.error generally,
+    # ValueError ("Color number is greater than COLORS-1") where there is no
+    # color support at all (COLORS == -1). Swallow both and keep building the
+    # derived state — color_pair() still returns attributes, the terminal
+    # just ignores the color bits.
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+    except (curses.error, ValueError):
+        pass
+
+    def pair(no, fg, bg=-1):
+        try:
+            curses.init_pair(no, fg, bg)
+        except (curses.error, ValueError):
+            pass
 
     amber = 214 if curses.COLORS >= 256 else curses.COLOR_YELLOW
     accent = _cfg_color("color.accent", amber)
     # accent = titles, recent dates
-    curses.init_pair(1, accent, -1)
-    curses.init_pair(2, _cfg_color("color.date", curses.COLOR_RED), -1)
-    curses.init_pair(3, _cfg_color("color.tag", curses.COLOR_GREEN), -1)
-    curses.init_pair(4, _cfg_color("color.preview", curses.COLOR_CYAN), -1)
+    pair(1, accent)
+    pair(2, _cfg_color("color.date", curses.COLOR_RED))
+    pair(3, _cfg_color("color.tag", curses.COLOR_GREEN))
+    pair(4, _cfg_color("color.preview", curses.COLOR_CYAN))
 
     # Search matches get the one hue nothing else in the UI claims. Amber is
     # titles and markdown headers, green is tags, red is dates, cyan is the
@@ -4287,19 +4327,19 @@ def init_colors():
     # fallback, and is what vim/less use for search.
     magenta = 205 if curses.COLORS >= 256 else curses.COLOR_MAGENTA
     match = _cfg_color("color.match", magenta)
-    curses.init_pair(5, match, -1)
+    pair(5, match, -1)
 
     # The list's alert marker — today the "!" on a note whose frontmatter
     # title: and first line disagree. Red, the one hue that reads as "wrong"
     # rather than as a category: it shares the color with dates, but a single
     # glyph in a gutter of its own is never mistaken for one.
-    curses.init_pair(13, _cfg_color("color.alert", curses.COLOR_RED), -1)
+    pair(13, _cfg_color("color.alert", curses.COLOR_RED), -1)
 
     # Approximate hits: the word the note actually uses where the query was a
     # near-miss ("syncthing" for a typed "syncthign"). Same hue as an exact
     # match — it IS the match — but muted, because the text on screen isn't
     # what was typed.
-    curses.init_pair(12, _cfg_color("color.match_fuzzy",
+    pair(12, _cfg_color("color.match_fuzzy",
                                     175 if curses.COLORS >= 256
                                     else curses.COLOR_MAGENTA), -1)
 
@@ -4310,13 +4350,13 @@ def init_colors():
     # every section line — and 214 is also the gradient's "just edited" date
     # bucket, which headers shouldn't be sharing a color with.
     muted_gold = 179 if curses.COLORS >= 256 else curses.COLOR_YELLOW
-    curses.init_pair(9, _cfg_color("color.header", muted_gold), -1)
+    pair(9, _cfg_color("color.header", muted_gold), -1)
 
     # Footer status bar: default fg over a gray band, distinct enough to read
     # as the screen's bottom edge so every row above it can hold content.
     if curses.COLORS >= 256:
         footer_bg = _cfg_color("color.footer_bg", 239)
-        curses.init_pair(10, -1, footer_bg)
+        pair(10, -1, footer_bg)
         _footer_band = True
 
         # Status / alert message bar (cross-session undo prompts, stale-skip
@@ -4325,7 +4365,7 @@ def init_colors():
         # text on an amber band — a clear highlighted alert. Both ends override.
         msg_fg = _cfg_color("color.message_fg", footer_bg)
         msg_bg = _cfg_color("color.message_bg", accent)
-        curses.init_pair(11, msg_fg, msg_bg)
+        pair(11, msg_fg, msg_bg)
         _message_band = True
 
         # The in-focus match — the one n/N is sitting on — is the match color
@@ -4333,7 +4373,7 @@ def init_colors():
         # cursor among the other hits (Vim's CurSearch vs Search). Without 256
         # colors there's no second color to spend on it and match_focus_attr()
         # falls back to reverse video, which lands in the same place.
-        curses.init_pair(8, _cfg_color("color.match_focus_fg", 235),
+        pair(8, _cfg_color("color.match_focus_fg", 235),
                          _cfg_color("color.match_focus_bg", match))
         global _match_focus_pair
         _match_focus_pair = True
@@ -4349,7 +4389,7 @@ def init_colors():
             cols = DATE_GRADIENT_COLORS.split(",")
         gradient = []
         for i in range(len(spans) + 1):
-            curses.init_pair(20 + i, _color_value(cols[min(i, len(cols) - 1)], 240), -1)
+            pair(20 + i, _color_value(cols[min(i, len(cols) - 1)], 240), -1)
             gradient.append((spans[i] if i < len(spans) else None,
                              curses.color_pair(20 + i)))
         _date_gradient = gradient
@@ -4357,7 +4397,7 @@ def init_colors():
         # Inactive (parenthesised) tags in the tag-filter header: by default
         # the same dim grey the date gradient fades to for the oldest notes,
         # overridable via color.tag_inactive.
-        curses.init_pair(6, _cfg_color("color.tag_inactive",
+        pair(6, _cfg_color("color.tag_inactive",
                                        _color_value(cols[-1], 240)), -1)
         global _tag_inactive_pair
         _tag_inactive_pair = True
@@ -4365,10 +4405,26 @@ def init_colors():
         # Tag-completion preview (the dimmed "ghost" suffix shown at the cursor
         # while typing in the tag prompt). Defaults to the same dim grey as the
         # inactive tags, overridable via color.tag_preview.
-        curses.init_pair(7, _cfg_color("color.tag_preview",
+        pair(7, _cfg_color("color.tag_preview",
                                        _color_value(cols[-1], 240)), -1)
         global _tag_preview_pair
         _tag_preview_pair = True
+
+
+def _setup_escdelay():
+    """Bare-ESC latency vs Alt-chord reliability. ncurses waits this many
+    milliseconds after an ESC byte to see whether a longer sequence follows:
+    too short and an Alt chord over a slow SSH link splits into a bare ESC
+    (clearing the filter) plus stray keys; too long and bare ESC feels laggy.
+    The 25ms default suits local terminals; raise it via the `esc_delay`
+    config (milliseconds) when chords misfire over remote links."""
+    v = config_get("esc_delay", "25")
+    try:
+        ms = max(5, min(int(str(v).strip()), 2000))
+    except ValueError:
+        ms = 25
+    if hasattr(curses, "set_escdelay"):
+        curses.set_escdelay(ms)
 
 
 def footer_attr():
@@ -5976,22 +6032,22 @@ def draw(stdscr, notes, state):
                 )
 
     # Footer hints as (priority, text) segments: lower number = survives
-    # longer as the terminal narrows. ⮐/e are one segment (e = open at end).
+    # longer as the terminal narrows. ⏎/e are one segment (e = open at end).
     hc = state.get("_hist_count", 0)
     if state.get("trash_mode"):
         segments = [
             (2, "gt exit trash"), (3, "/ search"),
-            (2, "⮐/e edit (saving restores)"), (2, "u restore"),
+            (2, "⏎/e edit (saving restores)"), (2, "u restore"),
             (4, "ESC clear/exit"), (1, "q quit"),
         ]
     elif state.get("dup_mode") is not None:
         segments = [
-            (2, "gd exit dups"), (3, "/ search"), (2, "⮐/e open"),
+            (2, "gd exit dups"), (3, "/ search"), (2, "⏎/e open"),
             (3, "d trash"), (4, "ESC clear/exit"), (1, "q quit"),
         ]
     elif state.get("review_mode"):
         segments = [
-            (4, "ESC clear/exit"), (5, "/ search"), (3, "⮐/e open"),
+            (4, "ESC clear/exit"), (5, "/ search"), (3, "⏎/e open"),
             (2, "z snooze"), (2, "S schedule"), (2, "x done"),
             (3, "d trash"), (6, "u/^R undo"), (1, "q quit"),
         ]
@@ -6006,7 +6062,7 @@ def draw(stdscr, notes, state):
             (2, f"{terms_key} term:{live or 'all'}"
                 if len(tokens) > 1 else ""),
             (3, "/ search"),
-            (2, "⮐/e open"), (4, "t refilter"), (5, "# tag"),
+            (2, "⏎/e open"), (4, "t refilter"), (5, "# tag"),
             (4, "d trash"), (3, "ESC clear/exit"), (1, "q quit"),
         ]
     else:
@@ -6021,7 +6077,7 @@ def draw(stdscr, notes, state):
         segments = [
             (2, m_hint), (2, t_hint),
             (3, f"{action_label('new', 'o')} new"), (2, "/ search"),
-            (7, "s/r sort"), (2, "⮐/e open"),
+            (7, "s/r sort"), (2, "⏎/e open"),
             (5, "#/. tag" if state.get("_last_tags") else "# tag"),
             (6, "t/T tags"), (10, "b backlinks"), (4, "d trash"),
             (10, "gt trash-view"), (8, "u/^R undo"),
@@ -6100,16 +6156,13 @@ def run(stdscr, imports=(), move=False):
         if final and not focus:
             focus = final
 
-    curses.curs_set(0)
+    _curs_set(0)
     set_term_title("notoj")
     init_colors()
+    _setup_escdelay()
     KEY = build_key_dispatch()   # {action: keycode}, with config rebindings
     CHORDS, CHORD_PREFIXES = build_chord_dispatch()   # 2-key chords (gg/gt/…)
     stdscr.timeout(2000)
-    if hasattr(curses, "set_escdelay"):
-        # Keep bare ESC snappy (default is up to 1s) and bound the window in
-        # which an ESC+letter is gathered as a Meta/Alt chord in the filter.
-        curses.set_escdelay(25)
     _install_page_key_fallbacks()
 
     # Restore the undo/redo stacks from previous sessions, trimming the journal
@@ -7123,19 +7176,19 @@ def load_notes_dir():
 
 def save_notes_dir(path):
     global _config_cache
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(_config_file()), exist_ok=True)
     # Preserve any other config lines (e.g. tag_editor.* rules); only replace
     # the notes_dir line.
     lines = []
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        with open(_config_file(), "r", encoding="utf-8") as f:
             lines = [ln for ln in f if not ln.strip().startswith("notes_dir=")]
     except FileNotFoundError:
         pass
     if lines and not lines[-1].endswith("\n"):
         lines[-1] += "\n"
     lines.append(f"notes_dir={path}\n")
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+    with open(_config_file(), "w", encoding="utf-8") as f:
         f.writelines(lines)
     _config_cache = None   # written file differs from any cached parse
 
@@ -7177,6 +7230,21 @@ def offer_simplenote_import(notes_dir):
         return
 
     subprocess.run([sys.executable, script, export_dir, notes_dir])
+
+
+def _launch_ui(run, *args):
+    """Start curses with the two failure modes handled: a missing TERM gets
+    a workable default (cron/systemd/containers often have none), and a
+    terminal whose terminfo can't be loaded exits with a one-line message
+    instead of a setupterm traceback."""
+    if not os.environ.get("TERM"):
+        os.environ["TERM"] = "xterm-256color"
+    try:
+        curses.wrapper(run, *args)
+    except curses.error as e:
+        sys.stderr.write("notoj: can't start a UI on TERM=%s: %s\n"
+                         % (os.environ.get("TERM", ""), e))
+        sys.exit(2)
 
 
 if __name__ == "__main__":
@@ -7225,7 +7293,7 @@ if __name__ == "__main__":
     offer_simplenote_import(NOTES_DIR)
 
     try:
-        curses.wrapper(run, IMPORTS, MOVE)
+        _launch_ui(run, IMPORTS, MOVE)
     finally:
         set_cursor_style(0)  # don't leave a blinking block in the shell
         set_term_title("")   # give the title back to the shell

@@ -95,6 +95,13 @@
 # makes it one line (linewise). Default: page.
 preview_scroll = page
 
+# How long (milliseconds) ncurses waits after an ESC byte to see whether a
+# longer sequence follows. Low = bare ESC feels snappy; high = Alt chords
+# survive slow SSH links (a split chord clears the filter instead). Default:
+# 25, which suits local terminals — raise it (e.g. 100) if Alt+letter
+# misfires over remote connections.
+# esc_delay=25
+
 # Word-wrap the note body in the preview pane: a line wider than the pane
 # continues on the next row, keeping its indentation. Off clips each line at
 # the pane edge instead (one source line per row). Default: true.

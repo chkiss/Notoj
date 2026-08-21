@@ -51,7 +51,7 @@ to import a Simplenote JSON export. Neither prompt appears again.
 
 | Path | Purpose |
 |---|---|
-| `~/.config/notoj/config` | `notes_dir` plus optional editor, display, color and key-remap settings: see [`config.example`](config.example) |
+| `~/.config/notoj/config` (or `$XDG_CONFIG_HOME/notoj/config`) | `notes_dir` plus optional editor, display, color and key-remap settings: see [`config.example`](config.example) |
 | `~/.config/notoj/omdb_key` | OMDb API key for `scripts/update_ratings.py` (or env `OMDB_API_KEY`) |
 | `NOTOJ_NOTES_DIR` (env) | Overrides the notes dir for the companion scripts |
 

@@ -35,7 +35,8 @@ def _load_key():
     if k:
         return k
     try:
-        with open(os.path.expanduser("~/.config/notoj/omdb_key")) as f:
+        with open(os.path.expanduser("~/.config/notoj/omdb_key"),
+                  encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return ""

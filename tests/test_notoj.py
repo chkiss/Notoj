@@ -71,6 +71,17 @@ def _keyname_stub(k):
         return bytes((k,))
     return str(k).encode("ascii")
 
+# Color-setup surface used by init_colors (benign defaults; the monochrome
+# tests override these per-test to inject failures).
+curses_stub.COLORS = 256
+curses_stub.start_color = lambda: None
+curses_stub.use_default_colors = lambda: None
+curses_stub.init_pair = lambda n, fg, bg: None
+for _i, _cname in enumerate(("COLOR_BLACK", "COLOR_RED", "COLOR_GREEN",
+                             "COLOR_YELLOW", "COLOR_BLUE", "COLOR_MAGENTA",
+                             "COLOR_CYAN", "COLOR_WHITE")):
+    setattr(curses_stub, _cname, _i)
+
 _here = os.path.dirname(os.path.abspath(__file__))
 _root = os.path.dirname(_here)
 _notoj_path = os.path.join(_root, "notoj")
@@ -4468,6 +4479,256 @@ class TestPageKeyFallbacks(unittest.TestCase):
         self._install()
         self.assertEqual(self.defined, {})
         self.assertEqual(notoj._EXTRA_PAGE_KEYS, {})
+
+
+class TestLaunchTermHandling(unittest.TestCase):
+    """A missing TERM gets a workable default; a terminal curses can't
+    initialize exits with a friendly message instead of a raw traceback."""
+
+    def setUp(self):
+        self._orig_wrapper = getattr(notoj.curses, "wrapper", None)
+        self.calls = []
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._orig_wrapper is None:
+            notoj.curses.__dict__.pop("wrapper", None)
+        else:
+            notoj.curses.wrapper = self._orig_wrapper
+
+    def _set_env(self, key, val):
+        saved = os.environ.get(key)
+        os.environ[key] = val
+        self.addCleanup(lambda: os.environ.pop(key, None)
+                        if saved is None else os.environ.__setitem__(key,
+                                                                     saved))
+
+    def test_unset_term_defaults_to_xterm_256color(self):
+        saved = os.environ.pop("TERM", None)
+        self.addCleanup(lambda: os.environ.pop("TERM", None)
+                        if saved is None
+                        else os.environ.__setitem__("TERM", saved))
+        notoj.curses.wrapper = (
+            lambda *a: self.calls.append(os.environ.get("TERM")))
+        notoj._launch_ui(lambda *a: None)
+        self.assertEqual(self.calls, ["xterm-256color"])
+
+    def test_existing_term_is_kept(self):
+        self._set_env("TERM", "screen-256color")
+        notoj.curses.wrapper = (
+            lambda *a: self.calls.append(os.environ.get("TERM")))
+        notoj._launch_ui(lambda *a: None)
+        self.assertEqual(self.calls, ["screen-256color"])
+
+    def test_unstartable_terminal_exits_2_with_a_message(self):
+        import io
+        import contextlib
+        self._set_env("TERM", "nosuchterm")
+        notoj.curses.wrapper = (
+            lambda *a: (_ for _ in ()).throw(
+                Exception("setupterm: could not find terminal")))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as cm:
+                notoj._launch_ui(lambda *a: None)
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("could not find terminal", err.getvalue())
+        self.assertIn("nosuchterm", err.getvalue())
+
+
+class TestCursSetTolerance(unittest.TestCase):
+    """Terminals without cursor-visibility support (vt100, some consoles)
+    raise from curs_set; the app must tolerate that everywhere."""
+
+    def setUp(self):
+        self._orig = getattr(notoj.curses, "curs_set", None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._orig is None:
+            notoj.curses.__dict__.pop("curs_set", None)
+        else:
+            notoj.curses.curs_set = self._orig
+
+    def test_error_is_swallowed(self):
+        def boom(v):
+            raise Exception("curs_set() returned ERR")
+        notoj.curses.curs_set = boom
+        notoj._curs_set(0)
+        notoj._curs_set(1)
+
+    def test_visibility_passes_through(self):
+        seen = []
+        notoj.curses.curs_set = seen.append
+        notoj._curs_set(2)
+        self.assertEqual(seen, [2])
+
+
+class TestInitColorsMonochrome(unittest.TestCase):
+    """init_colors degrades on terminals without color support instead of
+    dying mid-startup; the derived draw state is still built."""
+
+    def test_survives_start_color_failure(self):
+        orig = notoj.curses.start_color
+        def boom():
+            raise ValueError("setupterm: colors unsupported")
+        notoj.curses.start_color = boom
+        self.addCleanup(setattr, notoj.curses, "start_color", orig)
+        notoj.init_colors()
+        self.assertTrue(notoj._footer_band)
+
+    def test_survives_init_pair_failure(self):
+        orig = notoj.curses.init_pair
+        def boom(n, fg, bg=-1):
+            raise ValueError("Color number is greater than COLORS-1")
+        notoj.curses.init_pair = boom
+        self.addCleanup(setattr, notoj.curses, "init_pair", orig)
+        notoj.init_colors()
+        self.assertIsNotNone(notoj._date_gradient)
+
+
+class TestConfigPathXDG(unittest.TestCase):
+    """The config file honors $XDG_CONFIG_HOME, like the undo log honors
+    $XDG_STATE_HOME."""
+
+    def setUp(self):
+        self._cache = notoj._config_cache
+        self.addCleanup(setattr, notoj, "_config_cache", self._cache)
+
+    def _set_xdg(self, val):
+        saved = os.environ.get("XDG_CONFIG_HOME")
+        if val is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = val
+        self.addCleanup(lambda: os.environ.pop("XDG_CONFIG_HOME", None)
+                        if saved is None
+                        else os.environ.__setitem__("XDG_CONFIG_HOME", saved))
+
+    def test_xdg_config_home_wins(self):
+        self._set_xdg("/tmp/opencode/xdg")
+        self.assertEqual(notoj._config_file(),
+                         "/tmp/opencode/xdg/notoj/config")
+
+    def test_falls_back_to_dot_config(self):
+        self._set_xdg(None)
+        self.assertEqual(notoj._config_file(),
+                         os.path.join(os.path.expanduser("~"), ".config",
+                                      "notoj", "config"))
+
+    def test_read_config_picks_up_xdg_location(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="notoj-xdg-")
+        cfg_dir = os.path.join(root, "notoj")
+        os.makedirs(cfg_dir)
+        with open(os.path.join(cfg_dir, "config"), "w",
+                  encoding="utf-8") as f:
+            f.write("esc_delay = 60\n")
+        self._set_xdg(root)
+        notoj._config_cache = None
+        self.assertEqual(notoj.config_get("esc_delay"), "60")
+
+
+class TestEscDelayConfig(unittest.TestCase):
+    """The `esc_delay` knob controls set_escdelay — bare-ESC latency vs
+    Alt-chord reliability over slow links. Invalid values fall back to the
+    default; sane bounds are enforced."""
+
+    def setUp(self):
+        self.seen = []
+        self._orig_set = getattr(notoj.curses, "set_escdelay", None)
+        notoj.curses.set_escdelay = self.seen.append
+        self.addCleanup(self._restore)
+        self._cache = notoj._config_cache
+        self.addCleanup(setattr, notoj, "_config_cache", self._cache)
+
+    def _restore(self):
+        if self._orig_set is None:
+            notoj.curses.__dict__.pop("set_escdelay", None)
+        else:
+            notoj.curses.set_escdelay = self._orig_set
+
+    def _with_cfg(self, val):
+        notoj._config_cache = {} if val is None else {"esc_delay": val}
+
+    def test_default_is_25(self):
+        self._with_cfg(None)
+        notoj._setup_escdelay()
+        self.assertEqual(self.seen, [25])
+
+    def test_config_value_used(self):
+        self._with_cfg("60")
+        notoj._setup_escdelay()
+        self.assertEqual(self.seen, [60])
+
+    def test_invalid_value_falls_back_to_default(self):
+        self._with_cfg("abc")
+        notoj._setup_escdelay()
+        self.assertEqual(self.seen, [25])
+
+    def test_clamped_at_five_milliseconds(self):
+        self._with_cfg("0")
+        notoj._setup_escdelay()
+        self.assertEqual(self.seen, [5])
+
+    def test_clamped_at_two_seconds(self):
+        self._with_cfg("99999")
+        notoj._setup_escdelay()
+        self.assertEqual(self.seen, [2000])
+
+    def test_noop_without_set_escdelay_support(self):
+        del notoj.curses.set_escdelay
+        self._with_cfg("60")
+        notoj._setup_escdelay()          # must not raise
+
+
+class TestTitleSequence(unittest.TestCase):
+    """GNU screen ignores OSC 0 and wants its own ESC-k title sequence;
+    tmux relays OSC 0 to the outer terminal just fine."""
+
+    ENV_KEYS = ("TMUX", "STY", "TERM")
+
+    def _seq(self, **env):
+        saved = {k: os.environ.get(k) for k in self.ENV_KEYS}
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.addCleanup(restore)
+        for k in self.ENV_KEYS:
+            os.environ.pop(k, None)
+        os.environ.update(env)
+        return notoj._title_seq("nt")
+
+    def test_plain_terminal_gets_osc0(self):
+        self.assertEqual(self._seq(TERM="xterm-256color"), "\033]0;nt\007")
+
+    def test_screen_gets_its_native_sequence(self):
+        self.assertEqual(self._seq(TERM="screen-256color"),
+                         "\033knt\033\\")
+
+    def test_sty_implies_screen_even_on_an_xterm_term(self):
+        self.assertEqual(self._seq(TERM="xterm-256color", STY="1234.pts-0"),
+                         "\033knt\033\\")
+
+    def test_tmux_relays_osc0_even_over_a_screen_term(self):
+        self.assertEqual(self._seq(TERM="screen",
+                                   TMUX="/tmp/tmux-0/default,1,0"),
+                         "\033]0;nt\007")
+
+
+class TestFooterGlyphCoverage(unittest.TestCase):
+    """⮐ (U+2B90) has no glyph in common Linux mono fonts — it renders as
+    tofu in footers. ⏎ (U+23CE) is covered by DejaVu & friends."""
+
+    def test_source_has_no_enter_tofu_glyph(self):
+        with open(_notoj_path, encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("\u2b90", src)
+        self.assertIn("\u23ce", src)
 
 
 class TestMarkdownHeaderColor(unittest.TestCase):

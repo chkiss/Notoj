@@ -8,6 +8,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -314,6 +315,24 @@ class TestOmdbLookup(unittest.TestCase):
         with mock.patch.object(ur, "OMDB_KEY", "x"), \
              mock.patch.object(ur.urllib.request, "urlopen", _fake_urlopen(payload)):
             self.assertIsNone(ur.omdb_lookup("Nope", "movie"))
+
+
+class TestLoadKeyEncoding(unittest.TestCase):
+    """The OMDb key file is read as UTF-8 explicitly, not with whatever
+    encoding the ambient locale happens to pick."""
+
+    def test_reads_key_file_as_utf8(self):
+        root = tempfile.mkdtemp(prefix="notoj-omdb-")
+        cfg_dir = os.path.join(root, ".config", "notoj")
+        os.makedirs(cfg_dir)
+        key_path = os.path.join(cfg_dir, "omdb_key")
+        with open(key_path, "w", encoding="utf-8") as f:
+            f.write("kéy-123\n")
+        env = {"OMDB_API_KEY": ""}
+        with mock.patch.dict(os.environ, env):
+            with mock.patch.object(os.path, "expanduser",
+                                   return_value=key_path):
+                self.assertEqual(ur._load_key(), "kéy-123")
 
 
 if __name__ == "__main__":
