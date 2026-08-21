@@ -191,7 +191,8 @@ KEYMAP = [
         (None, "h / m / l", "jump to the top / middle / bottom of the visible page"),
         (None, "Ctrl-f/b", "page down / up"),
         (None, "Ctrl-d/u", "half-page down / up"),
-        (None, "PgDn/PgUp", "scroll preview pane"),
+        (None, "PgDn/PgUp", "scroll preview pane; Shift = half a page, "
+              "Ctrl or Alt = one line"),
         (None, "ESC", "step back (prompt → filter → view)"),
     ]),
     ("Notes", [
@@ -2672,11 +2673,10 @@ def modal_list(stdscr, view):
         # Scaffold preview scrolling: PgDn/PgUp page the preview pane (step
         # from the preview_scroll config), clamped to its content. Works
         # mid-search too — these keys fall through the EditBuffer above.
-        if not narrow and preview_lines and k in (curses.KEY_NPAGE,
-                                                  curses.KEY_PPAGE):
+        if not narrow and preview_lines and _is_page_key(k):
             total = preview_lines(st["sel"]) if count_f() else 0
-            step = preview_scroll_step(st["page_h"])
-            if k == curses.KEY_NPAGE:
+            step = _preview_scroll_step_for_key(k, st["page_h"])
+            if _page_key_dir(k) > 0:
                 st["p_off"] = min(st["p_off"] + step,
                                   max(0, total - st["page_h"]))
             else:
@@ -2789,7 +2789,7 @@ def hist_view(stdscr, n):
         "preview_lines": prev.count,
         "header": lambda w: f"history: {title(n)}",
         "footer": lambda: ("j/k select  / search  PgDn/PgUp scroll diff  "
-                           "⮐ vimdiff  q back"),
+                           "Shift=half  Ctrl/Alt=line  ⮐ vimdiff  q back"),
         "draw_row": draw_row,
         "draw_preview": draw_preview,
         "on_key": on_key,
@@ -5322,11 +5322,91 @@ def preview_scroll_step(page_h):
     """Lines PgDn/PgUp move a preview pane, from the `preview_scroll` config:
     "page" (default) scrolls a full pane height; a positive integer scrolls
     that many lines. One knob for every preview — notes body, history diff,
-    tag / backlink previews."""
+    tag / backlink previews.
+
+    Modifiers on the keypress scale the step down: Shift halves it (a smaller
+    interval), Ctrl or Alt makes it one line (linewise).  See
+    _preview_scroll_modifier for the detection and
+    preview_scroll_key / the modal_list scroll for the call sites."""
     v = (config_get("preview_scroll", "page") or "page").strip().lower()
     if v.isdigit() and int(v) > 0:
         return int(v)
     return max(1, page_h)
+
+
+def _preview_scroll_modifier(k):
+    """Return the scroll-step modifier for a page keypress, or None (plain).
+
+    Shift halves the step (a smaller interval), Ctrl or Alt makes it one line
+    (linewise).  Detected from the ncurses keyname so it works for both the
+    dedicated modifier keycodes (where ncurses defines them) and for terminals
+    that ship a modifier-prefixed name for the same base key.
+
+    A bare printable keyname is exactly one byte (the char itself), so it never
+    reads as a modifier prefix — the prefix plus at least one more byte is what
+    marks a modifier-prefixed special key (e.g. 'CNPAGE', 'SNEXT')."""
+    name = curses.keyname(k)
+    if not name or len(name) < 2:
+        return None
+    first = name[0:1].upper()
+    if first == b"S":
+        return "half"
+    if first in (b"M", b"A", b"C"):
+        return "linewise"
+    return None
+
+
+def _is_page_key(k):
+    """True for PgDn/PgUp and their Shift/Ctrl/Alt variants.
+
+    The plain keys are checked directly; modifier variants are recognised both
+    by their dedicated keycodes (where ncurses defines them) and by the
+    modifier-prefixed keyname they carry on terminals that don't."""
+    if k in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+        return True
+    name = curses.keyname(k)
+    if not name:
+        return False
+    name_u = name.upper()
+    first = name_u[0:1]
+    if first in (b"S", b"M", b"A", b"C"):
+        rest = name_u[1:]
+        return rest in (b"NPAGE", b"PPAGE", b"NEXT", b"PREVIOUS",
+                        b"NPAGES", b"PPAGES")
+    return False
+
+
+def _page_key_dir(k):
+    """+1 for a PgDn-family key, -1 for a PgUp-family key, 0 otherwise."""
+    if k == curses.KEY_NPAGE:
+        return 1
+    if k == curses.KEY_PPAGE:
+        return -1
+    name = curses.keyname(k)
+    if not name:
+        return 0
+    name_u = name.upper()
+    first = name_u[0:1]
+    if first in (b"S", b"M", b"A", b"C"):
+        rest = name_u[1:]
+        if rest in (b"NPAGE", b"NEXT", b"NPAGES"):
+            return 1
+        if rest in (b"PPAGE", b"PREVIOUS", b"PPAGES"):
+            return -1
+    return 0
+
+
+def _preview_scroll_step_for_key(k, page_h):
+    """The actual line step for a PgDn/PgUp keypress after applying any
+    modifier.  Plain -> the configured step; Shift -> half (min 1); Ctrl/Alt
+    -> 1 (linewise)."""
+    base = preview_scroll_step(page_h)
+    mod = _preview_scroll_modifier(k)
+    if mod == "half":
+        return max(1, base // 2)
+    if mod == "linewise":
+        return 1
+    return base
 
 
 def preview_max_scroll(note, state, w, h):
@@ -5345,16 +5425,21 @@ def preview_max_scroll(note, state, w, h):
 
 def preview_scroll_key(k, state, note, w, h):
     """Apply a PgDn/PgUp keypress to state["p_scroll"], clamped to the note.
-    True if the key was a page key and was consumed."""
-    if k == curses.KEY_NPAGE:
+    True if the key was a page key (plain or with Shift/Ctrl/Alt) and was
+    consumed.  Modifiers scale the step: Shift halves it, Ctrl or Alt makes it
+    one line (linewise)."""
+    if not _is_page_key(k):
+        return False
+    d = _page_key_dir(k)
+    if d == 0:
+        return False
+    step = _preview_scroll_step_for_key(k, h - 2)
+    if d > 0:
         state["p_scroll"] = min(preview_max_scroll(note, state, w, h),
-                                state["p_scroll"] + preview_scroll_step(h - 2))
+                                state["p_scroll"] + step)
         return True
-    if k == curses.KEY_PPAGE:
-        state["p_scroll"] = max(0, state["p_scroll"]
-                                - preview_scroll_step(h - 2))
-        return True
-    return False
+    state["p_scroll"] = max(0, state["p_scroll"] - step)
+    return True
 
 
 # One navigable search hit. `row`/`ord` place it on screen — the ordinal is

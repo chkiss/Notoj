@@ -35,7 +35,41 @@ for _i, _attr in enumerate(("A_NORMAL", "A_BOLD", "A_UNDERLINE", "A_REVERSE",
                             "A_DIM", "A_ITALIC")):
     setattr(curses_stub, _attr, 1 << _i)
 curses_stub.color_pair = lambda n: n << 8   # distinct int per pair, for | attrs
+curses_stub.keyname = lambda k: _keyname_stub(k)
+curses_stub.KEY_SNEXT = 396
+curses_stub.KEY_SPREVIOUS = 398
+# Synthetic keycodes whose stub keyname carries a Ctrl/Alt modifier prefix,
+# so the modifier-detection paths can be covered headlessly (ncurses has no
+# dedicated Ctrl/Alt-PageUp/Down constants in practice).
+curses_stub.KEY_CNPAGE = 400               # Ctrl+Next/PgDn
+curses_stub.KEY_CPPAGE = 401               # Ctrl+Prev/PgUp
+curses_stub.KEY_ANPAGE = 402               # Alt+Next/PgDn
+curses_stub.KEY_APPAGE = 403               # Alt+Prev/PgUp
 sys.modules.setdefault("curses", curses_stub)
+
+
+def _keyname_stub(k):
+    """Return a bytes keyname for the stub's special keys, for tests that
+    inspect the modifier (Shift/Ctrl/Alt) on page keys."""
+    if k == curses_stub.KEY_NPAGE:
+        return b"NPAGE"
+    if k == curses_stub.KEY_PPAGE:
+        return b"PPAGE"
+    if k == curses_stub.KEY_SNEXT:
+        return b"SNEXT"
+    if k == curses_stub.KEY_SPREVIOUS:
+        return b"SPREVIOUS"
+    if k == curses_stub.KEY_CNPAGE:
+        return b"CNPAGE"
+    if k == curses_stub.KEY_CPPAGE:
+        return b"CPPAGE"
+    if k == curses_stub.KEY_ANPAGE:
+        return b"ANPAGE"
+    if k == curses_stub.KEY_APPAGE:
+        return b"APPAGE"
+    if 32 < k < 127:                      # printable ASCII
+        return bytes((k,))
+    return str(k).encode("ascii")
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _root = os.path.dirname(_here)
@@ -4265,6 +4299,103 @@ class TestPreviewGeometry(unittest.TestCase):
 
     def test_list_panel_capped(self):
         self.assertLessEqual(notoj.preview_geometry(400)[1], notoj.LIST_MAX_W)
+
+
+class TestPreviewScrollModifiers(unittest.TestCase):
+    """PgDn/PgUp behave as before; Shift halves the step, Ctrl or Alt makes it
+    one line (linewise).  Detection is pure keyname inspection, covered with
+    the stub's keyname implementation."""
+
+    PLAIN   = curses_stub.KEY_NPAGE          # 338
+    REVERSE = curses_stub.KEY_PPAGE          # 339
+    SHIFT   = curses_stub.KEY_SNEXT          # 396  (Shift+Next/PgDn)
+    SHIFT_R = curses_stub.KEY_SPREVIOUS     # 398  (Shift+Prev/PgUp)
+
+    def _page_h(self):
+        return 20
+
+    # ---- plain keys: unchanged behaviour ----
+
+    def test_plain_pgdn_steps_a_full_page(self):
+        self.assertEqual(notoj._preview_scroll_step_for_key(
+            self.PLAIN, self._page_h()), self._page_h())
+
+    def test_plain_pgup_steps_back_a_full_page(self):
+        self.assertEqual(notoj._preview_scroll_step_for_key(
+            self.REVERSE, self._page_h()), self._page_h())
+
+    # ---- shift: half the step, minimum 1 ----
+
+    def test_shift_pgdn_halves_an_even_page(self):
+        self.assertEqual(notoj._preview_scroll_step_for_key(
+            self.SHIFT, 20), 10)
+
+    def test_shift_pgup_halves_an_even_page(self):
+        self.assertEqual(notoj._preview_scroll_step_for_key(
+            self.SHIFT_R, 20), 10)
+
+    def test_shift_halves_an_odd_page(self):
+        self.assertEqual(notoj._preview_scroll_step_for_key(
+            self.SHIFT, 15), 7)
+
+    def test_shift_mins_out_at_one_for_a_short_page(self):
+        self.assertEqual(notoj._preview_scroll_step_for_key(
+            self.SHIFT, 1), 1)
+
+    def test_shift_on_a_two_line_page_is_one(self):
+        self.assertEqual(notoj._preview_scroll_step_for_key(
+            self.SHIFT, 2), 1)
+
+    # ---- _preview_scroll_modifier ----
+
+    def test_modifier_returns_none_for_the_plain_page_key(self):
+        self.assertIsNone(notoj._preview_scroll_modifier(self.PLAIN))
+
+    def test_modifier_returns_half_for_shift_page(self):
+        self.assertEqual(notoj._preview_scroll_modifier(self.SHIFT), "half")
+
+    def test_modifier_returns_half_for_shift_prev(self):
+        self.assertEqual(notoj._preview_scroll_modifier(self.SHIFT_R), "half")
+
+    def test_modifier_returns_none_for_a_printable_char(self):
+        self.assertIsNone(notoj._preview_scroll_modifier(ord("a")))
+
+    # ---- _is_page_key ----
+
+    def test_is_page_key_plain_pgdn(self):
+        self.assertTrue(notoj._is_page_key(self.PLAIN))
+
+    def test_is_page_key_plain_pgup(self):
+        self.assertTrue(notoj._is_page_key(self.REVERSE))
+
+    def test_is_page_key_shift_pgdn(self):
+        self.assertTrue(notoj._is_page_key(self.SHIFT))
+
+    def test_is_page_key_shift_pgup(self):
+        self.assertTrue(notoj._is_page_key(self.SHIFT_R))
+
+    def test_is_page_key_false_for_nav_keys(self):
+        for k in (curses_stub.KEY_DOWN, curses_stub.KEY_UP,
+                  curses_stub.KEY_HOME, ord("j"), ord("k")):
+            self.assertFalse(notoj._is_page_key(k),
+                             f"{k} should not be a page key")
+
+    # ---- _page_key_dir ----
+
+    def test_dir_pgdn_is_positive(self):
+        self.assertEqual(notoj._page_key_dir(self.PLAIN), 1)
+
+    def test_dir_pgup_is_negative(self):
+        self.assertEqual(notoj._page_key_dir(self.REVERSE), -1)
+
+    def test_dir_shift_pgdn_is_positive(self):
+        self.assertEqual(notoj._page_key_dir(self.SHIFT), 1)
+
+    def test_dir_shift_pgup_is_negative(self):
+        self.assertEqual(notoj._page_key_dir(self.SHIFT_R), -1)
+
+    def test_dir_zero_for_non_page(self):
+        self.assertEqual(notoj._page_key_dir(ord("j")), 0)
 
 
 class TestMarkdownHeaderColor(unittest.TestCase):
