@@ -38,35 +38,35 @@ curses_stub.color_pair = lambda n: n << 8   # distinct int per pair, for | attrs
 curses_stub.keyname = lambda k: _keyname_stub(k)
 curses_stub.KEY_SNEXT = 396
 curses_stub.KEY_SPREVIOUS = 398
-# Synthetic keycodes whose stub keyname carries a Ctrl/Alt modifier prefix,
-# so the modifier-detection paths can be covered headlessly (ncurses has no
-# dedicated Ctrl/Alt-PageUp/Down constants in practice).
-curses_stub.KEY_CNPAGE = 400               # Ctrl+Next/PgDn
-curses_stub.KEY_CPPAGE = 401               # Ctrl+Prev/PgUp
-curses_stub.KEY_ANPAGE = 402               # Alt+Next/PgDn
-curses_stub.KEY_APPAGE = 403               # Alt+Prev/PgUp
+# Extended terminfo capability keys: ncurses assigns their keycodes
+# dynamically (they differ per TERM), so tests pick arbitrary codes and rely
+# on the keyname, exactly as the app does. Names mirror what real ncurses
+# reports on xterm-256color / tmux-256color for the modifier chords.
+curses_stub.KEY_KNXT = 548                 # Shift+PgDn via extended cap
+curses_stub.KEY_KNXT3 = 549                # Alt+Next/PgDn
+curses_stub.KEY_KNXT5 = 551                # Ctrl+Next/PgDn
+curses_stub.KEY_KPRV3 = 554                # Alt+Prev/PgUp
+curses_stub.KEY_KPRV5 = 556                # Ctrl+Prev/PgUp
 sys.modules.setdefault("curses", curses_stub)
 
 
 def _keyname_stub(k):
-    """Return a bytes keyname for the stub's special keys, for tests that
-    inspect the modifier (Shift/Ctrl/Alt) on page keys."""
-    if k == curses_stub.KEY_NPAGE:
-        return b"NPAGE"
-    if k == curses_stub.KEY_PPAGE:
-        return b"PPAGE"
-    if k == curses_stub.KEY_SNEXT:
-        return b"SNEXT"
-    if k == curses_stub.KEY_SPREVIOUS:
-        return b"SPREVIOUS"
-    if k == curses_stub.KEY_CNPAGE:
-        return b"CNPAGE"
-    if k == curses_stub.KEY_CPPAGE:
-        return b"CPPAGE"
-    if k == curses_stub.KEY_ANPAGE:
-        return b"ANPAGE"
-    if k == curses_stub.KEY_APPAGE:
-        return b"APPAGE"
+    """bytes keyname mirroring real ncurses: standard keys carry the KEY_
+    prefix, extended terminfo capabilities use their cap name (b'kNXT3'),
+    printables are the single byte itself."""
+    names = {
+        curses_stub.KEY_NPAGE: b"KEY_NPAGE",
+        curses_stub.KEY_PPAGE: b"KEY_PPAGE",
+        curses_stub.KEY_SNEXT: b"KEY_SNEXT",
+        curses_stub.KEY_SPREVIOUS: b"KEY_SPREVIOUS",
+        curses_stub.KEY_KNXT: b"kNXT",
+        curses_stub.KEY_KNXT3: b"kNXT3",
+        curses_stub.KEY_KNXT5: b"kNXT5",
+        curses_stub.KEY_KPRV3: b"kPRV3",
+        curses_stub.KEY_KPRV5: b"kPRV5",
+    }
+    if k in names:
+        return names[k]
     if 32 < k < 127:                      # printable ASCII
         return bytes((k,))
     return str(k).encode("ascii")
@@ -4303,13 +4303,19 @@ class TestPreviewGeometry(unittest.TestCase):
 
 class TestPreviewScrollModifiers(unittest.TestCase):
     """PgDn/PgUp behave as before; Shift halves the step, Ctrl or Alt makes it
-    one line (linewise).  Detection is pure keyname inspection, covered with
-    the stub's keyname implementation."""
+    one line (linewise).  Detection mirrors what real ncurses delivers: the
+    KEY_-prefixed standard names and the extended terminfo cap names
+    (b'kNXT3' = Alt+PgDn on xterm-256color / tmux-256color), whose keycodes
+    are assigned dynamically per TERM."""
 
-    PLAIN   = curses_stub.KEY_NPAGE          # 338
-    REVERSE = curses_stub.KEY_PPAGE          # 339
-    SHIFT   = curses_stub.KEY_SNEXT          # 396  (Shift+Next/PgDn)
-    SHIFT_R = curses_stub.KEY_SPREVIOUS     # 398  (Shift+Prev/PgUp)
+    PLAIN     = curses_stub.KEY_NPAGE          # 338
+    REVERSE   = curses_stub.KEY_PPAGE          # 339
+    SHIFT     = curses_stub.KEY_SNEXT          # 396  (Shift+Next/PgDn)
+    SHIFT_R   = curses_stub.KEY_SPREVIOUS      # 398  (Shift+Prev/PgUp)
+    ALT       = curses_stub.KEY_KNXT3          # b'kNXT3'
+    ALT_R     = curses_stub.KEY_KPRV3          # b'kPRV3'
+    CTRL      = curses_stub.KEY_KNXT5          # b'kNXT5'
+    SHIFT_EXT = curses_stub.KEY_KNXT           # bare kNXT = modifier 2 (Shift)
 
     def _page_h(self):
         return 20
@@ -4317,85 +4323,151 @@ class TestPreviewScrollModifiers(unittest.TestCase):
     # ---- plain keys: unchanged behaviour ----
 
     def test_plain_pgdn_steps_a_full_page(self):
-        self.assertEqual(notoj._preview_scroll_step_for_key(
-            self.PLAIN, self._page_h()), self._page_h())
+        self.assertEqual(notoj._preview_scroll_step(None, self._page_h()),
+                         self._page_h())
 
     def test_plain_pgup_steps_back_a_full_page(self):
-        self.assertEqual(notoj._preview_scroll_step_for_key(
-            self.REVERSE, self._page_h()), self._page_h())
+        self.assertEqual(notoj._preview_scroll_step(None, self._page_h()),
+                         self._page_h())
 
     # ---- shift: half the step, minimum 1 ----
 
     def test_shift_pgdn_halves_an_even_page(self):
-        self.assertEqual(notoj._preview_scroll_step_for_key(
-            self.SHIFT, 20), 10)
+        self.assertEqual(notoj._preview_scroll_step("half", 20), 10)
 
     def test_shift_pgup_halves_an_even_page(self):
-        self.assertEqual(notoj._preview_scroll_step_for_key(
-            self.SHIFT_R, 20), 10)
+        d, mod = notoj._page_key_info(self.SHIFT_R)
+        self.assertEqual((d, mod), (-1, "half"))
+        self.assertEqual(notoj._preview_scroll_step(mod, 20), 10)
 
     def test_shift_halves_an_odd_page(self):
-        self.assertEqual(notoj._preview_scroll_step_for_key(
-            self.SHIFT, 15), 7)
+        self.assertEqual(notoj._preview_scroll_step("half", 15), 7)
 
     def test_shift_mins_out_at_one_for_a_short_page(self):
-        self.assertEqual(notoj._preview_scroll_step_for_key(
-            self.SHIFT, 1), 1)
+        self.assertEqual(notoj._preview_scroll_step("half", 1), 1)
 
     def test_shift_on_a_two_line_page_is_one(self):
-        self.assertEqual(notoj._preview_scroll_step_for_key(
-            self.SHIFT, 2), 1)
+        self.assertEqual(notoj._preview_scroll_step("half", 2), 1)
 
-    # ---- _preview_scroll_modifier ----
+    # ---- _page_key_info: classification of every real delivery form ----
 
-    def test_modifier_returns_none_for_the_plain_page_key(self):
-        self.assertIsNone(notoj._preview_scroll_modifier(self.PLAIN))
+    def test_info_plain_pgdn(self):
+        self.assertEqual(notoj._page_key_info(self.PLAIN), (1, None))
 
-    def test_modifier_returns_half_for_shift_page(self):
-        self.assertEqual(notoj._preview_scroll_modifier(self.SHIFT), "half")
+    def test_info_plain_pgup(self):
+        self.assertEqual(notoj._page_key_info(self.REVERSE), (-1, None))
 
-    def test_modifier_returns_half_for_shift_prev(self):
-        self.assertEqual(notoj._preview_scroll_modifier(self.SHIFT_R), "half")
+    def test_info_shift_pgdn_via_standard_keycode(self):
+        self.assertEqual(notoj._page_key_info(self.SHIFT), (1, "half"))
 
-    def test_modifier_returns_none_for_a_printable_char(self):
-        self.assertIsNone(notoj._preview_scroll_modifier(ord("a")))
+    def test_info_shift_pgup_via_standard_keycode(self):
+        self.assertEqual(notoj._page_key_info(self.SHIFT_R), (-1, "half"))
 
-    # ---- _is_page_key ----
+    def test_info_alt_pgdn_is_linewise_down(self):
+        self.assertEqual(notoj._page_key_info(self.ALT), (1, "linewise"))
 
-    def test_is_page_key_plain_pgdn(self):
-        self.assertTrue(notoj._is_page_key(self.PLAIN))
+    def test_info_alt_pgup_is_linewise_up(self):
+        self.assertEqual(notoj._page_key_info(self.ALT_R), (-1, "linewise"))
 
-    def test_is_page_key_plain_pgup(self):
-        self.assertTrue(notoj._is_page_key(self.REVERSE))
+    def test_info_ctrl_pgdn_is_linewise_down(self):
+        self.assertEqual(notoj._page_key_info(self.CTRL), (1, "linewise"))
 
-    def test_is_page_key_shift_pgdn(self):
-        self.assertTrue(notoj._is_page_key(self.SHIFT))
+    def test_info_bare_extended_cap_is_shift_half(self):
+        self.assertEqual(notoj._page_key_info(self.SHIFT_EXT), (1, "half"))
 
-    def test_is_page_key_shift_pgup(self):
-        self.assertTrue(notoj._is_page_key(self.SHIFT_R))
+    def test_info_zero_for_a_printable_char(self):
+        self.assertEqual(notoj._page_key_info(ord("a")), (0, None))
 
-    def test_is_page_key_false_for_nav_keys(self):
+    def test_info_zero_for_nav_keys(self):
         for k in (curses_stub.KEY_DOWN, curses_stub.KEY_UP,
                   curses_stub.KEY_HOME, ord("j"), ord("k")):
-            self.assertFalse(notoj._is_page_key(k),
+            self.assertEqual(notoj._page_key_info(k), (0, None),
                              f"{k} should not be a page key")
 
-    # ---- _page_key_dir ----
+    def test_info_zero_for_an_unnamed_number_key(self):
+        # getch can hand back raw numbers with no special name at all.
+        self.assertEqual(notoj._page_key_info(999), (0, None))
 
-    def test_dir_pgdn_is_positive(self):
-        self.assertEqual(notoj._page_key_dir(self.PLAIN), 1)
+    # ---- preview_scroll_key consumes modifier chords without touching the
+    # note when it declines them ----
 
-    def test_dir_pgup_is_negative(self):
-        self.assertEqual(notoj._page_key_dir(self.REVERSE), -1)
+    def test_preview_scroll_key_ignores_non_page_keys(self):
+        self.assertFalse(notoj.preview_scroll_key(ord("j"), {}, None, 80, 24))
+        self.assertFalse(notoj.preview_scroll_key(self.ALT + 1000, {}, None,
+                                                  80, 24))
 
-    def test_dir_shift_pgdn_is_positive(self):
-        self.assertEqual(notoj._page_key_dir(self.SHIFT), 1)
 
-    def test_dir_shift_pgup_is_negative(self):
-        self.assertEqual(notoj._page_key_dir(self.SHIFT_R), -1)
+class TestPageKeyFallbacks(unittest.TestCase):
+    """TERMs whose terminfo lacks the extended caps (screen*, linux console,
+    putty) get the xterm-style chord sequences bound to synthetic keycodes at
+    startup (via a ctypes define_key), classified through _EXTRA_PAGE_KEYS."""
 
-    def test_dir_zero_for_non_page(self):
-        self.assertEqual(notoj._page_key_dir(ord("j")), 0)
+    def setUp(self):
+        self.caps = {}          # cap -> bytes it "resolves" to, if any
+        self.defined = {}       # seq -> keycode the binder was called with
+        self.rc = 0             # binder return code (0 = OK)
+        self._orig_tigetstr = getattr(curses_stub, "tigetstr", None)
+        self._orig_binder = notoj._page_key_binder
+        curses_stub.tigetstr = lambda cap: self.caps.get(cap)
+
+        def fake_binder():
+            def bind(seq, code):
+                if self.rc == 0:
+                    self.defined[seq] = code
+                return self.rc
+            return bind
+        notoj._page_key_binder = fake_binder
+        notoj._EXTRA_PAGE_KEYS.clear()
+        self.addCleanup(notoj._EXTRA_PAGE_KEYS.clear)
+        self.addCleanup(setattr, notoj, "_page_key_binder", self._orig_binder)
+
+    def tearDown(self):
+        if self._orig_tigetstr is None:
+            curses_stub.__dict__.pop("tigetstr", None)
+        else:
+            setattr(curses_stub, "tigetstr", self._orig_tigetstr)
+
+    def _install(self):
+        notoj._install_page_key_fallbacks()
+
+    def test_missing_caps_bind_all_six_chords(self):
+        self._install()
+        self.assertEqual(len(self.defined), 6)
+        self.assertEqual(len(notoj._EXTRA_PAGE_KEYS), 6)
+        for seq in (b"\x1b[6;2~", b"\x1b[5;2~", b"\x1b[6;3~",
+                    b"\x1b[5;3~", b"\x1b[6;5~", b"\x1b[5;5~"):
+            self.assertIn(seq, self.defined)
+
+    def test_bound_codes_classify_through_the_table(self):
+        self._install()
+        by_dir_mod = {}
+        for code, (d, mod) in notoj._EXTRA_PAGE_KEYS.items():
+            by_dir_mod[(d, mod)] = code
+        self.assertEqual(notoj._page_key_info(by_dir_mod[(1, "linewise")]),
+                         (1, "linewise"))
+        self.assertEqual(notoj._page_key_info(by_dir_mod[(-1, "linewise")]),
+                         (-1, "linewise"))
+        self.assertEqual(notoj._page_key_info(by_dir_mod[(1, "half")]),
+                         (1, "half"))
+
+    def test_caps_present_in_terminfo_are_not_rebound(self):
+        self.caps = {"kNXT3": b"\x1b[6;3~", "kPRV3": b"\x1b[5;3~"}
+        self._install()
+        self.assertNotIn(b"\x1b[6;3~", self.defined)
+        self.assertNotIn(b"\x1b[5;3~", self.defined)
+        self.assertEqual(len(self.defined), 4)
+
+    def test_failed_bind_is_skipped(self):
+        self.rc = -1             # ERR
+        self._install()
+        self.assertEqual(self.defined, {})
+        self.assertEqual(notoj._EXTRA_PAGE_KEYS, {})
+
+    def test_noop_without_a_binder(self):
+        notoj._page_key_binder = lambda: None
+        self._install()
+        self.assertEqual(self.defined, {})
+        self.assertEqual(notoj._EXTRA_PAGE_KEYS, {})
 
 
 class TestMarkdownHeaderColor(unittest.TestCase):

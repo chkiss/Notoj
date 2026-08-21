@@ -72,7 +72,7 @@ take `true/false/yes/no/on/off/1/0`. The main options:
 | `preview_tags` | `always` | Show a `#tag` row atop the preview when the search matched a tag: `always`, `narrow` (only when the list's tags column is hidden), `never` |
 | `tab_in_search_in_tag_view` | `tags` | In a tag-filter view, whether Tab cycles `tags` or search `terms` (the other takes Shift-Tab) |
 | `vim_search_scope` | `term` | With a term singled out, hand Vim just that `term` or the whole `query` (positioning by the term either way) |
-|| `preview_scroll` | `page` | Lines PgDn/PgUp scroll any preview pane: `page` (full pane height), or a line count; **Shift** halves the step (a smaller interval), **Ctrl** or **Alt** makes it one line (linewise) |
+| `preview_scroll` | `page` | Lines PgDn/PgUp scroll any preview pane: `page` (full pane height), or a line count; **Shift** halves the step (a smaller interval), **Ctrl** or **Alt** makes it one line (linewise) |
 | `list_max_w` | `80` | Max width of the left list panel; extra width goes to the preview |
 | `tag_display_order` | `freq` | Tag order for display: `freq`, `freq_asc`, `name`, `stored` |
 | `undo.persist` | `true` | Keep the undo history across sessions |

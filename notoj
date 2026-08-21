@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import atexit
 import collections
+import ctypes
 import calendar
 import curses
 import fcntl
@@ -2673,15 +2674,17 @@ def modal_list(stdscr, view):
         # Scaffold preview scrolling: PgDn/PgUp page the preview pane (step
         # from the preview_scroll config), clamped to its content. Works
         # mid-search too — these keys fall through the EditBuffer above.
-        if not narrow and preview_lines and _is_page_key(k):
-            total = preview_lines(st["sel"]) if count_f() else 0
-            step = _preview_scroll_step_for_key(k, st["page_h"])
-            if _page_key_dir(k) > 0:
-                st["p_off"] = min(st["p_off"] + step,
-                                  max(0, total - st["page_h"]))
-            else:
-                st["p_off"] = max(0, st["p_off"] - step)
-            continue
+        if not narrow and preview_lines:
+            d, mod = _page_key_info(k)
+            if d:
+                total = preview_lines(st["sel"]) if count_f() else 0
+                step = _preview_scroll_step(mod, st["page_h"])
+                if d > 0:
+                    st["p_off"] = min(st["p_off"] + step,
+                                      max(0, total - st["page_h"]))
+                else:
+                    st["p_off"] = max(0, st["p_off"] - step)
+                continue
 
         # While the "/" filter is open, j/k/G/g/h/m/l are letters (the
         # EditBuffer consumed them above if printable); only non-typable nav
@@ -5325,83 +5328,139 @@ def preview_scroll_step(page_h):
     tag / backlink previews.
 
     Modifiers on the keypress scale the step down: Shift halves it (a smaller
-    interval), Ctrl or Alt makes it one line (linewise).  See
-    _preview_scroll_modifier for the detection and
-    preview_scroll_key / the modal_list scroll for the call sites."""
+    interval), Ctrl or Alt makes it one line (linewise).  See _page_key_info
+    for the detection and preview_scroll_key / the modal_list scroll for the
+    call sites."""
     v = (config_get("preview_scroll", "page") or "page").strip().lower()
     if v.isdigit() and int(v) > 0:
         return int(v)
     return max(1, page_h)
 
 
-def _preview_scroll_modifier(k):
-    """Return the scroll-step modifier for a page keypress, or None (plain).
+# Synthetic keycodes for modifier chords the running terminfo doesn't describe
+# (screen*, linux console, putty, ...): _install_page_key_fallbacks binds the
+# xterm-style byte sequences to codes here, and _page_key_info classifies from
+# this table. ncurses allocates its own dynamic keycodes sequentially just
+# above KEY_MAX (511) and real-world counts stay far below 2000, so these
+# never collide.
+_EXTRA_PAGE_KEYS = {}
 
-    Shift halves the step (a smaller interval), Ctrl or Alt makes it one line
-    (linewise).  Detected from the ncurses keyname so it works for both the
-    dedicated modifier keycodes (where ncurses defines them) and for terminals
-    that ship a modifier-prefixed name for the same base key.
 
-    A bare printable keyname is exactly one byte (the char itself), so it never
-    reads as a modifier prefix — the prefix plus at least one more byte is what
-    marks a modifier-prefixed special key (e.g. 'CNPAGE', 'SNEXT')."""
-    name = curses.keyname(k)
-    if not name or len(name) < 2:
-        return None
-    first = name[0:1].upper()
-    if first == b"S":
-        return "half"
-    if first in (b"M", b"A", b"C"):
-        return "linewise"
+def _page_key_binder():
+    """A define_key(seq, code) callable operating on the ncurses instance the
+    curses module is using, or None if it can't be reached.
+
+    CPython's curses module has never exposed ncurses' define_key(), so this
+    goes through ctypes — loading the very libncurses* mapped into this
+    process (found via /proc/self/maps), which shares the parser state the
+    running session reads getch() from. Any failure returns None and the
+    caller simply skips the fallback."""
+    try:
+        with open("/proc/self/maps", "r", encoding="utf-8") as f:
+            for line in f:
+                if "libncurses" not in line:
+                    continue
+                path = line.split()[-1]
+                if not path.startswith("/"):
+                    continue
+                lib = ctypes.CDLL(path)
+                fn = getattr(lib, "define_key", None)
+                if fn is not None:
+                    fn.argtypes = [ctypes.c_char_p, ctypes.c_int]
+                    fn.restype = ctypes.c_int
+                    return fn
+    except (OSError, ValueError):
+        pass
     return None
 
 
-def _is_page_key(k):
-    """True for PgDn/PgUp and their Shift/Ctrl/Alt variants.
+def _install_page_key_fallbacks():
+    """Bind xterm-style modifier chords for TERMs whose terminfo lacks them.
 
-    The plain keys are checked directly; modifier variants are recognised both
-    by their dedicated keycodes (where ncurses defines them) and by the
-    modifier-prefixed keyname they carry on terminals that don't."""
-    if k in (curses.KEY_NPAGE, curses.KEY_PPAGE):
-        return True
-    name = curses.keyname(k)
-    if not name:
-        return False
-    name_u = name.upper()
-    first = name_u[0:1]
-    if first in (b"S", b"M", b"A", b"C"):
-        rest = name_u[1:]
-        return rest in (b"NPAGE", b"PPAGE", b"NEXT", b"PREVIOUS",
-                        b"NPAGES", b"PPAGES")
-    return False
+    Most emulators still SEND \\E[6;3~ etc. for Alt+PgDn even when TERM is
+    screen-256color or another entry without the extended caps — without this
+    shim those chords reach the app as raw bytes and the leading ESC fires
+    "step back" (clearing a search, leaving a view). Only caps missing from
+    terminfo are bound, so entries that already define kNXT3 & co. are left
+    untouched. Called once after curses setup; no-op where the binder or
+    tigetstr is unavailable."""
+    tigetstr = getattr(curses, "tigetstr", None)
+    binder = _page_key_binder()
+    if tigetstr is None or binder is None:
+        return
+    chords = (
+        ("kNXT",  b"\x1b[6;2~", 1, "half"),      # Shift+PgDn
+        ("kPRV",  b"\x1b[5;2~", -1, "half"),     # Shift+PgUp
+        ("kNXT3", b"\x1b[6;3~", 1, "linewise"),  # Alt+PgDn
+        ("kPRV3", b"\x1b[5;3~", -1, "linewise"), # Alt+PgUp
+        ("kNXT5", b"\x1b[6;5~", 1, "linewise"),  # Ctrl+PgDn
+        ("kPRV5", b"\x1b[5;5~", -1, "linewise"), # Ctrl+PgUp
+    )
+    code = 2000
+    for cap, seq, d, mod in chords:
+        try:
+            if tigetstr(cap):
+                continue          # terminfo already parses this chord
+            if binder(seq, code) != 0:
+                continue          # bind failed; leave the key unbound
+            _EXTRA_PAGE_KEYS[code] = (d, mod)
+        except (curses.error, OSError):
+            pass
+        code += 1
 
 
-def _page_key_dir(k):
-    """+1 for a PgDn-family key, -1 for a PgUp-family key, 0 otherwise."""
+def _page_key_info(k):
+    """Classify a PgDn/PgUp-family keypress as (dir, mod).
+
+    dir is +1 (PgDn family), -1 (PgUp family) or 0 (not a page key); mod is
+    None (plain), "half" (Shift involved) or "linewise" (Ctrl or Alt
+    involved).  Plain keys are checked by keycode; modifier variants arrive
+    under different keycodes per terminal, so they are identified from the
+    ncurses keyname: the standard Shift names (KEY_SNEXT / KEY_SPREVIOUS) and
+    the extended terminfo capabilities kNXT / kPRV with an optional xterm
+    modifier digit (2=Shift 3=Alt 4=Shift+Alt 5=Ctrl 6=Shift+Ctrl 7=Ctrl+Alt)
+    — e.g. Alt+PgDn on xterm-256color arrives as keyname b"kNXT3".  Keycodes
+    for the extended caps are assigned dynamically, so the name is the only
+    stable handle; codes bound by _install_page_key_fallbacks are classified
+    from _EXTRA_PAGE_KEYS."""
+    if k in _EXTRA_PAGE_KEYS:
+        return _EXTRA_PAGE_KEYS[k]
     if k == curses.KEY_NPAGE:
-        return 1
+        return (1, None)
     if k == curses.KEY_PPAGE:
-        return -1
-    name = curses.keyname(k)
+        return (-1, None)
+    snext = getattr(curses, "KEY_SNEXT", None)
+    if snext is not None and k == snext:
+        return (1, "half")
+    sprev = getattr(curses, "KEY_SPREVIOUS", None)
+    if sprev is not None and k == sprev:
+        return (-1, "half")
+    try:
+        name = curses.keyname(k)
+    except curses.error:
+        return (0, None)
     if not name:
-        return 0
-    name_u = name.upper()
-    first = name_u[0:1]
-    if first in (b"S", b"M", b"A", b"C"):
-        rest = name_u[1:]
-        if rest in (b"NPAGE", b"NEXT", b"NPAGES"):
-            return 1
-        if rest in (b"PPAGE", b"PREVIOUS", b"PPAGES"):
-            return -1
-    return 0
+        return (0, None)
+    n = name.upper()
+    if n.startswith(b"KEY_"):
+        n = n[4:]
+    if n == b"SNEXT":
+        return (1, "half")
+    if n == b"SPREVIOUS":
+        return (-1, "half")
+    m = re.fullmatch(rb"K(NXT|PRV)([2-9])?", n)
+    if m:
+        # Bare kNXT/kPRV is modifier 2 (Shift); any Ctrl/Alt in the mix wins.
+        mod = "half" if m.group(2) in (None, b"2") else "linewise"
+        return (1 if m.group(1) == b"NXT" else -1, mod)
+    return (0, None)
 
 
-def _preview_scroll_step_for_key(k, page_h):
-    """The actual line step for a PgDn/PgUp keypress after applying any
-    modifier.  Plain -> the configured step; Shift -> half (min 1); Ctrl/Alt
-    -> 1 (linewise)."""
+def _preview_scroll_step(mod, page_h):
+    """The line step for a preview scroll given a _page_key_info modifier:
+    plain -> the configured step; Shift -> half (min 1); Ctrl/Alt -> 1
+    (linewise)."""
     base = preview_scroll_step(page_h)
-    mod = _preview_scroll_modifier(k)
     if mod == "half":
         return max(1, base // 2)
     if mod == "linewise":
@@ -5428,12 +5487,10 @@ def preview_scroll_key(k, state, note, w, h):
     True if the key was a page key (plain or with Shift/Ctrl/Alt) and was
     consumed.  Modifiers scale the step: Shift halves it, Ctrl or Alt makes it
     one line (linewise)."""
-    if not _is_page_key(k):
+    d, mod = _page_key_info(k)
+    if not d:
         return False
-    d = _page_key_dir(k)
-    if d == 0:
-        return False
-    step = _preview_scroll_step_for_key(k, h - 2)
+    step = _preview_scroll_step(mod, h - 2)
     if d > 0:
         state["p_scroll"] = min(preview_max_scroll(note, state, w, h),
                                 state["p_scroll"] + step)
@@ -6053,6 +6110,7 @@ def run(stdscr, imports=(), move=False):
         # Keep bare ESC snappy (default is up to 1s) and bound the window in
         # which an ESC+letter is gathered as a Meta/Alt chord in the filter.
         curses.set_escdelay(25)
+    _install_page_key_fallbacks()
 
     # Restore the undo/redo stacks from previous sessions, trimming the journal
     # first if it has grown large, then mark this session's start.
@@ -6663,7 +6721,7 @@ def run(stdscr, imports=(), move=False):
                 state["cur"] -= 1
                 state["p_scroll"] = 0
                 continue
-            if k in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+            if _page_key_info(k)[0]:
                 # Same preview paging as the main list — the EditBuffer has no
                 # use for the page keys, so scrolling stays available while
                 # you're still typing the query.
@@ -6817,7 +6875,7 @@ def run(stdscr, imports=(), move=False):
         # Preview scrolling
         # ----------------------------
 
-        elif k in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+        elif _page_key_info(k)[0]:
             cur_note = (filtered[state["cur"]]
                         if 0 <= state["cur"] < len(filtered) else None)
             preview_scroll_key(k, state, cur_note, w, h)
