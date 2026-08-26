@@ -6041,23 +6041,42 @@ class TestCopyToClipboard(unittest.TestCase):
     def tearDown(self):
         notoj._config_cache = self._cache
 
-    def test_prefers_osc52_by_default(self):
-        buf = types.SimpleNamespace(write=lambda s: None, flush=lambda: None)
-        with unittest.mock.patch.object(notoj.sys, "stdout", buf):
-            self.assertEqual(notoj.copy_to_clipboard("hello"), "terminal")
+    def test_prefers_native_tool_over_osc52(self):
+        """Native clipboard tools (xclip etc.) are tried first; OSC 52 is
+        the fallback — most terminals ignore OSC 52 silently, so a local
+        tool that actually works should take priority."""
+        fake_run = unittest.mock.Mock(return_value=types.SimpleNamespace(
+            returncode=0))
+        fake_fd = 99
+        with unittest.mock.patch.object(notoj.shutil, "which",
+                                        lambda n: "/usr/bin/" + n if n == "xclip" else None), \
+             unittest.mock.patch.object(notoj.subprocess, "run", fake_run), \
+             unittest.mock.patch.object(notoj.os, "open",
+                                        return_value=fake_fd) as mock_open:
+            self.assertEqual(notoj.copy_to_clipboard("hello"), "xclip")
+            mock_open.assert_not_called()
 
     def test_empty_text_copies_nothing(self):
         self.assertIsNone(notoj.copy_to_clipboard(""))
 
-    def test_falls_back_to_an_installed_tool(self):
-        notoj._config_cache["osc52"] = "false"
-        fake_run = unittest.mock.Mock(return_value=types.SimpleNamespace(
-            returncode=0))
+    def test_osc52_fallback_when_no_tool_available(self):
+        """When no native clipboard tool is installed, OSC 52 is tried."""
+        notoj._config_cache["osc52"] = "true"
+        fake_fd = 99
         with unittest.mock.patch.object(notoj.shutil, "which",
-                                        lambda n: "/usr/bin/" + n if n == "xclip" else None), \
-             unittest.mock.patch.object(notoj.subprocess, "run", fake_run):
-            self.assertEqual(notoj.copy_to_clipboard("hello"), "xclip")
-        self.assertEqual(fake_run.call_args[1]["input"], b"hello")
+                                        lambda n: None), \
+             unittest.mock.patch.object(notoj.os, "open",
+                                        return_value=fake_fd) as mock_open, \
+             unittest.mock.patch.object(notoj.os, "write") as mock_write, \
+             unittest.mock.patch.object(notoj.os, "close") as mock_close:
+            self.assertEqual(notoj.copy_to_clipboard("hello"), "terminal")
+            mock_open.assert_called_once()
+
+    def test_returns_none_when_everything_unavailable(self):
+        notoj._config_cache["osc52"] = "false"
+        with unittest.mock.patch.object(notoj.shutil, "which",
+                                        lambda n: None):
+            self.assertIsNone(notoj.copy_to_clipboard("hello"))
 
 
 class TestMouseSelectEvent(unittest.TestCase):

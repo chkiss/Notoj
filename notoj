@@ -5700,19 +5700,12 @@ CLIPBOARD_TOOLS = (("wl-copy", ("wl-copy",)),
 
 
 def copy_to_clipboard(text):
-    """Hand `text` to whatever clipboard exists: OSC 52 first (works over
-    SSH when the terminal allows it), else the first installed tool.
-    Returns "terminal", the tool's name, or None."""
+    """Hand `text` to whatever clipboard exists: the first installed native
+    tool first (wl-copy/xclip/xsel/pbcopy), then OSC 52 as a fallback for
+    SSH or headless environments where no local tool exists.  Returns the
+    tool's name, "terminal", or None."""
     if not text:
         return None
-    if config_bool("osc52", True):
-        try:
-            sys.stdout.write("\033]52;c;%s\033\\"
-                             % base64.b64encode(text.encode("utf-8")).decode())
-            sys.stdout.flush()
-            return "terminal"
-        except (OSError, ValueError):
-            pass
     for name, argv in CLIPBOARD_TOOLS:
         if shutil.which(name):
             try:
@@ -5723,6 +5716,18 @@ def copy_to_clipboard(text):
                     return name
             except OSError:
                 continue
+    if config_bool("osc52", True):
+        try:
+            seq = ("\033]52;c;%s\033\\"
+                   % base64.b64encode(text.encode("utf-8")).decode())
+            fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
+            try:
+                os.write(fd, seq.encode("utf-8"))
+            finally:
+                os.close(fd)
+            return "terminal"
+        except (OSError, ValueError):
+            pass
     return None
 
 
