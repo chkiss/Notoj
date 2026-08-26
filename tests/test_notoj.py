@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -38,6 +39,11 @@ curses_stub.color_pair = lambda n: n << 8   # distinct int per pair, for | attrs
 curses_stub.keyname = lambda k: _keyname_stub(k)
 curses_stub.KEY_SNEXT = 396
 curses_stub.KEY_SPREVIOUS = 398
+# Mouse bits (real ncurses values) for the drag-select code paths.
+curses_stub.KEY_MOUSE = 631
+curses_stub.BUTTON1_RELEASED = 0x001
+curses_stub.BUTTON1_PRESSED = 0x002
+curses_stub.REPORT_MOUSE_POSITION = 0x08000000
 # Extended terminfo capability keys: ncurses assigns their keycodes
 # dynamically (they differ per TERM), so tests pick arbitrary codes and rely
 # on the keyname, exactly as the app does. Names mirror what real ncurses
@@ -5473,6 +5479,718 @@ class TestSingleReadLoadPath(unittest.TestCase):
             self.assertNotIn("\r", returned)
             with open(crlf, encoding="utf-8") as f:      # and it matches disk
                 self.assertEqual(returned, f.read())
+
+
+# ---------------------------------------------------------------------------
+# Background commit-count fetch (the h/H hint must never block the loop)
+# ---------------------------------------------------------------------------
+
+def _hist_state(path=None):
+    """A minimal state dict with the keys the hist machinery touches."""
+    return {"_hist_path": path, "_hist_count": 0, "_hist_dirty": False,
+            "_hist_cache": {}, "_hist_fetching": None, "_hist_done": [],
+            "_hist_gen": 0}
+
+
+class TestCountNoteCommits(unittest.TestCase):
+    def test_counts_hash_lines_from_git(self):
+        saved = notoj.NOTES_DIR
+        notoj.NOTES_DIR = "/vault"
+        try:
+            fake = unittest.mock.Mock(return_value=types.SimpleNamespace(
+                stdout="abc123\ndef456\n\n"))
+            with unittest.mock.patch.object(notoj.subprocess, "run", fake):
+                self.assertEqual(notoj.count_note_commits("/vault/a.md"), 2)
+            argv = fake.call_args[0][0]
+            self.assertEqual(argv[-1], "a.md")          # path relative to vault
+            self.assertIn("--follow", argv)
+        finally:
+            notoj.NOTES_DIR = saved
+
+    def test_failure_counts_zero(self):
+        with unittest.mock.patch.object(
+                notoj.subprocess, "run",
+                unittest.mock.Mock(side_effect=OSError("no git"))):
+            state = _hist_state()
+            notoj._hist_worker(state, "/vault/a.md", 0)
+        self.assertEqual(state["_hist_done"], [("/vault/a.md", 0, 0)])
+
+
+class TestOpenHistLast(unittest.TestCase):
+    def test_two_versions_diffs_and_reports_success(self):
+        saved = notoj.NOTES_DIR
+        notoj.NOTES_DIR = "/vault"
+        try:
+            fake = unittest.mock.Mock(return_value=types.SimpleNamespace(
+                stdout="aaa\nbbb\n"))
+            opened = []
+            with unittest.mock.patch.object(notoj.subprocess, "run", fake), \
+                 unittest.mock.patch.object(
+                     notoj, "open_vimdiff_at",
+                     lambda path, h: opened.append((path, h))):
+                ok = notoj.open_hist_last({"path": "/vault/a.md"})
+            self.assertTrue(ok)
+            self.assertEqual(opened, [("/vault/a.md", "bbb")])
+        finally:
+            notoj.NOTES_DIR = saved
+
+    def test_single_version_reports_failure_without_opening(self):
+        saved = notoj.NOTES_DIR
+        notoj.NOTES_DIR = "/vault"
+        try:
+            with unittest.mock.patch.object(
+                    notoj.subprocess, "run",
+                    unittest.mock.Mock(return_value=types.SimpleNamespace(
+                        stdout="aaa\n"))), \
+                 unittest.mock.patch.object(
+                     notoj, "open_vimdiff_at") as opened:
+                self.assertFalse(notoj.open_hist_last({"path": "/vault/a.md"}))
+                opened.assert_not_called()
+        finally:
+            notoj.NOTES_DIR = saved
+
+
+class TestHistLaunch(unittest.TestCase):
+    def test_noop_when_not_dirty(self):
+        state = _hist_state("/vault/a.md")
+        notoj._hist_launch(state)
+        self.assertIsNone(state["_hist_fetching"])
+
+    def test_serves_from_cache_without_a_thread(self):
+        state = _hist_state("/vault/a.md")
+        state["_hist_cache"]["/vault/a.md"] = 2
+        state["_hist_dirty"] = True
+        notoj._hist_launch(state)
+        self.assertEqual(state["_hist_count"], 2)
+        self.assertFalse(state["_hist_dirty"])
+        self.assertIsNone(state["_hist_fetching"])
+
+    def test_one_flight_at_a_time(self):
+        # While one fetch is in flight another may be pending: it stays dirty
+        # and launches on a later idle tick, after the slot frees.
+        state = _hist_state("/vault/a.md")
+        state["_hist_dirty"] = True
+        state["_hist_fetching"] = ("/vault/other.md", 0)
+        notoj._hist_launch(state)
+        self.assertTrue(state["_hist_dirty"])
+        self.assertEqual(state["_hist_fetching"], ("/vault/other.md", 0))
+
+    def test_launches_a_background_fetch(self):
+        state = _hist_state("/vault/a.md")
+        state["_hist_dirty"] = True
+        with unittest.mock.patch.object(notoj, "count_note_commits",
+                                        unittest.mock.Mock(return_value=3)) as m:
+            notoj._hist_launch(state)
+            self.assertEqual(state["_hist_fetching"], ("/vault/a.md", 0))
+            deadline = time.monotonic() + 5
+            while state["_hist_fetching"] is not None and \
+                    time.monotonic() < deadline:
+                time.sleep(0.005)
+            notoj._hist_harvest(state)
+        m.assert_called_once_with("/vault/a.md")
+        self.assertEqual(state["_hist_cache"]["/vault/a.md"], 3)
+        self.assertEqual(state["_hist_count"], 3)
+
+
+class TestHistHarvest(unittest.TestCase):
+    def test_updates_count_only_for_the_current_note(self):
+        state = _hist_state("/vault/still-here.md")
+        state["_hist_cache"]["/vault/moved-on.md"] = None   # prove overwrite
+        state["_hist_done"].append(("/vault/moved-on.md", 0, 4))
+        notoj._hist_harvest(state)
+        self.assertEqual(state["_hist_count"], 0)
+        self.assertEqual(state["_hist_cache"]["/vault/moved-on.md"], 4)
+
+    def test_fills_cache_and_footer_for_the_current_note(self):
+        state = _hist_state("/vault/a.md")
+        state["_hist_fetching"] = ("/vault/a.md", 0)
+        state["_hist_done"].append(("/vault/a.md", 0, 2))
+        notoj._hist_harvest(state)
+        self.assertEqual(state["_hist_cache"]["/vault/a.md"], 2)
+        self.assertEqual(state["_hist_count"], 2)
+        self.assertIsNone(state["_hist_fetching"])
+        self.assertEqual(state["_hist_done"], [])
+
+    def test_drops_results_stale_to_a_cache_clear(self):
+        # refresh_notes bumps _hist_gen when it clears the cache; a count for
+        # an older generation says nothing about the note's present history.
+        state = _hist_state("/vault/a.md")
+        state["_hist_gen"] = 1
+        state["_hist_fetching"] = ("/vault/a.md", 0)
+        state["_hist_done"].append(("/vault/a.md", 0, 2))
+        notoj._hist_harvest(state)
+        self.assertNotIn("/vault/a.md", state["_hist_cache"])
+        self.assertEqual(state["_hist_count"], 0)
+        self.assertIsNone(state["_hist_fetching"])   # slot freed either way
+
+
+# ---------------------------------------------------------------------------
+# wrap_to_width stays linear: re-measuring every candidate prefix per word
+# made one huge line cost seconds (and scrolling meant wrapping those lines)
+# ---------------------------------------------------------------------------
+
+class TestWrapToWidthSpeed(unittest.TestCase):
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    REF = ("lorem ipsum dolor sit amet consectetur adipiscing elit sed do "
+           "eiusmod tempor incididunt ut labore")
+
+    def _reference(self, line, width):
+        """The pre-optimization algorithm, kept honest here so the fast one
+        can be diffed against it row for row."""
+        indent = line[:len(line) - len(line.lstrip())]
+        avail = width - notoj.disp_width(indent)
+        if avail < 1:
+            indent, avail = "", width
+        rows, cur = [], ""
+        for word in line[len(indent):].split(" "):
+            cand = word if not cur else cur + " " + word
+            if notoj.disp_width(cand) <= avail:
+                cur = cand
+                continue
+            if cur:
+                rows.append(cur)
+                cur = ""
+            while notoj.disp_width(word) > avail:
+                head = notoj.clip_to_width(word, avail)
+                if not head:
+                    break
+                rows.append(head)
+                word = word[len(head):]
+            cur = word
+        rows.append(cur)
+        return [indent + r for r in rows]
+
+    def test_matches_the_reference_on_assorted_lines(self):
+        cases = [
+            "",
+            "short",
+            "   indented words stay indented across rows",
+            "a  double   space run",
+            "trailing space ",
+            "supercalifragilisticexpialidocious" * 5,
+            "mixed ascii and wide glyphs → ✓ ✓ and اَلْعَرَبِيَّة",
+            "curly “quotes” and em—dashes " * 40,
+            "\ttab\tseparated\twords after an indent",
+        ]
+        for line in cases:
+            for width in (10, 39, 60, 200):
+                self.assertEqual(notoj.wrap_to_width(line, width),
+                                 self._reference(line, width),
+                                 "line=%r width=%d" % (line[:40], width))
+
+    def test_quadrupling_a_line_does_not_square_the_cost(self):
+        # Non-ASCII forces per-character measuring; under the old prefix
+        # re-measuring, 4x the text cost ~16x the time. Linear costs stay
+        # near 4x, so anything past that means it went quadratic again.
+        base = " ".join("wörld-%d" % i for i in range(3000))
+        t0 = time.perf_counter()
+        notoj.wrap_to_width(base, 60)
+        small = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        notoj.wrap_to_width(base * 4 + " tail", 60)
+        big = time.perf_counter() - t0
+        self.assertLess(big, max(small * 12, 0.05),
+                        "wrap cost grew superlinearly with line length")
+
+
+# ---------------------------------------------------------------------------
+# Scroll hot path — the contract that keeps j/k and PgDn seamless. Every
+# slowdown Notoj has ever had was one of these invariants quietly broken by a
+# new feature: re-ranking per frame, re-wrapping per keypress, or git/files
+# polled on the input thread. If one of these tests fails right after a
+# change, the change did it.
+# ---------------------------------------------------------------------------
+
+class IOMustNotHappen(AssertionError):
+    pass
+
+
+def _forbid_io():
+    """Patch every poll surface the loop could reach to explode on use.
+
+    Returns (calls, restore): `calls` records any attempt, so tests can
+    assert both "nothing happened" and say what did."""
+    calls = []
+
+    def boom(name):
+        def inner(*a, **kw):
+            calls.append(name)
+            raise IOMustNotHappen(f"{name} ran on the scroll path")
+        return inner
+
+    saved = {
+        "run": notoj.subprocess.run,
+        "snapshot": notoj.file_snapshot,
+        "conflicts": notoj.find_conflicts,
+        "loops": notoj.find_loops,
+        "dups": notoj.find_duplicates,
+        "review": notoj.load_review,
+    }
+    notoj.subprocess.run = boom("subprocess.run")
+    notoj.file_snapshot = boom("file_snapshot")
+    notoj.find_conflicts = boom("find_conflicts")
+    notoj.find_loops = boom("find_loops")
+    notoj.find_duplicates = boom("find_duplicates")
+    notoj.load_review = boom("load_review")
+
+    def restore():
+        notoj.subprocess.run = saved["run"]
+        notoj.file_snapshot = saved["snapshot"]
+        notoj.find_conflicts = saved["conflicts"]
+        notoj.find_loops = saved["loops"]
+        notoj.find_duplicates = saved["dups"]
+        notoj.load_review = saved["review"]
+
+    return calls, restore
+
+
+class TestScrollHotPath(unittest.TestCase):
+    """One j press = nav math + clamp + redraw from cached rows; settling may
+    only START a background fetch, never run one."""
+
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    @staticmethod
+    def _press_j(state, filtered, h):
+        """Exactly what the main loop does for an unbound-to-nothing j:
+        nav_delta, cursor move, p_scroll reset, clamp, then the draw-side
+        preview prep and the PgDn geometry check."""
+        d = notoj.nav_delta(ord("j"), h - 2)
+        state["cur"] += d
+        state["p_scroll"] = 0
+        notoj.clamp_scroll(state, filtered, h)
+
+    def _preview_prep(self, note, tokens, pw, state, h):
+        rows = notoj.preview_rows(note, tokens, pw, state)
+        notoj.preview_max_scroll(note, state, 120, h)
+        return rows
+
+    def test_scrolling_touches_neither_git_nor_the_filesystem(self):
+        notes = [make_note(path=f"/v/n{i}.md", content=f"body {i} words here")
+                 for i in range(10)]
+        state = {"cur": 0, "off": 0, "p_scroll": 0}
+        note = notes[0]
+        tokens = []
+        self._preview_prep(note, tokens, 40, state, 30)   # land + first draw
+
+        calls, restore = _forbid_io()
+        try:
+            for _ in range(25):                            # a burst of j/k/j/k
+                self._press_j(state, notes, 30)
+                self._preview_prep(notes[state["cur"]], tokens, 40, state, 30)
+                self._press_j_k(state)                     # and back up again
+                self._preview_prep(notes[state["cur"]], tokens, 40, state, 30)
+        finally:
+            restore()
+        self.assertEqual(calls, [])
+
+    def _press_j_k(self, state):
+        state["cur"] -= 1                                  # k
+        state["p_scroll"] = 0
+        # (clamp runs next frame in the real loop; nothing IO-ish either way)
+
+    def test_backtracking_over_a_screenful_hits_the_wrap_cache(self):
+        # The row LRU must be deep enough that j/k backtracking over recent
+        # notes never re-pays a cold wrap. Shrinking _PREVIEW_ROWS_MAX back
+        # toward "a handful" fails this.
+        texts = ["note %d %s" % (i, "lorem ipsum dolor sit amet " * 50)
+                 for i in range(20)]
+        for t in texts:
+            notoj.preview_body_lines(t, 40)                # walk down
+        calls, spy = [], notoj.wrap_to_width
+        try:
+            notoj.wrap_to_width = lambda *a, **kw: (
+                calls.append(1), spy(*a, **kw))[1]
+            for t in reversed(texts):                      # walk back up
+                notoj.preview_body_lines(t, 40)
+        finally:
+            notoj.wrap_to_width = spy
+        self.assertEqual(calls, [],
+                         "backtracking re-wrapped notes it recently wrapped")
+
+    def test_settling_starts_a_fetch_without_waiting_for_it(self):
+        state = _hist_state("/vault/slow.md")
+        state["_hist_dirty"] = True
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_count(path):
+            started.set()
+            release.wait(10)
+            return 1
+
+        with unittest.mock.patch.object(notoj, "count_note_commits",
+                                        slow_count):
+            t0 = time.perf_counter()
+            notoj._hist_launch(state)
+            launch_cost = time.perf_counter() - t0
+            self.assertTrue(started.wait(5), "fetch thread never started")
+        self.assertLess(launch_cost, 0.5,
+                        "_hist_launch blocked on the count it launched")
+        release.set()
+
+    def test_harvest_never_runs_git_itself(self):
+        state = _hist_state("/vault/a.md")
+        state["_hist_done"].append(("/vault/a.md", 0, 3))
+        calls, restore = _forbid_io()
+        try:
+            notoj._hist_harvest(state)
+        finally:
+            restore()
+        self.assertEqual(state["_hist_count"], 3)
+
+    def test_timeout_budgets_stay_nonblocking(self):
+        # These numbers are policy, not perf: none of them may grow into a
+        # wait on work done inline (the pre-async bug froze input for the
+        # whole git call). They only bound how soon the loop WAKES.
+        st = _hist_state()
+        st["_hist_dirty"] = False
+        self.assertEqual(notoj.input_timeout_ms(st, rotating=False), 2000)
+        self.assertEqual(notoj.input_timeout_ms(st, rotating=True), 400)
+        st["_hist_dirty"] = True
+        self.assertEqual(notoj.input_timeout_ms(st, rotating=False), 120)
+        st["_hist_fetching"] = ("/vault/a.md", 0)
+        self.assertEqual(notoj.input_timeout_ms(st, rotating=False), 150)
+
+
+# ---------------------------------------------------------------------------
+# Transient status messages: one beat, then back to the hints
+# ---------------------------------------------------------------------------
+
+class TestStatusMessages(unittest.TestCase):
+    def _state(self, pool=("copied 5 lines via terminal",), until_in=None):
+        return {"_msg_pool": list(pool),
+                "_msg_until": None if until_in is None else until_in,
+                "_hist_fetching": None,
+                "_hist_dirty": False}
+
+    def test_no_pool_never_expires(self):
+        self.assertFalse(notoj.msgs_expired({"_msg_pool": []}))
+
+    def test_pool_without_a_deadline_stays(self):
+        st = {"_msg_pool": ["x"]}
+        self.assertFalse(notoj.msgs_expired(st, now=10 ** 12))
+
+    def test_expires_at_its_deadline(self):
+        st = self._state(until_in=100.0)
+        self.assertFalse(notoj.msgs_expired(st, now=99.999))
+        self.assertTrue(notoj.msgs_expired(st, now=100.0))
+
+    def test_timeout_wakes_near_the_deadline_then_falls_back(self):
+        st = self._state()
+        st["_hist_dirty"] = False
+        st["_msg_until"] = time.monotonic() + 0.05
+        ms = notoj.input_timeout_ms(st, rotating=False)
+        self.assertGreaterEqual(ms, 100)
+        self.assertLessEqual(ms, 200)
+
+        st["_msg_until"] = time.monotonic() + 30   # far away: normal budget
+        self.assertEqual(notoj.input_timeout_ms(st, rotating=False), 2000)
+        self.assertEqual(notoj.input_timeout_ms(st, rotating=True), 400)
+
+    def test_hist_budgets_outrank_the_message_cap(self):
+        st = self._state()
+        st["_hist_fetching"] = ("/vault/a.md", 0)
+        st["_msg_until"] = time.monotonic() + 0.01
+        self.assertEqual(notoj.input_timeout_ms(st, rotating=False), 150)
+
+
+# ---------------------------------------------------------------------------
+# Mouse drag-select in the preview pane
+# ---------------------------------------------------------------------------
+
+class TestSelectionText(unittest.TestCase):
+    ROWS = [("one two three", 0),      # source line 0 wrapped over two rows
+            ("four five", 0),
+            ("", 1),                   # blank source line
+            ("second para", 2),
+            ("#tag one", None)]        # the tag row
+
+    def test_single_row_slice(self):
+        self.assertEqual(notoj.selection_text(self.ROWS, 0, 4, 0, 6), "two")
+
+    def test_wrapped_rows_unwrap_into_one_line(self):
+        self.assertEqual(notoj.selection_text(self.ROWS, 0, 0, 1, 20),
+                         "one two three four five")
+
+    def test_crossing_a_blank_source_line_keeps_the_paragraph_break(self):
+        out = notoj.selection_text(self.ROWS, 0, 0, 3, 20)
+        self.assertEqual(out, "one two three four five\n\nsecond para")
+
+    def test_corner_order_is_normalized(self):
+        a = notoj.selection_text(self.ROWS, 3, 6, 0, 2)
+        b = notoj.selection_text(self.ROWS, 0, 2, 3, 6)
+        self.assertEqual(a, b)
+
+    def test_out_of_range_bounds_clamp_to_the_pane(self):
+        # The tag row is a different source (None), so it lands on its own
+        # line like a paragraph boundary would.
+        self.assertEqual(notoj.selection_text(self.ROWS, -5, -5, 99, 99),
+                         "one two three four five\n\nsecond para\n#tag one")
+
+    def test_wide_glyphs_occupy_two_columns(self):
+        rows = [("→→ ab", 0)]
+        # column 4 falls between "→→" (cols 0-3) and " ab"
+        self.assertEqual(notoj.selection_text(rows, 0, 0, 0, 3), "→→")
+        self.assertEqual(notoj.selection_text(rows, 0, 4, 0, 5), "a")
+
+
+class TestCopyToClipboard(unittest.TestCase):
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    def test_prefers_osc52_by_default(self):
+        buf = types.SimpleNamespace(write=lambda s: None, flush=lambda: None)
+        with unittest.mock.patch.object(notoj.sys, "stdout", buf):
+            self.assertEqual(notoj.copy_to_clipboard("hello"), "terminal")
+
+    def test_empty_text_copies_nothing(self):
+        self.assertIsNone(notoj.copy_to_clipboard(""))
+
+    def test_falls_back_to_an_installed_tool(self):
+        notoj._config_cache["osc52"] = "false"
+        fake_run = unittest.mock.Mock(return_value=types.SimpleNamespace(
+            returncode=0))
+        with unittest.mock.patch.object(notoj.shutil, "which",
+                                        lambda n: "/usr/bin/" + n if n == "xclip" else None), \
+             unittest.mock.patch.object(notoj.subprocess, "run", fake_run):
+            self.assertEqual(notoj.copy_to_clipboard("hello"), "xclip")
+        self.assertEqual(fake_run.call_args[1]["input"], b"hello")
+
+
+class TestMouseSelectEvent(unittest.TestCase):
+    NOTE = make_note(title="t", content="alpha beta gamma\ndelta epsilon",
+                     path="/v/a.md")
+
+    def _state(self):
+        return {"q": "", "p_scroll": 0, "_sel": None}
+
+    def _ev(self, y, x, bit):
+        # curses.getmouse() returns (id, x, y, z, bstate)
+        return (0, x, y, 0, bit)
+
+    def setUp(self):
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+
+    PRESS = 0x002       # notoj.curses.BUTTON1_PRESSED (stubbed above)
+    RELEASE = 0x001     # BUTTON1_RELEASED
+
+    def test_press_on_the_list_does_not_anchor(self):
+        st = self._state()
+        # w=100 -> preview_geometry gives mid around 48; x=10 is list side
+        msg, repaint = notoj.mouse_select_event(
+            st, self._ev(3, 10, self.PRESS), self.NOTE, [], 100, 30)
+        self.assertIsNone(msg)
+        self.assertTrue(repaint)          # any stale band must be cleared
+        self.assertIsNone(st["_sel"])
+
+    def test_press_in_preview_anchors_and_release_copies(self):
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        _, repaint = notoj.mouse_select_event(
+            st, self._ev(1, mid + 1, self.PRESS), self.NOTE, [], 100, 30)
+        self.assertTrue(repaint)
+        self.assertIsNotNone(st["_sel"])
+        with unittest.mock.patch.object(
+                notoj, "copy_to_clipboard",
+                unittest.mock.Mock(return_value="xclip")) as cp:
+            msg, repaint = notoj.mouse_select_event(
+                st, self._ev(1, mid + 11, self.RELEASE),
+                self.NOTE, [], 100, 30)
+        self.assertIn("copied 1 line via xclip", msg)
+        self.assertTrue(repaint)
+        cp.assert_called_once_with("alpha beta")
+        self.assertIsNone(st["_sel"])
+
+    def test_motion_moves_the_band_live_without_copying(self):
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        notoj.mouse_select_event(st, self._ev(1, mid + 1, self.PRESS),
+                                 self.NOTE, [], 100, 30)
+        HOVER = getattr(notoj.curses, "REPORT_MOUSE_POSITION")
+        with unittest.mock.patch.object(notoj, "copy_to_clipboard") as cp:
+            msg, repaint = notoj.mouse_select_event(
+                st, self._ev(2, mid + 8, HOVER), self.NOTE, [], 100, 30)
+            self.assertIsNone(msg)
+            self.assertTrue(repaint)      # the band moved: redraw wanted
+            msg, repaint = notoj.mouse_select_event(
+                st, self._ev(3, mid + 9, HOVER), self.NOTE, [], 100, 30)
+            self.assertIsNone(msg)
+            self.assertTrue(repaint)
+        self.assertEqual(st["_sel"]["b"], (3, mid + 9))
+        cp.assert_not_called()
+
+    def test_drag_motion_flagged_as_a_press_must_not_re_anchor(self):
+        # Several encoders deliver drag motion with the button-press bit set
+        # next to REPORT_MOUSE_POSITION. Treating those as new presses
+        # re-anchored the selection on every wiggle: the band stayed one
+        # cell wide and the release copied a single character.
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        HOVER = getattr(notoj.curses, "REPORT_MOUSE_POSITION")
+        drag_motion = self.PRESS | HOVER
+        notoj.mouse_select_event(st, self._ev(1, mid + 1, self.PRESS),
+                                 self.NOTE, [], 100, 30)
+        anchor = dict(st["_sel"])
+        with unittest.mock.patch.object(
+                notoj, "copy_to_clipboard",
+                unittest.mock.Mock(return_value="terminal")) as cp:
+            for y, x in ((2, mid + 5), (3, mid + 10), (4, mid + 15)):
+                notoj.mouse_select_event(st, self._ev(y, x, drag_motion),
+                                         self.NOTE, [], 100, 30)
+            self.assertEqual(st["_sel"]["a"],
+                             (anchor["a"][0], anchor["a"][1]))
+            self.assertEqual(st["_sel"]["b"], (4, mid + 15))
+            msg, _ = notoj.mouse_select_event(
+                st, self._ev(4, mid + 16, self.RELEASE),
+                self.NOTE, [], 100, 30)
+        # The note has two source lines, so the four-row drag clamps to them:
+        # the whole preview body, one line per source line.
+        self.assertIn("copied 2 lines", msg)
+        self.assertEqual(cp.call_args[0][0],
+                         "alpha beta gamma\ndelta epsilon")
+
+    def test_full_drag_with_press_flagged_motion_copies_the_span(self):
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        HOVER = getattr(notoj.curses, "REPORT_MOUSE_POSITION")
+        drag_motion = self.PRESS | HOVER
+        with unittest.mock.patch.object(
+                notoj, "copy_to_clipboard",
+                unittest.mock.Mock(return_value="terminal")) as cp:
+            notoj.mouse_select_event(st, self._ev(1, mid + 1,
+                                                  self.PRESS),
+                                     self.NOTE, [], 100, 30)
+            notoj.mouse_select_event(st, self._ev(2, mid + 9,
+                                                  drag_motion),
+                                     self.NOTE, [], 100, 30)
+            msg, _ = notoj.mouse_select_event(
+                st, self._ev(2, mid + 10, self.RELEASE),
+                self.NOTE, [], 100, 30)
+        self.assertIn("2 lines", msg)
+        # release col 10 -> row-1 slice is chars 0..9 of "delta epsilon"
+        self.assertEqual(cp.call_args[0][0], "alpha beta gamma\ndelta epsi")
+
+    def test_hover_noise_without_a_selection_skips_repaint(self):
+        # Mouse wiggle over the window with nothing selected is constant
+        # traffic; it must not trigger a frame each time.
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        HOVER = getattr(notoj.curses, "REPORT_MOUSE_POSITION")
+        msg, repaint = notoj.mouse_select_event(
+            st, self._ev(4, mid + 5, HOVER), self.NOTE, [], 100, 30)
+        self.assertIsNone(msg)
+        self.assertFalse(repaint)
+        self.assertIsNone(st["_sel"])
+
+    def test_release_spans_rows_and_counts_lines(self):
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        notoj.mouse_select_event(st, self._ev(1, mid + 7, self.PRESS),
+                                 self.NOTE, [], 100, 30)
+        with unittest.mock.patch.object(
+                notoj, "copy_to_clipboard",
+                unittest.mock.Mock(return_value="terminal")) as cp:
+            msg, repaint = notoj.mouse_select_event(
+                st, self._ev(2, mid + 6, self.RELEASE),
+                self.NOTE, [], 100, 30)
+        self.assertIn("copied 2 lines", msg)
+        self.assertTrue(repaint)
+        # row 1 col 7..end + row 2 start..col 6, unwrapped per source line;
+        # edge whitespace is trimmed so it doesn't ride into the clipboard
+        self.assertEqual(cp.call_args[0][0], "beta gamma\ndelta")
+
+    def test_plain_click_copies_nothing(self):
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        notoj.mouse_select_event(st, self._ev(2, mid + 3, self.PRESS),
+                                 self.NOTE, [], 100, 30)
+        with unittest.mock.patch.object(notoj, "copy_to_clipboard") as cp:
+            msg, repaint = notoj.mouse_select_event(
+                st, self._ev(2, mid + 3, self.RELEASE),
+                self.NOTE, [], 100, 30)
+        self.assertIsNone(msg)
+        cp.assert_not_called()
+
+    def test_any_unrecognized_event_while_live_still_drags(self):
+        # Exotic encoders flag drag motion with bits we don't know (CLICKED,
+        # modifier-only, even bare). Once a drag is live, the release is the
+        # only event allowed to mean anything else.
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        CLICKED = getattr(notoj.curses, "BUTTON1_PRESSED", 2) << 1  # any bit
+        notoj.mouse_select_event(st, self._ev(1, mid + 1, self.PRESS),
+                                 self.NOTE, [], 100, 30)
+        msg, repaint = notoj.mouse_select_event(
+            st, self._ev(3, mid + 12, CLICKED), self.NOTE, [], 100, 30)
+        self.assertIsNone(msg)
+        self.assertTrue(repaint)
+        self.assertEqual(st["_sel"]["b"], (3, mid + 12))
+
+    def test_release_without_a_press_is_silent(self):
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(100)
+        msg, repaint = notoj.mouse_select_event(
+            st, self._ev(1, mid + 4, self.RELEASE), self.NOTE, [], 100, 30)
+        self.assertIsNone(msg)
+        self.assertFalse(repaint)
+
+
+class TestSelectionPaint(unittest.TestCase):
+    """The band paints attribute-only over finished cells (chgat), clamped to
+    the preview pane."""
+
+    class Rec:
+        def __init__(self):
+            self.calls = []
+
+        def chgat(self, y, x, n, attr):
+            self.calls.append((y, x, n, attr))
+
+    def _sel(self, a, b):
+        return {"a": a, "b": b}
+
+    def test_single_row_band_clamped_to_the_pane(self):
+        scr = self.Rec()
+        # pane x runs 51..99 (mid=50, pw=49); drag starts left of the pane
+        notoj.paint_selection(scr, self._sel((2, 10), (2, 60)), 50, 49, 30)
+        self.assertEqual(scr.calls, [(2, 51, 60 - 51 + 1,
+                                      notoj.selection_attr())])
+
+    def test_multi_row_band_full_width_between_edges(self):
+        scr = self.Rec()
+        notoj.paint_selection(scr, self._sel((2, 60), (5, 70)), 50, 49, 30)
+        ys = {y: (x, n) for y, x, n, _ in scr.calls}
+        self.assertEqual(set(ys), {2, 3, 4, 5})
+        self.assertEqual(ys[2], (60, 99 - 60 + 1))     # anchor col..pane end
+        self.assertEqual(ys[3], (51, 49))              # middle rows: all
+        self.assertEqual(ys[4], (51, 49))
+        self.assertEqual(ys[5], (51, 70 - 51 + 1))     # ..release col
+
+    def test_band_outside_the_body_rows_is_dropped(self):
+        scr = self.Rec()
+        notoj.paint_selection(scr, self._sel((0, 55), (40, 70)), 50, 49, 30)
+        self.assertEqual({c[0] for c in scr.calls},
+                         set(range(1, 29)))             # rows 1..h-2
 
 
 if __name__ == "__main__":

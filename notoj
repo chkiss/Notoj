@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import atexit
+import base64
 import collections
 import ctypes
 import calendar
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unicodedata
 import uuid
@@ -1054,9 +1056,31 @@ def suspend_curses():
     Resets the DECSCUSR cursor style before endwin() so the external program
     starts from a neutral cursor — curses' endwin() doesn't track the style we
     set in search mode, so without this a blinking block could leak into vim.
+    Also drops our raw drag-motion request, so the child program owns the
+    mouse; _drag_motion(True) puts it back afterwards.
     """
     set_cursor_style(0)
+    _drag_motion(False)
     curses.endwin()
+
+
+def _drag_motion(enable):
+    """Request xterm button-drag motion reporting (mode 1002) directly.
+
+    ncurses' own motion knob is all-motion mode 1003 — every hover of the
+    pointer streams events, and some tmux/SSH chains in the delivery path
+    don't forward 1003 sessions at all, which is exactly "clicks work but
+    the selection band never follows". 1002 (motion only while a button is
+    down) is near-universally supported, so we ask for it ourselves the same
+    way set_cursor_style talks DECSCUSR past ncurses: ncurses decodes
+    whatever mouse bytes arrive regardless of which mode it asked for, and
+    its event filter passes them because the mask keeps REPORT_MOUSE_POSITION.
+    """
+    try:
+        sys.stdout.write("\x1b[?1002%s" % ("h" if enable else "l"))
+        sys.stdout.flush()
+    except OSError:
+        pass
 
 
 def launch(cmd):
@@ -1066,6 +1090,7 @@ def launch(cmd):
     status bar instead of crashing out of the TUI with the screen suspended."""
     try:
         subprocess.call(cmd)
+        _drag_motion(True)   # the child owned the mouse; take it back
         return True
     except (FileNotFoundError, PermissionError) as e:
         launch.missing = f"{cmd[0]}: {e.strerror}" if cmd else "editor not found"
@@ -2448,6 +2473,114 @@ def open_hist_last(n):
         return False
     open_vimdiff_at(n["path"], hashes[1])
     return True
+
+
+def count_note_commits(path):
+    """How many commits touch this note (capped at 2): the h/H footer hint
+    only needs "has an earlier version or not".
+
+    The pathspec makes git diff every commit's tree until it finds the
+    matches, which on a long-lived vault costs seconds — so this is never
+    called on the input thread; _hist_launch runs it in a daemon thread and
+    the main loop harvests via _hist_harvest."""
+    rel = os.path.relpath(path, NOTES_DIR)
+    r = subprocess.run(
+        ["git", "log", "--follow", "-2", "--format=%H", "--", rel],
+        cwd=NOTES_DIR, capture_output=True, text=True
+    )
+    return sum(1 for x in r.stdout.strip().splitlines() if x)
+
+
+def _hist_launch(state):
+    """Kick off one background commit-count fetch for the settled note.
+
+    Runs from the idle tick. At most one fetch is ever in flight; the result
+    lands in state["_hist_done"] and is picked up by _hist_harvest on a later
+    loop pass. A stale fetch (the caches were cleared mid-flight) is discarded
+    at harvest time via the generation counter."""
+    if not state["_hist_dirty"] or state["_hist_fetching"] is not None:
+        return
+    p = state["_hist_path"]
+    state["_hist_dirty"] = False
+    if p is None:
+        return
+    if p in state["_hist_cache"]:
+        state["_hist_count"] = state["_hist_cache"][p]
+        return
+    gen = state["_hist_gen"]
+    state["_hist_fetching"] = (p, gen)
+    threading.Thread(target=_hist_worker, args=(state, p, gen),
+                     daemon=True).start()
+
+
+def _hist_worker(state, path, gen):
+    """Body of the background thread: run git, publish one result. Always
+    appends exactly once, so the fetching slot can always be freed."""
+    try:
+        cnt = count_note_commits(path)
+    except Exception:
+        cnt = 0
+    state["_hist_done"].append((path, gen, cnt))
+
+
+def input_timeout_ms(state, rotating):
+    """How long getch may wait for a key before the loop gets an ERR tick.
+
+    These budgets ARE the scroll contract: nothing here ever waits on disk or
+    a subprocess (TestScrollHotPath pins that), so every number below is just
+    "how soon the loop wakes up to look at something".
+
+    150ms  while a background commit-count fetch is in flight — wake soon
+           enough that the h/H hint lands promptly when the fetch finishes.
+    120ms  while a fetch is pending for the settled note — launches it soon
+           after you stop moving, without firing mid-scroll.
+    400ms  while pooled status messages rotate through the bar.
+    2000ms plain idle — the external-change / conflict scan cadence.
+
+    A live transient message caps the wait so it fades within ~a tenth of a
+    second of its deadline rather than a full idle period later."""
+    if state["_hist_fetching"] is not None:
+        return 150
+    if state["_hist_dirty"]:
+        return 120
+    budget = 400 if rotating else 2000
+    if state.get("_msg_pool") and state.get("_msg_until") is not None:
+        remaining = state["_msg_until"] - time.monotonic()
+        budget = max(100, min(budget, int(remaining * 1000) + 50))
+    return budget
+
+
+# How long a status message keeps the footer before fading back to the hints.
+MSG_TTL = 3.0
+
+
+def msgs_expired(state, now=None):
+    """True when the live message pool has outlived its transient beat."""
+    if not state.get("_msg_pool"):
+        return False
+    until = state.get("_msg_until")
+    return until is not None and (now if now is not None
+                                  else time.monotonic()) >= until
+
+
+def _hist_harvest(state):
+    """Collect finished background counts: fill the cache, free the fetching
+    slot, and update the footer count if the user is still on that note.
+    Results whose generation was invalidated mid-flight are dropped.
+
+    The done-list is swapped out atomically rather than iterated in place, so
+    a worker appending during harvest can't lose its result."""
+    if not state["_hist_done"]:
+        return
+    done, state["_hist_done"] = state["_hist_done"], []
+    for path, gen, cnt in done:
+        if state["_hist_fetching"] == (path, gen):
+            state["_hist_fetching"] = None
+        if gen != state["_hist_gen"]:
+            continue
+        state["_hist_cache"][path] = cnt
+        if path == state["_hist_path"]:
+            state["_hist_count"] = cnt
 
 
 MODAL_QUIT = object()
@@ -4276,6 +4409,7 @@ _date_gradient = None       # [(max_age_secs | None, attr), …] ascending; buil
 _tag_inactive_pair = False  # pair 6 initialized (256-color terminals only)
 _tag_preview_pair = False   # pair 7 initialized (256-color terminals only)
 _match_focus_pair = False   # pair 8 initialized (256-color terminals only)
+_selection_band = False     # pair 15 initialized (256-color terminals only)
 
 
 def parse_span(s):
@@ -4409,6 +4543,23 @@ def init_colors():
                                        _color_value(cols[-1], 240)), -1)
         global _tag_preview_pair
         _tag_preview_pair = True
+
+        # Drag-select band (preview_select). A quiet editor-blue background
+        # the selected text sits on — the way Claude Code / VS Code render a
+        # selection — rather than reverse video, so it reads as "highlighted"
+        # and not as inverted colors. Without 256 colors there's no spare blue
+        # and selection_attr() falls back to A_REVERSE.
+        pair(15, -1, _cfg_color("color.selection", 24))
+        global _selection_band
+        _selection_band = True
+
+
+def selection_attr():
+    """Attribute for the drag-select band: soft blue where the terminal has
+    256 colors, reverse video otherwise."""
+    if _selection_band:
+        return curses.color_pair(15)
+    return curses.A_REVERSE
 
 
 def _setup_escdelay():
@@ -5193,27 +5344,36 @@ def wrap_to_width(line, width):
     rows keeping the line's indentation. Measured with disp_width, the same
     ruler the drawing code uses — textwrap counts characters, so one "→" (an
     East-Asian-Ambiguous glyph, two columns here) would push a row past the
-    pane and cost it its last character. A word too long for a row is broken."""
+    pane and cost it its last character. A word too long for a row is broken.
+
+    The candidate's width is accumulated from the word widths rather than
+    re-measured: disp_width sums char_width over every character, so
+    disp_width(cur + " " + word) is always disp_width(cur) + 1 +
+    disp_width(word), and re-walking the whole prefix per word made long
+    lines quadratic — seconds to preview a note with one huge line."""
     indent = line[:len(line) - len(line.lstrip())]
     avail = width - disp_width(indent)
     if avail < 1:
         indent, avail = "", width
-    rows, cur = [], ""
+    rows, cur, cur_w = [], "", 0
     for word in line[len(indent):].split(" "):
-        cand = word if not cur else cur + " " + word
-        if disp_width(cand) <= avail:
-            cur = cand
+        word_w = disp_width(word)
+        cand_w = word_w if not cur else cur_w + 1 + word_w
+        if cand_w <= avail:
+            cur = word if not cur else cur + " " + word
+            cur_w = cand_w
             continue
         if cur:
             rows.append(cur)
-            cur = ""
-        while disp_width(word) > avail:
+            cur, cur_w = "", 0
+        while word_w > avail:
             head = clip_to_width(word, avail)
             if not head:
                 break
             rows.append(head)
             word = word[len(head):]
-        cur = word
+            word_w = disp_width(word)
+        cur, cur_w = word, word_w
     rows.append(cur)
     return [indent + r for r in rows]
 
@@ -5225,7 +5385,9 @@ def wrap_to_width(line, width):
 # reused until the note, its text, or the pane width changes. Callers must
 # treat the list as read-only.
 _PREVIEW_ROWS = collections.OrderedDict()
-_PREVIEW_ROWS_MAX = 8
+# Deep enough that j/k backtracking over the last screenfuls never re-pays a
+# cold wrap (a big note can cost hundreds of ms to wrap the first time).
+_PREVIEW_ROWS_MAX = 32
 
 
 def wrap_preview_rows(lines, width):
@@ -5375,6 +5537,196 @@ def preview_rows(note, tokens, width, state):
     if not tg:
         return body      # the cached list itself: read it, never mutate it
     return [(r[0], None) for r in wrap_preview_rows([tg], width)] + list(body)
+
+
+def selection_col_offset(line, col):
+    """Char index of display column `col` in `line` — the same ruler the
+    drawing and wrapping use, so wide glyphs count two columns. Reuses
+    clip_to_width: truncating to `col` columns keeps exactly the characters
+    left of that column."""
+    if col <= 0:
+        return 0
+    return len(clip_to_width(line, col))
+
+
+def selection_text(rows, r1, c1, r2, c2):
+    """The text a drag over preview `rows` selects.
+
+    Rows are (text, source line index) pairs as preview_rows produces; r/c
+    are 0-based pane-relative row and column bounds (any corner order). Rows
+    sharing one source line are ONE wrapped note line, so their pieces are
+    unwrapped — stripped and joined with single spaces — while crossing into
+    a new source line emits a newline. The tag row's source is None and is
+    copied literally like any other line."""
+    if not rows:
+        return ""
+    if r1 > r2:                 # normalize rows; each edge keeps its own
+        r1, r2, c1, c2 = r2, r1, c2, c1   # corner column (leftward drags)
+    r1 = max(0, min(r1, len(rows) - 1))
+    r2 = max(0, min(r2, len(rows) - 1))
+
+    groups = []          # one string per source line spanned
+    parts = []           # row pieces of the current source line
+    cur_src = object()   # never equal to None or any int
+    for r in range(r1, r2 + 1):
+        text, src = rows[r]
+        w_full = disp_width(text)
+        if r == r1 == r2:
+            a, b = min(c1, c2), max(c1, c2) + 1
+        elif r == r1:
+            a, b = c1, w_full
+        elif r == r2:
+            a, b = 0, c2 + 1
+        else:
+            a, b = 0, w_full
+        a, b = max(a, 0), min(b, w_full)
+        piece = (text[selection_col_offset(text, a):
+                      selection_col_offset(text, b)] if b > a else "").strip()
+        if src != cur_src:
+            if parts:
+                groups.append(" ".join(p for p in parts if p))
+            parts = []
+            cur_src = src
+        parts.append(piece)
+    if parts:
+        groups.append(" ".join(p for p in parts if p))
+    return "\n".join(groups)
+
+
+CLIPBOARD_TOOLS = (("wl-copy", ("wl-copy",)),
+                   ("xclip", ("xclip", "-silent", "-selection", "clipboard")),
+                   ("xsel", ("xsel", "--clipboard", "--input")),
+                   ("pbcopy", ("pbcopy",)))
+
+
+def copy_to_clipboard(text):
+    """Hand `text` to whatever clipboard exists: OSC 52 first (works over
+    SSH when the terminal allows it), else the first installed tool.
+    Returns "terminal", the tool's name, or None."""
+    if not text:
+        return None
+    if config_bool("osc52", True):
+        try:
+            sys.stdout.write("\033]52;c;%s\033\\"
+                             % base64.b64encode(text.encode("utf-8")).decode())
+            sys.stdout.flush()
+            return "terminal"
+        except (OSError, ValueError):
+            pass
+    for name, argv in CLIPBOARD_TOOLS:
+        if shutil.which(name):
+            try:
+                p = subprocess.run(argv, input=text.encode("utf-8"),
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+                if p.returncode == 0:
+                    return name
+            except OSError:
+                continue
+    return None
+
+
+def _enable_mouse_select():
+    """Turn on mouse reporting for drag-select, per config.
+
+    Two layers: ncurses gets button events plus REPORT_MOUSE_POSITION (so its
+    filter passes motion through), and _drag_motion(True) then asks the
+    terminal directly for mode-1002 drag motion — ncurses' own knob is
+    all-motion 1003, which some tmux/SSH chains don't forward, and pure
+    hover noise it brings is skipped at the loop anyway. Returns True if
+    events will arrive as KEY_MOUSE."""
+    if not config_bool("preview_select", True):
+        return False
+    mm = getattr(curses, "mousemask", None)
+    if mm is None or not hasattr(curses, "KEY_MOUSE"):
+        return False
+    mask = (getattr(curses, "BUTTON1_PRESSED", 0)
+            | getattr(curses, "BUTTON1_RELEASED", 0)
+            | getattr(curses, "BUTTON_SHIFT", 0)
+            | getattr(curses, "REPORT_MOUSE_POSITION", 0))
+    if not mask:
+        return False
+    try:
+        return bool(mm(mask))
+    except curses.error:
+        return False
+
+
+def paint_selection(stdscr, sel, mid, pw, h):
+    """The live drag band over the finished preview cells.
+
+    chgat is attribute-only — no cell text moves — so painting it every
+    frame during a drag is as cheap as any other repaint. Clamped to the
+    pane; rows outside the body (1..h-2) are ignored."""
+    (y1, x1), (y2, x2) = sorted((sel["a"], sel["b"]))
+    attr = selection_attr()
+    for y in range(max(y1, 1), min(y2, h - 2) + 1):
+        a = x1 if y == y1 else mid + 1
+        b = x2 + 1 if y == y2 else mid + pw + 1
+        a, b = max(a, mid + 1), min(b, mid + pw + 1)
+        if b > a:
+            try:
+                stdscr.chgat(y, a, b - a, attr)
+            except curses.error:
+                pass
+
+
+def mouse_select_event(state, ev, note, tokens, w, h):
+    """Fold one KEY_MOUSE event into the drag-select state.
+
+    State transitions are edge-driven, keyed off whether a drag is already
+    live rather than off any single event's bits — several encoders deliver
+    drag motion with the button-press bit set beside REPORT_MOUSE_POSITION,
+    and honoring that bit mid-drag re-anchors the selection every wiggle
+    (the band pinned to one cell; releases copied one character).
+
+    A press inside the preview anchors when no drag is live (presses on the
+    list stay untouched); while live, any further event moves the free edge;
+    a release extracts and copies. Returns (message, repaint): repaint False
+    means nothing on screen changed (hover noise with no selection live),
+    letting the loop skip its draw instead of redrawing on every wiggle.
+    `ev` is what curses.getmouse() returns: (id, x, y, z, bstate)."""
+    _, ex, ey, _, bstate = ev
+    press = getattr(curses, "BUTTON1_PRESSED", 0)
+    rel = getattr(curses, "BUTTON1_RELEASED", 0)
+    show, list_w, mid, pw = preview_geometry(w)
+
+    sel = state.get("_sel")
+
+    # Release ends a drag before anything else can look at the event.
+    if sel is not None and bstate & rel:
+        state["_sel"] = None
+        ay, ax = sel["a"]
+        if (ay, ax) == (ey, ex):
+            return None, True         # a plain click selects nothing
+        rows_all = preview_rows(note, tokens, pw, state)
+        start = state["p_scroll"]
+        window = rows_all[start:start + (h - 2)]
+        text = selection_text(window,
+                              ay - 1, ax - (mid + 1),
+                              ey - 1, ex - (mid + 1))
+        if not text.strip():
+            return None, True         # a blank drag: nothing to say
+        how = copy_to_clipboard(text)
+        if how is None:
+            return ("no clipboard found"
+                    " (installed none of wl-copy/xclip/xsel/pbcopy)"), True
+        n = text.count("\n") + 1
+        return ("copied %d line%s via %s" % (n, "" if n == 1 else "s",
+                                             how)), True
+
+    # Press starts a drag only when none is live.
+    if bstate & press and sel is None:
+        state["_sel"] = {"a": (ey, ex), "b": (ey, ex)} \
+            if show and ex > mid else None
+        return None, True
+
+    # While live, every further event drags — however its bits describe it.
+    if sel is not None:
+        sel["b"] = (ey, ex)           # the band follows the cursor live
+        return None, True
+
+    return None, False
 
 
 def preview_scroll_step(page_h):
@@ -6031,6 +6383,12 @@ def draw(stdscr, notes, state):
                     body_hi.at(focus_ord if start + i == focus_row else None),
                 )
 
+            # The live drag-select band goes on last, attribute-only over the
+            # finished cells — see paint_selection.
+            sel = state.get("_sel")
+            if sel:
+                paint_selection(stdscr, sel, mid, preview_w, h)
+
     # Footer hints as (priority, text) segments: lower number = survives
     # longer as the terminal narrows. ⏎/e are one segment (e = open at end).
     hc = state.get("_hist_count", 0)
@@ -6164,6 +6522,9 @@ def run(stdscr, imports=(), move=False):
     CHORDS, CHORD_PREFIXES = build_chord_dispatch()   # 2-key chords (gg/gt/…)
     stdscr.timeout(2000)
     _install_page_key_fallbacks()
+    mouse_ok = _enable_mouse_select()
+    if mouse_ok:
+        _drag_motion(True)
 
     # Restore the undo/redo stacks from previous sessions, trimming the journal
     # first if it has grown large, then mark this session's start.
@@ -6205,11 +6566,16 @@ def run(stdscr, imports=(), move=False):
         "_msg_pool": [],
         "_msg_idx": 0,
         "_msg_rot": 0.0,        # monotonic time of the last rotation
+        "_msg_until": None,     # monotonic deadline; the pool fades after it
         "_xsess_armed": None,   # ("undo"|"redo", sess) while a cross-session prompt waits
         "_hist_path": None,
         "_hist_count": 0,
         "_hist_dirty": False,
         "_hist_cache": {},      # path -> commit count (lazy; cleared on change)
+        "_hist_fetching": None, # (path, gen) while a background count runs
+        "_hist_done": [],       # finished background counts, see _hist_harvest
+        "_hist_gen": 0,         # bumped with the cache so stale fetches drop
+        "_sel": None,           # drag-select: {"a": (y, x), "b": (y, x)}
         "_conflicts": [],
         "_title_conflicts": [],
         "_filter_cache": {},    # memoized rank/filter, rebuilt only on real input change
@@ -6236,6 +6602,7 @@ def run(stdscr, imports=(), move=False):
     if imported or failed:
         state["_msg_pool"] = import_msgs(imported, failed)
         state["_msg_rot"] = time.monotonic()
+        state["_msg_until"] = time.monotonic() + MSG_TTL
 
     def refresh_notes():
         nonlocal notes, snap
@@ -6258,6 +6625,7 @@ def run(stdscr, imports=(), move=False):
         state["_loops_due"] = len(find_loops(notes, state["_review"]))
         state["_conflicts"] = find_conflicts()
         state["_hist_cache"].clear()   # commit counts may have changed
+        state["_hist_gen"] += 1        # any in-flight count is now stale
         if state["dup_mode"] is not None:
             state["dup_mode"] = state["_dups"]
 
@@ -6265,15 +6633,20 @@ def run(stdscr, imports=(), move=False):
         """Add status line(s) to the bar's pool for the current action, deduped.
         Several distinct messages share the one line and rotate (see pool_msg)
         rather than overwrite each other or overflow — so a long prompt is split
-        into parts that cycle, never truncated."""
+        into parts that cycle, never truncated. The pool is transient: it fades
+        back to the hint bar after MSG_TTL (the idle tick expires it, and
+        input_timeout_ms wakes the loop near the deadline)."""
         for text in texts:
             if text and text not in state["_msg_pool"]:
                 state["_msg_pool"].append(text)
-        state["_msg_rot"] = time.monotonic()   # show the new message a full beat
+        now = time.monotonic()
+        state["_msg_rot"] = now      # show the new message a full beat
+        state["_msg_until"] = now + MSG_TTL
 
     def clear_msgs():
         state["_msg_pool"] = []
         state["_msg_idx"] = 0
+        state["_msg_until"] = None
 
     def record(act):
         """Push a fresh destructive action onto the undo stack; a new action
@@ -6515,15 +6888,24 @@ def run(stdscr, imports=(), move=False):
                 state["_hist_count"] = 0
                 state["_hist_dirty"] = cur_path is not None
 
-        draw(stdscr, filtered, state)
+        # A pure-hover mouse event changed nothing on screen; redrawing on
+        # every wiggle would burn CPU for nothing (they arrive continuously
+        # while the cursor moves over the window).
+        if not state.pop("_skip_frame", False):
+            draw(stdscr, filtered, state)
 
-        # Poll quickly while a history lookup is pending (so the hint appears
-        # soon after you stop) or while several status messages are rotating
-        # through the bar; otherwise idle at the slow scan cadence.
-        stdscr.timeout(120 if state["_hist_dirty"]
-                       else (400 if rotating else 2000))
+        # Poll quickly while a background history fetch is pending or in
+        # flight (so the h/H hint appears soon after you stop) or while
+        # several status messages are rotating through the bar; otherwise
+        # idle at the slow scan cadence. Budgets and their reasoning live in
+        # input_timeout_ms.
+        stdscr.timeout(input_timeout_ms(state, rotating))
         t_wait = time.monotonic()
         k = stdscr.getch()
+
+        # Pick up finished background commit counts before anything else, so
+        # the footer shows the fresh count and the fetch slot frees up.
+        _hist_harvest(state)
 
         # Dead-terminal guard: when the pty/SSH session dies, getch returns
         # ERR instantly instead of honoring the timeout, which would busy-
@@ -6549,37 +6931,36 @@ def run(stdscr, imports=(), move=False):
                 xsess_step(direction)
             continue
 
-        # Any real keystroke starts a new action: clear the pooled messages from
-        # the previous one before this key runs (the armed-prompt case above
-        # already returned).
-        if k != -1:
+        # Any real keystroke starts a new action: clear the pooled messages
+        # from the previous one before this key runs (the armed-prompt case
+        # above already returned). A keystroke also drops any live drag
+        # selection — ESC cancels a select the same way as anything else.
+        if k != -1 and k != getattr(curses, "KEY_MOUSE", -1):
             clear_msgs()
+            state["_sel"] = None
 
         # ----------------------------
         # Quit
         # ----------------------------
 
         if k == -1:
+            # Transient messages fade back to the hint bar once their beat is
+            # up (input_timeout_ms wakes the loop near the deadline).
+            if msgs_expired(state):
+                clear_msgs()
+
             # Rotate the status bar to the next pooled message once its beat
             # elapses, wrapping around (only while it can't be shown whole).
             if rotating and time.monotonic() - state["_msg_rot"] >= MSG_ROTATE_SECS:
                 state["_msg_idx"] = (state["_msg_idx"] + 1) % len(state["_msg_pool"])
                 state["_msg_rot"] = time.monotonic()
 
-            # Settled on a note: now safe to compute its history count (cached).
+            # Settled on a note: hand its history count to a background
+            # thread. It used to run right here, blocking the loop — with the
+            # sync-commit history grown long, that froze input for seconds
+            # after every pause in scrolling.
             if state["_hist_dirty"]:
-                state["_hist_dirty"] = False
-                cp = state["_hist_path"]
-                if cp:
-                    rel = os.path.relpath(cp, NOTES_DIR)
-                    r = subprocess.run(
-                        ["git", "log", "--follow", "-2", "--format=%H", "--", rel],
-                        cwd=NOTES_DIR, capture_output=True, text=True
-                    )
-                    cnt = sum(1 for x in r.stdout.strip().splitlines() if x)
-                    state["_hist_cache"][cp] = cnt
-                    if cp == state["_hist_path"]:
-                        state["_hist_count"] = cnt
+                _hist_launch(state)
 
             # Scan for external changes / Syncthing conflicts at most every 2s
             # (the adaptive timeout can fire this branch as often as 120ms).
@@ -6691,6 +7072,31 @@ def run(stdscr, imports=(), move=False):
                 state["sched_input"] = ""
 
             continue
+
+        # ----------------------------
+        # Mouse drag-select (preview pane)
+        # ----------------------------
+
+        elif mouse_ok and k == curses.KEY_MOUSE:
+            try:
+                ev = curses.getmouse()
+            except curses.error:
+                continue
+            cur_note = (filtered[state["cur"]]
+                        if 0 <= state["cur"] < len(filtered) else None)
+            msg, repaint = mouse_select_event(state, ev, cur_note,
+                                              search_tokens(state.get("q", "")),
+                                              w, h)
+            if msg:
+                # A copy result replaces whatever the bar showed — copy
+                # notifications are one-at-a-time, never a stack.
+                clear_msgs()
+                push_msg(msg)
+            if not repaint:
+                # Hover noise with nothing selected: skip the redraw this
+                # event would otherwise trigger (they arrive continuously
+                # while the mouse moves over the window).
+                state["_skip_frame"] = True
 
         # ----------------------------
         # Quit
@@ -7296,5 +7702,6 @@ if __name__ == "__main__":
         _launch_ui(run, IMPORTS, MOVE)
     finally:
         set_cursor_style(0)  # don't leave a blinking block in the shell
+        _drag_motion(False)  # don't leave drag-motion reporting enabled
         set_term_title("")   # give the title back to the shell
         log_event({"t": "session", "ev": "quit", "sess": SESSION_ID})
