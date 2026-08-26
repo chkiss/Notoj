@@ -122,6 +122,13 @@ preview_scroll = page
 # the pane edge instead (one source line per row). Default: true.
 # preview_wrap=true
 
+# Line up markdown pipe tables in the preview: cells are padded so every
+# row's | walls stand in the same columns — vim-table-mode's \tr realign,
+# drawn rather than written (your files are never touched). Column widths
+# count wide glyphs as two and skip emphasis markers, so the shape matches
+# what actually paints. Default: true.
+# preview_align_tables=true
+
 # Max width (columns) of the left list panel; extra width goes to the preview.
 # Default: 80.
 # list_max_w=80

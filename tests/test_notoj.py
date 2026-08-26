@@ -5175,6 +5175,93 @@ class TestPreviewMatchList(unittest.TestCase):
         self.assertEqual(got[0].tag, "notoj")
 
 
+class TestPreviewAlignTables(unittest.TestCase):
+    """vim-table-mode's \\tr, drawn in the preview: pipe tables realign so
+    every row's walls stand in the same columns — display-only."""
+
+    def setUp(self):
+        self._cache = notoj._config_cache
+        self._rows = notoj._PREVIEW_ROWS.copy()
+        notoj._config_cache = {}
+        notoj._PREVIEW_ROWS.clear()
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+        notoj._PREVIEW_ROWS.clear()
+        notoj._PREVIEW_ROWS.update(self._rows)
+
+    def align(self, text, **cfg):
+        notoj._config_cache = {k: v for k, v in cfg.items()}
+        return notoj.align_table_lines(text.split("\n"), True)
+
+    def test_ragged_rows_pad_to_the_widest_cell(self):
+        got = self.align("| a | bb |\n| ccc | d |")
+        self.assertEqual(got, ["| a   | bb |", "| ccc | d  |"])
+
+    def test_delimiter_rebuilds_to_the_column_width_keeping_colons(self):
+        got = self.align("| Name | Age |\n|---|:-:|\n| Bob | 7 |")
+        self.assertEqual(got, ["| Name | Age |",
+                               "| ---- | :-: |",
+                               "| Bob  | 7   |"])
+
+    def test_delimiter_never_shrinks_below_what_was_written(self):
+        # A short header leaves the column narrower than |---|; the wall row
+        # keeps its length rather than collapsing to | - |.
+        got = self.align("| A |\n|---|\n| B |")
+        self.assertEqual(got, ["| A |", "| --- |", "| B |"])
+
+    def test_leading_indent_survives(self):
+        got = self.align("text\n\n  | a | bbb |\n  | cc | b |")
+        self.assertEqual(got, ["text", "",
+                               "  | a  | bbb |", "  | cc | b   |"])
+
+    def test_lone_pipe_line_and_plain_text_are_untouched(self):
+        text = "intro\n| a | b |\noutro"
+        self.assertEqual(self.align(text), text.split("\n"))
+
+    def test_ragged_column_counts_keep_their_own_cells(self):
+        got = self.align("| a | bb |\n| ccc |")
+        self.assertEqual(got, ["| a   | bb |", "| ccc |"])
+
+    def test_escaped_pipe_stays_one_cell(self):
+        got = self.align("| a \\| b | ccc |")
+        self.assertEqual(got, ["| a \\| b | ccc |"])
+
+    def test_wide_glyphs_count_two_columns(self):
+        got = self.align("| 幅 | x |\n| a | yy |")
+        self.assertEqual(got, ["| 幅 | x  |", "| a  | yy |"])
+
+    def test_emphasis_markers_do_not_widen_a_column(self):
+        # **ab** draws as ab; padding measures what paints, so the walls of
+        # both rows land on the same columns.
+        got = self.align("**ab**\n\n| **ab** | cdef |\n| x | y |")
+        self.assertEqual(got, ["**ab**", "",
+                               "| **ab** | cdef |", "| x  | y    |"])
+
+    def test_all_dash_block_is_not_a_table(self):
+        text = "|---|\n|--|"
+        self.assertEqual(self.align(text), text.split("\n"))
+
+    def test_config_off_leaves_tables_ragged(self):
+        notoj._config_cache = {"preview_align_tables": "false"}
+        rows = notoj.preview_source_rows("| a | bb |\n| ccc | d |", 40)
+        self.assertEqual([r[0] for r in rows],
+                         ["| a | bb |", "| ccc | d |"])
+
+    def test_preview_rows_carry_realigned_lines_with_source_intact(self):
+        rows = notoj.preview_source_rows("head\n| a | bb |\n| ccc | d |", 40)
+        self.assertEqual([r[0] for r in rows],
+                         ["head", "| a   | bb |", "| ccc | d  |"])
+        self.assertEqual([r[1] for r in rows], [0, 1, 2])
+
+    def test_render_markdown_off_measures_raw_text(self):
+        # Without markdown rendering the markers themselves draw, so they
+        # count toward the width again.
+        notoj._config_cache = {"render_markdown": "false"}
+        lines = notoj.align_table_lines(["| **ab** | x |", "| y | zz |"], False)
+        self.assertEqual(lines, ["| **ab** | x  |", "| y      | zz |"])
+
+
 class TestPreviewTagRow(unittest.TestCase):
     """Tags live in the frontmatter, never in `content` — so a note that
     ranked purely on a tag needs the pane to say so."""

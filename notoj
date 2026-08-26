@@ -5447,6 +5447,100 @@ class PreviewRows:
         self._key = self._width = self._rows = None
 
 
+# --- \tr for the preview ------------------------------------------------------
+# vim-table-mode realigns the table under the cursor so every row's pipes stand
+# in the same columns; notes written raggedly (cells edited, rows appended) read
+# as a jagged mess in the preview. The pane draws the realigned shape instead —
+# display-only, exactly like the markdown styling: the file is never rewritten.
+
+_TABLE_ROW = re.compile(r"^(\s*)\|(.*)\|\s*$")
+_CELL_SPLIT = re.compile(r"(?<!\\)\|")          # \| is an escaped pipe, not a wall
+_DELIM_CELL = re.compile(r":?(-+):?$")
+
+
+def _cell_logical(s):
+    """A table cell as it will DRAW under markdown rendering — emphasis
+    markers dropped, content kept. Columns are measured on this rather than on
+    the raw text so `**bold**` doesn't pad its column four spaces wider than
+    what actually appears, which would tilt every wall after it. Mirrors the
+    inline branch of _md_entries (a fragment can't be a # heading)."""
+    pos, out = 0, []
+    for mt in _md_inline_pattern().finditer(s):
+        out.append(s[pos:mt.start()])
+        g, m = mt.lastgroup, mt.group()
+        out.append(m[3:-3] if g == "bi" else
+                   m[2:-2] if g in ("b", "bu", "s") else
+                   m[1:-1])
+        pos = mt.end()
+    out.append(s[pos:])
+    return "".join(out)
+
+
+def align_table_lines(lines, logical=True):
+    """Source lines with every pipe-table block redrawn column-aligned.
+
+    A block is a maximal run of 2+ lines that each strip to `|…|`; within it,
+    cells are padded so each column is as wide as its widest cell (measured in
+    display columns — CJK counts two), a GFM delimiter row (`|---|:-:|`) is
+    rebuilt to those widths with its colons kept, and each line's leading
+    indent survives. Ragged rows keep their own column count. Returns the list
+    unchanged when nothing qualifies."""
+    out = list(lines)
+    i, n = 0, len(lines)
+    while i < n:
+        if _TABLE_ROW.match(lines[i]):
+            j = i
+            while j < n and _TABLE_ROW.match(lines[j]):
+                j += 1
+            if j - i >= 2:
+                out[i:j] = _align_table_block(lines[i:j], logical)
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def _align_table_block(block, logical):
+    """One `|…|` block, realigned; see align_table_lines."""
+    rows, delims = [], set()
+    for k, line in enumerate(block):
+        m = _TABLE_ROW.match(line)
+        cells = [c.strip() for c in _CELL_SPLIT.split(m.group(2))]
+        rows.append((m.group(1), cells))
+        if all(_DELIM_CELL.match(c) for c in cells):
+            delims.add(k)
+
+    if len(delims) == len(rows):          # all dashes and no header: not a table
+        return block
+
+    def dw(cell):
+        return disp_width(_cell_logical(cell) if logical else cell)
+
+    widths = {}
+    for k, (_ind, cells) in enumerate(rows):
+        if k not in delims:
+            for c, cell in enumerate(cells):
+                widths[c] = max(widths.get(c, 0), dw(cell))
+
+    def padded(k, cell):
+        return cell + " " * max(0, widths[k] - dw(cell))
+
+    def dashes(k, cell):
+        l, r = cell.startswith(":"), cell.endswith(":")
+        w = max(widths.get(k, 0), len(cell))   # never shorter than written
+        return ":" * l + "-" * max(1, w - int(l) - int(r)) + ":" * r
+
+    out = []
+    for k, (ind, cells) in enumerate(rows):
+        if k in delims:
+            cols = [dashes(c, cells[c]) if c < len(cells) else ""
+                    for c in range(len(widths))]
+        else:
+            cols = [padded(c, cell) for c, cell in enumerate(cells)]
+        out.append(ind + "|" + "|".join(f" {c} " for c in cols) + "|")
+    return out
+
+
 def preview_source_rows(text, width):
     """A note's text as (row, source line index) pairs — the rows the preview
     pane draws, each tagged with the line of `text` it came from. With
@@ -5477,7 +5571,13 @@ def preview_source_rows(text, width):
     # park something after a line's final row, which this one doesn't. Both
     # views are cached together — deriving one from the other per call would
     # rebuild a list per frame and undo the memoization.
-    rows = [(r[0], r[1]) for r in wrap_preview_rows(text.split("\n"),
+    lines = text.split("\n")
+    if config_bool("preview_align_tables", True):
+        # \tr before wrapping: realigned walls only stay put if the padding is
+        # in place while the wrap measures the line. Alignment depends on the
+        # text and config alone, never on width, so the cache key below holds.
+        lines = align_table_lines(lines, config_bool("render_markdown", True))
+    rows = [(r[0], r[1]) for r in wrap_preview_rows(lines,
                                                     width if wrap else 0)]
     _PREVIEW_ROWS[key] = (text, rows, [r[0] for r in rows])
     if len(_PREVIEW_ROWS) > _PREVIEW_ROWS_MAX:
