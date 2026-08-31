@@ -5081,19 +5081,21 @@ def _md_inline_pattern():
     return _md_inline_re
 
 
-def _md_entries(raw, base_attr):
-    """Parse one preview line into [(logical_char, draw_string, attr)]. The
-    logical char drives token-search matching and width; the draw string is
-    what's painted (identical, except struck chars carry a combining overlay)."""
-    m = MD_HEADER.match(raw)
-    if m:
-        # The header's own color replaces the base color rather than being
-        # OR-ed onto it: curses packs the pair number into the attribute as a
-        # bit field, so pair 4 (the preview body) | pair 1 (the accent) is
-        # pair 5 — the search-match slot. That arithmetic is why headers used
-        # to come out in whatever color color.match was set to.
-        a = md_header_attr() | curses.A_BOLD
-        return [(c, c, a) for c in m.group(2)]
+# Shared empty delimiter set for the (very common) row with no code span in
+# it. Never mutated — row_code_states only ever builds fresh sets otherwise.
+EMPTY_DELIMS = frozenset()
+
+# Marker widths per inline-regex group: how many characters of the match are
+# opening and closing delimiter rather than content.
+_MD_MARKER_WIDTH = {"bi": 3, "b": 2, "bu": 2, "s": 2, "i": 1, "iu": 1, "code": 1}
+
+
+def _md_emphasis_only(raw, base_attr):
+    """Entries for a row with no code span in it — the overwhelming majority.
+    Emphasis is the only markup left, so the runs come straight off the regex
+    with no per-character bookkeeping. Safe because the caller has established
+    that no backtick on this source line pairs: the `code` alternative cannot
+    match, so nothing here can swallow a backtick."""
     out = []
     pos = 0
     for mt in _md_inline_pattern().finditer(raw):
@@ -5101,9 +5103,7 @@ def _md_entries(raw, base_attr):
             out += [(c, c, base_attr) for c in raw[pos:mt.start()]]
         g, s = mt.lastgroup, mt.group()
         strike = False
-        if g == "code":
-            inner, a = s[1:-1], base_attr | curses.A_REVERSE
-        elif g == "bi":
+        if g == "bi":
             inner, a = s[3:-3], base_attr | curses.A_BOLD | MD_ITALIC
         elif g in ("b", "bu"):           # **bold** or __bold__
             inner, a = s[2:-2], base_attr | curses.A_BOLD
@@ -5118,10 +5118,192 @@ def _md_entries(raw, base_attr):
     return out
 
 
-def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi):
+def _md_emphasis(masked, attrs, drop, strike):
+    """Apply bold/italic/strike to the per-character `attrs`, `drop` and
+    `strike` arrays of one preview row, reading `masked` — the row with any
+    code-span characters blanked out.
+
+    Emphasis is OR-ed onto whatever the character already carries, so
+    ``**bold `code` bold**`` comes out bold throughout with the code span also
+    in reverse video. Blanking is what makes that work: the masked row holds
+    no markers from inside the code span, so a `*` there can neither open an
+    emphasis run nor break the one spanning it, and the `**` pair still finds
+    its partner across the span. Pairing stays row-local, as it always has —
+    only code spans are threaded across a wrap."""
+    for mt in _md_inline_pattern().finditer(masked):
+        g = mt.lastgroup
+        w = _MD_MARKER_WIDTH[g]
+        if g == "bi":
+            a = curses.A_BOLD | MD_ITALIC
+        elif g in ("b", "bu"):           # **bold** or __bold__
+            a = curses.A_BOLD
+        elif g == "s":
+            a = 0
+        elif g == "code":
+            # Unreachable: `masked` holds no backticks at all, so the code
+            # alternative can never fire here. Kept so a future regex change
+            # cannot silently mis-attribute the group.
+            a = curses.A_REVERSE
+        else:                            # i (*italic*) or iu (_italic_)
+            a = MD_ITALIC
+        for k in range(mt.start(), mt.start() + w):
+            drop[k] = True
+        for k in range(mt.end() - w, mt.end()):
+            drop[k] = True
+        for k in range(mt.start() + w, mt.end() - w):
+            attrs[k] |= a
+            if g == "s":
+                strike[k] = True
+
+
+def _code_delims(line):
+    """The character offsets, within one whole SOURCE line, of the backticks
+    that actually delimit a ``` `code` ``` span. Pairing is greedy and
+    left-to-right, matching the `[^`]+` alternative of the inline regex: a
+    backtick opens a span only when a later backtick closes it with at least
+    one character between them. Every other backtick — a lone one in prose, a
+    ``` fence marker, the empty ```` `` ```` — is literal text and is drawn as
+    itself.
+
+    The unit is the source line rather than the wrapped row precisely because
+    word-wrap can split a span: its opener and closer land on different rows,
+    and only the joined line can see that they belong together."""
+    delims = set()
+    i = 0
+    while True:
+        a = line.find("`", i)
+        if a < 0:
+            return delims
+        b = line.find("`", a + 1)
+        if b < 0:
+            return delims            # nothing left can close it: all literal
+        if b == a + 1:               # `` — empty, not a span; retry from b
+            i = b
+            continue
+        delims.add(a)
+        delims.add(b)
+        i = b + 1
+
+
+def _md_entries_state(raw, base_attr, open_=False, delims=None):
+    """Like _md_entries, but for one wrapped row of a longer source line:
+    `open_` says the row starts inside a code span (its opener sat on an
+    earlier row) and `delims` gives the columns of the backticks in this row
+    that act as delimiters — both from row_code_states, which decides pairing
+    across the whole source line. Passing delims=None treats `raw` as a
+    complete line and pairs within it.
+
+    Returns (entries, end_open), end_open being True when the row ends inside
+    a span, to flow into the next row."""
+    m = MD_HEADER.match(raw)
+    if m:
+        # Headers own their line entirely, so there is nothing to flow onward.
+        a = md_header_attr() | curses.A_BOLD
+        return ([(c, c, a) for c in m.group(2)], False)
+    if delims is None:
+        delims = _code_delims(raw)
+    if not open_ and not delims:
+        return (_md_emphasis_only(raw, base_attr), False)
+    n = len(raw)
+    attrs = [base_attr] * n
+    drop = [False] * n
+    strike = [False] * n
+
+    # Code first: it binds tighter than emphasis, and its content is opaque —
+    # a marker character inside a span is text, not markup. Every backtick is
+    # blanked too, delimiter or literal: the emphasis pass must not be able to
+    # pair two blanked-out regions back into a `code` match through the gap.
+    in_code = open_
+    masked = ["\0" if c == "`" else c for c in raw]
+    pos = 0
+    for p in sorted(delims):
+        for k in range(pos, p):
+            if in_code:
+                attrs[k] |= curses.A_REVERSE
+                masked[k] = "\0"
+        drop[p] = True                   # the delimiter backtick isn't drawn
+        in_code = not in_code
+        pos = p + 1
+    for k in range(pos, n):
+        if in_code:
+            attrs[k] |= curses.A_REVERSE
+            masked[k] = "\0"
+
+    _md_emphasis("".join(masked), attrs, drop, strike)
+
+    out = [(raw[k], (raw[k] + MD_STRIKE) if strike[k] else raw[k], attrs[k])
+           for k in range(n) if not drop[k]]
+    return (out, in_code)
+
+
+def _md_entries(raw, base_attr):
+    """Parse one complete preview line into [(logical_char, draw_string,
+    attr)]. The logical char drives token-search matching and width; the draw
+    string is what's painted (identical, except struck chars carry a combining
+    overlay)."""
+    return _md_entries_state(raw, base_attr)[0]
+
+
+def row_code_states(rows, lo=0, hi=None):
+    """Per-row ``(open_, delims)`` code-span state for wrapped `rows` of
+    (text, src) pairs — a dict keyed by row index, covering [lo, hi).
+
+    Pairing is decided over the whole source line (see _code_delims), so a
+    span split by word-wrap renders as code on every one of its rows while a
+    lone backtick stays literal. The rows of one source line are contiguous,
+    so only the source lines overlapping the window are scanned: the window is
+    widened to their boundaries and nothing outside is touched, which keeps
+    the scroll hot path proportional to the visible rows rather than to the
+    length of the note."""
+    n = len(rows)
+    hi = n if hi is None else min(hi, n)
+    lo = max(0, min(lo, n))
+    if lo >= hi:
+        return {}
+    while lo > 0 and rows[lo - 1][1] == rows[lo][1]:
+        lo -= 1
+    while hi < n and rows[hi][1] == rows[hi - 1][1]:
+        hi += 1
+    states = {}
+    i = lo
+    while i < hi:
+        src = rows[i][1]
+        j = i
+        while j < n and rows[j][1] == src:
+            j += 1
+        # The overwhelmingly common case is a source line with no backtick at
+        # all: nothing to pair, so skip the join and hand every row the empty
+        # state. Only lines that actually carry a backtick pay for the rest.
+        if not any("`" in rows[k][0] for k in range(i, j)):
+            for k in range(i, j):
+                states[k] = (False, EMPTY_DELIMS)
+            i = j
+            continue
+        line = "".join(rows[k][0] for k in range(i, j))
+        # A header owns its line; no code spans are read out of it, matching
+        # the header branch of _md_entries_state.
+        delims = set() if MD_HEADER.match(line) else _code_delims(line)
+        off = 0
+        open_ = False
+        for k in range(i, j):
+            text = rows[k][0]
+            local = {p - off for p in delims if off <= p < off + len(text)}
+            states[k] = (open_, local)
+            if len(local) % 2:
+                open_ = not open_
+            off += len(text)
+        i = j
+    return states
+
+
+def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi, code_state=None):
     """Like draw_line_highlighted but renders inline markdown; search hits
-    still win, overriding the markdown attribute on the matched run."""
-    entries = _md_entries(raw, base_attr)
+    still win, overriding the markdown attribute on the matched run.
+    `code_state` is this row's (open_, delims) pair from row_code_states,
+    carrying the code-span pairing decided across the whole source line; None
+    treats `raw` as a complete line."""
+    open_, delims = (False, None) if code_state is None else code_state
+    entries = _md_entries_state(raw, base_attr, open_, delims)[0]
     if not entries:
         return
     if hi and hi.tokens:
@@ -6030,11 +6212,12 @@ def preview_match_list(rows, tokens, render_md):
         return []
     out = []
     per_src = {}                  # src line -> matches counted so far on it
+    code_states = row_code_states(rows) if render_md else {}
     for i, (raw, src) in enumerate(rows):
         # Match the logical (marker-stripped) text when markdown is rendered,
         # so the counting agrees with draw_markdown_line. The tag row is drawn
         # literally, so it's counted literally.
-        line = ("".join(e[0] for e in _md_entries(raw, 0))
+        line = ("".join(e[0] for e in _md_entries_state(raw, 0, *code_states[i])[0])
                 if render_md and src is not None else raw)
         spans = match_spans(line, tokens)
         seen = per_src.get(src, 0)
@@ -6471,6 +6654,9 @@ def draw(stdscr, notes, state):
             start = state["p_scroll"]
             end = start + h - 2
             render_md = config_bool("render_markdown", True)
+            # Only the visible window is scanned — see row_code_states.
+            code_states = (row_code_states(rows, start, end) if render_md
+                           else None)
 
             for i, (line, src) in enumerate(rows[start:end]):
                 if i >= h - 2:
@@ -6480,13 +6666,19 @@ def draw(stdscr, notes, state):
                 # newline-free. The tag row (src None) is drawn literally, in
                 # the tag color — it's frontmatter, not note text, so neither
                 # the markdown renderer nor the body color applies to it.
-                draw_body = (draw_markdown_line if render_md and src is not None
-                            else draw_line_highlighted)
-                draw_body(
-                    stdscr, i + 1, mid + 1, line, preview_w,
-                    curses.color_pair(4) if src is not None else curses.color_pair(3),
-                    body_hi.at(focus_ord if start + i == focus_row else None),
-                )
+                if render_md and src is not None:
+                    draw_markdown_line(
+                        stdscr, i + 1, mid + 1, line, preview_w,
+                        curses.color_pair(4),
+                        body_hi.at(focus_ord if start + i == focus_row else None),
+                        code_states[start + i],
+                    )
+                else:
+                    draw_line_highlighted(
+                        stdscr, i + 1, mid + 1, line, preview_w,
+                        curses.color_pair(3 if src is None else 4),
+                        body_hi.at(focus_ord if start + i == focus_row else None),
+                    )
 
             # The live drag-select band goes on last, attribute-only over the
             # finished cells — see paint_selection.

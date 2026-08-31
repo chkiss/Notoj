@@ -5786,6 +5786,164 @@ class TestWrapToWidthSpeed(unittest.TestCase):
                         "wrap cost grew superlinearly with line length")
 
 
+class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
+    """A wrap may split an inline backtick code span across rows, but the
+    preview pairs backticks over the whole source line (row_code_states →
+    _md_entries_state), so every row of a split span still paints as code and
+    the prose between two spans never turns up in reverse video — while a
+    backtick that never finds a partner stays literal text."""
+
+    def test_long_path_span_and_prose_between_two_spans(self):
+        # The exact note that surfaced the bug: a long file-path span followed
+        # by an "Original filename:" span. At no wrap width may the prose
+        # between them end up inside a code run, and the long span — which
+        # straddles rows — must still render as code on every one of its rows.
+        line = ("Scan filed as `inputs/Tantes Jeanine et Bernadette/1983 Sciamsi "
+                "Charlotte final illness and death - circular letters by Jeanine & "
+                "Bernadette (26 Feb & 27 Nov 1983).pdf`. Original filename: "
+                "`Stories about Maman`.")
+        base = curses_stub.color_pair(4)
+        for width in (40, 60, 70, 80, 100, 120, 200):
+            # Render the wrapped rows the way the preview does: threading the
+            # in-code-span state across the rows of each source line.
+            pairs = [(r[0], r[1]) for r in notoj.wrap_preview_rows([line], width)]
+            states = notoj.row_code_states(pairs)
+            all_runs = []
+            for i, (row, src) in enumerate(pairs):
+                runs, last, cur = [], None, ""
+                for _log, draw, attr in notoj._md_entries_state(
+                        row, base, *states[i])[0]:
+                    if attr != last:
+                        if cur:
+                            runs.append((last & curses_stub.A_REVERSE, cur))
+                        cur = ""
+                        last = attr
+                    cur += draw
+                if cur:
+                    runs.append((last & curses_stub.A_REVERSE, cur))
+                all_runs.append(runs)
+            # The prose between the two spans must not be code.
+            for runs in all_runs:
+                for is_code, text in runs:
+                    if is_code:
+                        self.assertNotIn("Original filename", text,
+                                         "prose rendered as code at width %d"
+                                         % width)
+            # The long path span's content must render as code on the rows it
+            # occupies (it spans every wrap width in play).
+            code_text = "".join(t for runs in all_runs
+                                for is_code, t in runs if is_code)
+            self.assertIn("inputs/Tantes Jeanine", code_text,
+                          "long span not rendered as code at width %d" % width)
+            self.assertIn("1983).pdf", code_text,
+                          "long span tail not rendered as code at width %d"
+                          % width)
+
+    def _runs(self, line, base=0):
+        """(is_code, text) runs for one complete line, as drawn."""
+        runs, last, cur = [], None, ""
+        for _log, draw, attr in notoj._md_entries(line, base):
+            if attr != last:
+                if cur:
+                    runs.append((bool(last & curses_stub.A_REVERSE), cur))
+                cur = ""
+                last = attr
+            cur += draw
+        if cur:
+            runs.append((bool(last & curses_stub.A_REVERSE), cur))
+        return runs
+
+    def test_unpaired_backtick_stays_literal(self):
+        # A backtick with no partner on its source line is prose, not the
+        # opener of a span that swallows the rest of the line. The vault has
+        # 75 such lines; threading the state through every backtick regardless
+        # of pairing used to paint all of them in reverse video.
+        for line in ("press the ` key to continue",
+                     "cost is 100` and rising"):
+            self.assertEqual(self._runs(line), [(False, line)],
+                             "lone backtick opened a span: %r" % line)
+        # A paired span followed by a stray backtick: the span renders, the
+        # tail after the stray one does not, and the stray one is still drawn.
+        mixed = "a `real` span then a stray ` tail"
+        runs = self._runs(mixed)
+        self.assertIn((True, "real"), runs)
+        for is_code, text in runs:
+            if is_code:
+                self.assertNotIn("tail", text)
+        self.assertIn("`", "".join(t for _c, t in runs),
+                      "literal backtick was eaten as a delimiter")
+
+    def test_fence_line_is_not_a_code_run(self):
+        # ``` fence markers are three backticks — an odd count, which the
+        # toggle-per-backtick reading turned into a reverse-video run with the
+        # backticks swallowed. 16 notes in the vault open fenced blocks.
+        for fence in ("```", "```python", "~~~ not a fence ```"):
+            for is_code, _text in self._runs(fence):
+                self.assertFalse(is_code, "fence rendered as code: %r" % fence)
+            self.assertEqual("".join(t for _c, t in self._runs(fence)), fence,
+                             "fence backticks were eaten: %r" % fence)
+
+    def test_empty_span_is_literal(self):
+        # `` has nothing between its backticks, so the inline regex never
+        # matched it; it must still draw as two literal backticks.
+        self.assertEqual(self._runs("an empty span `` here"),
+                         [(False, "an empty span `` here")])
+
+    def test_emphasis_survives_a_code_span_inside_it(self):
+        # Resolving code spans first must not cost the emphasis wrapped around
+        # them: 114 lines in the vault are **bold with `code` inside**, and
+        # they must render bold throughout, with the code span in reverse
+        # video and neither the ** nor the backticks drawn as text.
+        line = "- **`deploy.sh` deletes backups.** It uses `--delete`"
+        entries = notoj._md_entries(line, 0)
+        drawn = "".join(d for _l, d, _a in entries)
+        self.assertNotIn("*", drawn, "bold markers drawn as text")
+        self.assertNotIn("`", drawn, "code delimiters drawn as text")
+        bold = "".join(l for l, _d, a in entries if a & curses_stub.A_BOLD)
+        code = "".join(l for l, _d, a in entries if a & curses_stub.A_REVERSE)
+        self.assertEqual(bold, "deploy.sh deletes backups.",
+                         "bold lost across the code span it contains")
+        self.assertEqual(code, "deploy.sh--delete")
+        # The span inside the bold run carries both attributes at once.
+        both = [l for l, _d, a in entries
+                if a & curses_stub.A_BOLD and a & curses_stub.A_REVERSE]
+        self.assertEqual("".join(both), "deploy.sh")
+
+    def test_marker_inside_a_code_span_is_literal(self):
+        # Code binds tighter than emphasis, so a marker character inside a
+        # span is text and cannot open a run that eats the rest of the line.
+        entries = notoj._md_entries("use `a * b` then plain", 0)
+        self.assertEqual("".join(d for _l, d, _a in entries),
+                         "use a * b then plain")
+        for _l, _d, a in entries:
+            self.assertFalse(a & curses_stub.A_BOLD)
+
+    def test_states_scan_only_the_visible_window(self):
+        # row_code_states widens to source-line boundaries and no further, so
+        # the scroll hot path does not pay for the whole note on every frame.
+        rows = [("row %d with a `span` in it" % i, i // 3) for i in range(5000)]
+        states = notoj.row_code_states(rows, 3000, 3040)
+        self.assertLess(len(states), 60,
+                        "whole note scanned for a 40-row window")
+        self.assertTrue(all(k in states for k in range(3000, 3040)),
+                        "visible rows missing from the state map")
+        # Windowed and full scans must agree wherever they overlap.
+        full = notoj.row_code_states(rows)
+        for k in range(3000, 3040):
+            self.assertEqual(states[k], full[k])
+
+    def test_span_split_across_rows_of_a_wrapped_line(self):
+        # The wrap case the fix exists for, stated directly: an opener on one
+        # row and its closer on a later row of the SAME source line still pair.
+        rows = [("start `open", 7), ("close` end", 7)]
+        states = notoj.row_code_states(rows)
+        self.assertEqual(states[0][0], False)
+        self.assertEqual(states[1][0], True, "span did not flow to next row")
+        # A new source line resets the state even if the prior one ended open.
+        rows = [("start `unclosed", 7), ("next line", 8)]
+        self.assertEqual(notoj.row_code_states(rows)[1][0], False)
+
+
 # ---------------------------------------------------------------------------
 # Scroll hot path — the contract that keeps j/k and PgDn seamless. Every
 # slowdown Notoj has ever had was one of these invariants quietly broken by a
