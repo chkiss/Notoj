@@ -2667,6 +2667,91 @@ class TestScheduleLoop(unittest.TestCase):
         self.assertEqual(review["x"]["due"], 123456.0)
 
 
+class TestApplySchedule(unittest.TestCase):
+    """apply_schedule is what both S and `.` call, so a repeated schedule is
+    recorded — and therefore undone — exactly like a typed one."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self._old = notoj.REVIEW_FILE
+        notoj.REVIEW_FILE = os.path.join(self.dir.name, ".notoj_review.json")
+        self.acts = []
+        self.note = {"id": "n1", "path": "/x/n1.md"}
+
+    def tearDown(self):
+        notoj.REVIEW_FILE = self._old
+        self.dir.cleanup()
+
+    def test_sets_due_records_and_persists(self):
+        state = {"_review": {}}
+        self.assertTrue(
+            notoj.apply_schedule(state, self.note, "2w", self.acts.append))
+        due = state["_review"]["n1"]["due"]
+        self.assertAlmostEqual(due, notoj.parse_when("2w"), delta=5)
+        self.assertEqual(notoj.load_review()["n1"]["due"], due)
+        self.assertEqual(len(self.acts), 1)
+        self.assertEqual(self.acts[0]["kind"], "defer")
+        self.assertIsNone(self.acts[0]["before"])
+        self.assertEqual(self.acts[0]["path"], "/x/n1.md")
+
+    def test_unparseable_when_changes_nothing(self):
+        state = {"_review": {}}
+        self.assertFalse(
+            notoj.apply_schedule(state, self.note, "whenever-ish",
+                                 self.acts.append))
+        self.assertEqual(state["_review"], {})
+        self.assertEqual(self.acts, [])
+
+    def test_repeat_is_undone_like_a_typed_one(self):
+        # Schedule twice, as `.` down a queue would; undo must restore the
+        # prior entry rather than deleting it.
+        state = {"_review": {}}
+        notoj.apply_schedule(state, self.note, "2w", self.acts.append)
+        first = dict(state["_review"]["n1"])
+        notoj.apply_schedule(state, self.note, "1y", self.acts.append)
+        self.assertNotEqual(state["_review"]["n1"], first)
+        notoj.undo_action(self.acts[-1], state["_review"])
+        self.assertEqual(state["_review"]["n1"], first)
+
+
+class TestRepeatLastChange(unittest.TestCase):
+    """`.` repeats whichever change was made last — the tag addition or the
+    loop schedule — rather than being pinned to one of them by mode."""
+
+    def test_nothing_to_repeat(self):
+        self.assertIsNone(notoj.repeatable({}))
+
+    def test_tags_only(self):
+        self.assertEqual(
+            notoj.repeatable({"_last_tags": "todo", "_last_repeat": "tags"}),
+            "tags")
+
+    def test_schedule_while_resurfacing(self):
+        self.assertEqual(
+            notoj.repeatable({"_last_sched": "2w", "_last_repeat": "sched",
+                              "review_mode": True}),
+            "sched")
+
+    def test_most_recent_wins_in_either_direction(self):
+        base = {"_last_tags": "todo", "_last_sched": "2w", "review_mode": True}
+        self.assertEqual(notoj.repeatable({**base, "_last_repeat": "sched"}),
+                         "sched")
+        # Tagging in the resurface view puts `.` back on the tag.
+        self.assertEqual(notoj.repeatable({**base, "_last_repeat": "tags"}),
+                         "tags")
+
+    def test_schedule_does_not_leak_out_of_the_resurface_view(self):
+        # A schedule only means anything against a loop in the queue, so
+        # outside it `.` falls back to the tag — or to nothing at all.
+        self.assertEqual(
+            notoj.repeatable({"_last_sched": "2w", "_last_repeat": "sched",
+                              "_last_tags": "todo", "review_mode": False}),
+            "tags")
+        self.assertIsNone(
+            notoj.repeatable({"_last_sched": "2w", "_last_repeat": "sched",
+                              "review_mode": False}))
+
+
 class TestReviewRoundTrip(unittest.TestCase):
     def test_save_and_load(self):
         with tempfile.TemporaryDirectory() as d:

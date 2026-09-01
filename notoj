@@ -244,7 +244,9 @@ KEYMAP = [
               "would complete to as you type (most-used first); Tab accepts it "
               "and cycles the next match, Shift-Tab cycles back, Tab on an empty "
               "word browses them all. Disable with tag_preview=false."),
-        ("tag_repeat", ".", "repeat the last tag addition on the selected note"),
+        ("tag_repeat", ".", "repeat the last change on the selected note — the tag "
+              "addition, or the loop schedule (S) while resurfacing, whichever "
+              "you made last"),
         ("tag_filter", "t", "filter to notes sharing the selected note's tags; Tab cycles "
               "the filter: all of them → each single tag"),
         ("tag_browse", "T", "browse all tags, most recently used first (Enter filters by "
@@ -253,7 +255,8 @@ KEYMAP = [
     ("Resurface (open loops)", [
         ("resurface", "g r", "toggle resurface view (notes tagged #loop, most stale first)"),
         ("snooze", "z", 'snooze loop a week (quick "not now")'),
-        ("schedule", "S", "schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…)"),
+        ("schedule", "S", "schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…); "
+              ". repeats the last one down the queue"),
         ("loop_done", "x", "mark loop done (removes #loop tag)"),
         (None, "#loop 2w", "typed anywhere in a note's text schedules it as a loop; "
                      "relative horizons are pinned to a date on save "
@@ -2110,6 +2113,40 @@ def parse_when(s, now=None):
 def schedule_loop(review, note_id, due_ts):
     """Set an explicit resurface date for a loop (mutates the review dict)."""
     review[note_id] = {"due": due_ts}
+
+
+def repeatable(state):
+    """What `.` would repeat right now: "sched", "tags", or None.
+
+    Whichever change was made last is the one `.` repeats, as in vim — so
+    triaging loops with S then reaching for `.` schedules, and tagging with #
+    then reaching for `.` tags, without a mode to remember. A schedule only
+    means anything against a loop being resurfaced, so outside that view `.`
+    falls back to the last tag addition rather than scheduling a note that
+    isn't in the queue."""
+    if (state.get("_last_repeat") == "sched" and state.get("_last_sched")
+            and state.get("review_mode")):
+        return "sched"
+    return "tags" if state.get("_last_tags") else None
+
+
+def apply_schedule(state, note, when, record):
+    """Schedule `note` to resurface at `when` (the raw prompt text, e.g. "2w"),
+    recording the change so u/^R can walk back over it. Returns True when the
+    text parsed and the schedule was set; False leaves everything untouched.
+
+    Shared by the S prompt and by `.` repeating it, so a repeated schedule is
+    undone exactly like a typed one."""
+    due = parse_when(when)
+    if due is None:
+        return False
+    nid = note["id"]
+    before = state["_review"].get(nid)
+    schedule_loop(state["_review"], nid, due)
+    save_review(state["_review"])
+    record({"kind": "defer", "id": nid, "path": note["path"],
+            "before": before, "after": state["_review"][nid]})
+    return True
 
 
 # "#loop <when>" anywhere in a note body schedules it inline (see
@@ -6701,9 +6738,15 @@ def draw(stdscr, notes, state):
             (3, "d trash"), (4, "ESC clear/exit"), (1, "q quit"),
         ]
     elif state.get("review_mode"):
+        # The S and # hints name whichever one `.` is currently pointed at, so
+        # the repeat is never a guess about what was done last.
+        rep = repeatable(state)
         segments = [
             (4, "ESC clear/exit"), (5, "/ search"), (3, "⏎/e open"),
-            (2, "z snooze"), (2, "S schedule"), (2, "x done"),
+            (2, "z snooze"),
+            (2, "S/. schedule" if rep == "sched" else "S schedule"),
+            (2, "x done"),
+            (7, "#/. tag" if rep == "tags" else ""),
             (3, "d trash"), (6, "u/^R undo"), (1, "q quit"),
         ]
     elif state.get("tagf") is not None:
@@ -6843,6 +6886,9 @@ def run(stdscr, imports=(), move=False):
         "tag_input": "",
         "_tag_preview": "",
         "_last_tags": "",
+        "_last_sched": "",
+        # Which of the two `.` repeats: the more recent of the pair wins.
+        "_last_repeat": "",
         "dup_mode": None,
         "_dups": [],
         "trash_mode": False,
@@ -7331,6 +7377,7 @@ def run(stdscr, imports=(), move=False):
                         record({"kind": "tags", "path": note["path"],
                                 "added": added, "mod": mod_ts})
                         state["_last_tags"] = state["tag_input"].strip()
+                        state["_last_repeat"] = "tags"
                         git_commit(f"tag: {_stem(note['path'])}")
                         refresh_notes()
                         state["_restore_path"] = note["path"]
@@ -7356,14 +7403,9 @@ def run(stdscr, imports=(), move=False):
             elif r == "submit":
                 if filtered and 0 <= state["cur"] < len(filtered):
                     note = filtered[state["cur"]]
-                    due = parse_when(state["sched_input"])
-                    if due is not None:
-                        nid = note["id"]
-                        before = state["_review"].get(nid)
-                        schedule_loop(state["_review"], nid, due)
-                        save_review(state["_review"])
-                        record({"kind": "defer", "id": nid, "path": note["path"],
-                                "before": before, "after": state["_review"][nid]})
+                    if apply_schedule(state, note, state["sched_input"], record):
+                        state["_last_sched"] = state["sched_input"].strip()
+                        state["_last_repeat"] = "sched"
                         refresh_notes()
                 state["sched_mode"] = False
                 state["sched_input"] = ""
@@ -7679,7 +7721,7 @@ def run(stdscr, imports=(), move=False):
             state["p_scroll"] = 0
 
         # ----------------------------
-        # Tag note ( # to enter tags, . to repeat last addition )
+        # Tag note ( # to enter tags, . to repeat the last change )
         # ----------------------------
 
         elif key_matches(k, KEY["tag"]) and filtered and not state["trash_mode"]:
@@ -7688,18 +7730,26 @@ def run(stdscr, imports=(), move=False):
             state["_tag_comp"] = None
             state["_tag_preview"] = ""
 
-        elif key_matches(k, KEY["tag_repeat"]) and filtered and state["_last_tags"] and not state["trash_mode"]:
+        elif key_matches(k, KEY["tag_repeat"]) and filtered and repeatable(state) \
+                and not state["trash_mode"]:
             note = filtered[state["cur"]]
-            new_tags = parse_tag_input(state["_last_tags"])
-            mod_ts = note.get("modificationDate")
-            added = add_tags_keep_date(note["path"], new_tags) if new_tags else []
-            if added:
-                record({"kind": "tags", "path": note["path"],
-                        "added": added, "mod": mod_ts})
-                git_commit(f"tag: {_stem(note['path'])}")
-                refresh_notes()
-                state["_restore_path"] = note["path"]
-                state["p_scroll"] = 0
+            if repeatable(state) == "sched":
+                # No _restore_path here, matching the S prompt: the note has
+                # just left the due queue, so the cursor should fall onto the
+                # next loop rather than chase the one already dealt with.
+                if apply_schedule(state, note, state["_last_sched"], record):
+                    refresh_notes()
+            else:
+                new_tags = parse_tag_input(state["_last_tags"])
+                mod_ts = note.get("modificationDate")
+                added = add_tags_keep_date(note["path"], new_tags) if new_tags else []
+                if added:
+                    record({"kind": "tags", "path": note["path"],
+                            "added": added, "mod": mod_ts})
+                    git_commit(f"tag: {_stem(note['path'])}")
+                    refresh_notes()
+                    state["_restore_path"] = note["path"]
+                    state["p_scroll"] = 0
 
         # ----------------------------
         # Tag filter ( t = notes sharing the selected note's tags, ⇥ cycles
