@@ -27,8 +27,8 @@ It then asks two questions, each answerable ahead of time with a flag.
 **Auto-update, on by default.** notoj installs a `notoj()` shell function that
 pulls this repo in the background on every launch, so you always run the newest
 commit. The prompt defaults to yes and a non-interactive run (`curl | bash`)
-takes it. Worth knowing what you are agreeing to: the app fetches and runs code
-from this repository before each start. Decline with `--no-auto-update`, or by
+takes it. So be clear on what that means: the app fetches and runs code from
+this repository before each start. Decline with `--no-auto-update`, or by
 answering `n`, at install time or any time after: re-running the installer with
 the other answer switches it either way. With it off, update by hand with
 `git -C ~/Notoj pull`. The symlink runs notoj perfectly well on its own; the
@@ -63,6 +63,8 @@ take `true/false/yes/no/on/off/1/0`. The main options:
 | `notes_dir` | *(set on first run)* | Where notes live: required |
 | `default_editor` | `vim` | Editor for opening/creating notes (`$NOTOJ_VIM` wins over it) |
 | `tag_editor.<tag>` | *(none)* | Per-tag editor override, e.g. open `#arabic` notes in mlterm, `#hindi` in a GUI editor |
+| `open_position` | `cursor` | Where **Enter** opens a note: `first` (line 1), `title`, `last_edit` (where your last change was made, as `g;`/`gi` mean it: change the bottom line then a middle one and this is the middle one), `cursor` (where you left the cursor, from Vim's `"` mark), `end` |
+| `open_end_position` | `end` | Where **`e`** opens a note. Same five positions |
 | `render_markdown` | `true` | Render light markdown in the preview pane (master switch) |
 | `markdown_asterisk` | `true` | Style `*italic*` / `**bold**` |
 | `markdown_underscore_italic` | `false` | Style `_italic_` (off leaves `snake_case` alone) |
@@ -102,9 +104,9 @@ full keybinding reference. The essentials:
   from there (a quoted `"phrase"` is matched across line breaks too).
 - With a multi-word query, `Tab`/`Shift-Tab` cycle which term `n`/`N` step
   through: all of them, then each one, then all again. The result list is
-  untouched, which is what retyping a shorter query can't give you: `/food`
-  ranks a different set of notes, this keeps the set and changes only what
-  counts as a match, in the panes and in Vim.
+  untouched: retyping `/food` would rank a different set of notes, while this
+  keeps the set and changes only what counts as a match, in the panes and in
+  Vim.
 - Views: `g t` trash, `g d` duplicates, `g r` resurface (open loops),
   `T` all tags, `t` notes sharing the selected note's tags, `b` backlinks
   (notes whose `[[wikilinks]]` or `[text](note.md)` links point at the
@@ -163,9 +165,9 @@ Notes are markdown files with YAML frontmatter (`id`, `created`, `modified`,
 
 ## Open loops (resurfacing)
 
-Tag a note `#loop` and it appears in the resurface view (`g r`), most stale
-first: a tickler, not spaced repetition. There you can snooze a week (`z`),
-schedule precisely (`S`, e.g. `+2w`, `3mo`, `2026-12-01`), or close the loop
+Tag a note `#loop` and it appears in the resurface view (`g r`), the one left
+untouched longest at the top. There you can snooze a week (`z`), schedule
+precisely (`S`, e.g. `+2w`, `3mo`, `2026-12-01`), or close the loop
 (`x`). Typing `#loop <when>` anywhere in a note's text schedules it from any
 device; on save the relative horizon is pinned to an absolute date
 (`#loop 3d` → `#loop 2026-06-12`), so re-saving never re-anchors it:
@@ -242,12 +244,12 @@ python3 scripts/simplenote_convert_to_md.py <export_dir> [output_dir]
 
 ## Development
 
-No dependencies, no test runner to install: both suites are stdlib `unittest`
-and run straight from a clone.
+Both suites are stdlib `unittest` and run straight from a clone, with nothing
+to install.
 
 ```bash
-python3 tests/test_notoj.py            # core app tests (583)
-python3 tests/test_update_ratings.py   # rating-table tests (38)
+python3 tests/test_notoj.py            # core app tests (748)
+python3 tests/test_update_ratings.py   # rating-table tests (39)
 ```
 
 Both run on every push and pull request (`.github/workflows/tests.yml`).

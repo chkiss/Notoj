@@ -206,9 +206,11 @@ KEYMAP = [
         (None, "ESC", "step back (prompt → filter → view)"),
     ]),
     ("Notes", [
-        ("open", "Enter", "open note in Vim — at the match the preview is on "
-              "when a search is active (n/N move it), else at the top"),
-        ("open_end", "e", "open note in Vim at the last line (normal mode)"),
+        ("open", "Enter", "open note in Vim: at the match the preview is on "
+              "when a search is active (n/N move it), else at the configured "
+              "open_position (default: where you left the cursor)"),
+        ("open_end", "e", "open note in Vim at the last line "
+              "(open_end_position)"),
         ("new", "o", "create new blank note (o as in vim's open-a-new-line; "
               "n/N are the search-match keys)"),
         ("trash", "d", "trash selected note"),
@@ -2263,6 +2265,118 @@ def undo_log_path():
     return os.path.join(base, "notoj", key, "undo.jsonl")
 
 
+# ----------------------------
+# Last-change position (open_position = last_edit)
+# ----------------------------
+#
+# Where the last change to a note was MADE — Vim's `.` mark, the one `g;` and
+# `gi` go to. Edit the last line of a note and then a line in the middle, and
+# this is the middle line: it is the change made most recently in time, not the
+# one furthest down the file. That distinction is why this can't be recovered
+# from a diff of the before and after text, which only knows where the changes
+# are, not what order they happened in.
+#
+# It can't be read out of viminfo either. Vim writes `.` and `^` to the file on
+# exit, but does not restore them into a later session's buffer (tested on Vim
+# 8.2: they come back 0), unlike the `"` mark that open_position=cursor rides
+# on. So notoj asks the session that made the change: the sourced vimscript
+# writes `line(".")`/`col(".")` for `.` to $NOTOJ_EDIT_MARK on VimLeavePre, and
+# edit_in_editor reads it back and files it under the note's path.
+#
+# Only edits made through notoj leave a mark, and only ones that reached the
+# disk are kept. A note edited on your phone, or in a non-Vim editor, has none
+# and opens at its title instead.
+#
+# The map lives beside the undo journal (local to this machine, keyed by notes
+# dir, never inside the synced tree) as a plain {path: [line, col]} JSON file.
+# It is a convenience, not a record: any read or write failure costs the title
+# fallback and nothing else.
+
+EDIT_MARKS_CAP = 2000   # notes remembered before the oldest entries are dropped
+
+
+def edit_marks_path():
+    return os.path.join(os.path.dirname(undo_log_path()), "edit-marks.json")
+
+
+def read_edit_mark_file(path):
+    """The (line, col) a spawned Vim wrote to its $NOTOJ_EDIT_MARK file, or
+    None when it wrote nothing (no change was made, or it isn't a Vim)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            parts = f.read().split()
+    except OSError:
+        return None
+    try:
+        line, col = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return None
+    return (line, max(1, col)) if line > 0 else None
+
+
+def record_edit_mark(path, mark):
+    """File `mark` — the (line, col) of the change this edit made last — as the
+    note's last-change position. Silent on any failure: a missing mark only
+    costs the title fallback."""
+    if not mark:
+        return
+    marks = _read_edit_marks()
+    marks.pop(path, None)          # re-insert so this note is the newest entry
+    marks[path] = [mark[0], mark[1]]
+    for stale in list(marks)[:-EDIT_MARKS_CAP]:
+        del marks[stale]
+    try:
+        p = edit_marks_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(marks, f, separators=(",", ":"))
+        os.replace(tmp, p)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _read_edit_marks():
+    try:
+        with open(edit_marks_path(), "r", encoding="utf-8") as f:
+            marks = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return marks if isinstance(marks, dict) else {}
+
+
+def move_edit_mark(old_path, new_path):
+    """Follow a note's mark when the file is renamed (a retitle) or restored
+    out of the trash, so the position isn't lost with the old name."""
+    if old_path == new_path:
+        return
+    marks = _read_edit_marks()
+    if old_path not in marks:
+        return
+    marks[new_path] = marks.pop(old_path)
+    try:
+        p = edit_marks_path()
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(marks, f, separators=(",", ":"))
+        os.replace(tmp, p)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def last_edit_mark(path):
+    """(line, col) of the last change made to a note through notoj, or None."""
+    v = _read_edit_marks().get(path)
+    if isinstance(v, int):        # a line alone, from an older marks file
+        v = [v, 1]
+    if not isinstance(v, list) or len(v) != 2:
+        return None
+    line, col = v
+    if not isinstance(line, int) or not isinstance(col, int) or line < 1:
+        return None
+    return (line, max(1, col))
+
+
 def undo_persist_on():
     return bool(UNDO_LOG) and config_bool("undo.persist", True)
 
@@ -3402,7 +3516,8 @@ def check_rename(n):
 #   - makes gf follow [[wikilinks]] and [text](target) links to other notes in
 #     $NOTOJ_NOTES_DIR, falling back to built-in gf otherwise;
 #   - highlights [[wikilinks]] (notojWikiLink, linked to Underlined);
-#   - exposes NotojOpenAtTitle() to open a note at its title line.
+#   - exposes NotojOpenAtTitle() to open a note at its title line, and
+#     NotojOpenAtLastPos() to reopen it where the last session left off.
 # Embedded here (rather than shipped as a sibling file) so notoj stays a single
 # self-contained program.
 NOTOJ_VIM_SCRIPT = r"""
@@ -3496,6 +3611,58 @@ function! NotojOpenAtTitle() abort
     call winrestview(l:v)
   endif
 endfunction
+
+" Reopen the note where the last edit left the cursor. Vim records that per
+" file in viminfo as the `"` mark, so this survives across notoj sessions and
+" reboots. A note never opened before (or one whose mark is now past its end,
+" after the tail was cut elsewhere) has nothing to restore, and falls back to
+" the title line — as does a mark on line 1, which is both what Vim reports
+" for a file it has no record of and, in a note, the frontmatter's `---`.
+" zv opens any fold the mark landed inside.
+function! NotojOpenAtLastPos() abort
+  let l:l = line("'\"")
+  if l:l > 1 && l:l <= line('$')
+    execute "normal! g`\"zv"
+    normal! zz
+  else
+    call NotojOpenAtTitle()
+  endif
+endfunction
+
+" Open on a position notoj recorded earlier (the last-change mark). A line past
+" the end — the note was cut shorter elsewhere since — falls back to the title
+" rather than clamping to a line that no longer means anything.
+function! NotojOpenAtLine(l, c) abort
+  if a:l > 0 && a:l <= line('$')
+    call cursor(a:l, a:c)
+    normal! zvzz
+  else
+    call NotojOpenAtTitle()
+  endif
+endfunction
+
+" Hand notoj back the `.` mark — where this session's last change was MADE,
+" which is what `g;` and `gi` go to and what open_position=last_edit opens on.
+" Vim saves that mark to viminfo but never restores it into a later session, so
+" the session that made the change is the only one that can report it. Written
+" on exit, and only when there was a change to report; notoj passes the file to
+" write in $NOTOJ_EDIT_MARK and ignores it unless the note was also saved.
+function! s:NotojWriteEditMark() abort
+  if empty($NOTOJ_EDIT_MARK)
+    return
+  endif
+  let l:l = line("'.")
+  if l:l > 0
+    silent! call writefile([l:l . ' ' . col("'.")], $NOTOJ_EDIT_MARK)
+  endif
+endfunction
+
+if !empty($NOTOJ_EDIT_MARK)
+  augroup NotojEditMark
+    autocmd!
+    autocmd VimLeavePre * call s:NotojWriteEditMark()
+  augroup END
+endif
 
 " ---- title-clobber guard -------------------------------------------------
 " notoj derives a note's title from the first body line and writes it into the
@@ -3710,6 +3877,30 @@ def tab_cycles_terms_in_tag_view():
     return v == "terms"
 
 
+# Where a note opens. Both open keys — Enter and `e` — choose from this same
+# set; only their defaults differ (Enter: cursor, `e`: end), which is the
+# behavior each key already had.
+#
+#   first      file line 1, the frontmatter's opening ---
+#   title      the title line (frontmatter skipped)
+#   last_edit  where the last change was MADE — Vim's `.` mark, what `g;` and
+#              `gi` go to. Edit the bottom line and then a middle one and this
+#              is the middle one: last in time, not lowest in the file.
+#   cursor     where the cursor was when the last session left (Vim's " mark)
+#   end        the last line
+OPEN_POSITIONS = ("first", "title", "last_edit", "cursor", "end")
+
+
+def open_position(end=False):
+    """The configured open position for a key: `open_end_position` for `e`
+    (default `end`), `open_position` for Enter (default `cursor`). An
+    unrecognized value falls back to that default rather than to a guess."""
+    default = "end" if end else "cursor"
+    key = "open_end_position" if end else "open_position"
+    v = (config_get(key, default) or default).strip().lower()
+    return v if v in OPEN_POSITIONS else default
+
+
 def vim_search_pattern(q, extra=()):
     """Translate a notoj search query into a Vim search pattern, so opening a
     matched note can highlight the hits and drop the cursor on the first one.
@@ -3743,7 +3934,8 @@ def vim_search_pattern(q, extra=()):
     return r"\c\V" + body
 
 
-def _vim_position_args(src, end, search, at=None, at_pat=None):
+def _vim_position_args(src, end, search, at=None, at_pat=None, pos=None,
+                       mark=None):
     """The -c args that place the cursor (and, with an active search, highlight
     the matches) for a spawned Vim.
 
@@ -3751,17 +3943,28 @@ def _vim_position_args(src, end, search, at=None, at_pat=None):
     ranks fuzzily (edit distance, tag and substring hits), so a note can rank
     for a query it doesn't contain verbatim. `let @/` sets the pattern (so `n`
     and 'hlsearch' use *this* query, never a stale one) without the E486 that a
-    failed `/pat` would raise. Positioning: the last line (end), else `at` —
-    the (1-based file line, ordinal-on-that-line) of the match the preview was
-    focused on, so opening at the 3rd hit enters Vim on the 3rd hit — else the
-    first literal match via the quiet search(), falling back to the title when
-    the note has no verbatim hit, else the title. `src` flags that the notoj
-    vimscript (with NotojOpenAtTitle) was sourced."""
+    failed `/pat` would raise.
+
+    Positioning follows `pos` — one of OPEN_POSITIONS, defaulting to the config
+    for whichever key was pressed (`end` selects `e`'s). The one thing that
+    outranks it is an active search, which places the cursor on the match: on
+    `at` (the 1-based file line, ordinal-on-that-line of the hit the preview was
+    focused on, so opening at the 3rd hit enters Vim on the 3rd hit), else the
+    first literal match via a quiet search(), falling back to `pos` when the
+    note has no verbatim hit — it can rank fuzzily. `pos="end"` is the exception
+    that outranks the search too: it's what `e` means, and `e` after a search
+    still goes to the bottom.
+
+    `mark` carries the note's remembered (line, col) last-change position for
+    `pos="last_edit"`; `src` flags that the notoj vimscript (NotojOpenAtTitle,
+    NotojOpenAtLastPos, NotojOpenAtLine) was sourced."""
+    if pos is None:
+        pos = open_position(end)
     args = []
     if search:
         args += ["-c", "let @/ = '%s'" % search.replace("'", "''"),
                  "-c", "set hlsearch"]
-    if end:
+    if pos == "end":
         args += ["-c", "normal G"]
     elif search:
         # search() (unlike /pat or `normal n`) is silent when there's no match,
@@ -3785,19 +3988,48 @@ def _vim_position_args(src, end, search, at=None, at_pat=None):
                            "for _ in range(%d) | silent! call search(%s, 'W') "
                            "| endfor" % (line, pat, ordinal, pat)]
         else:
+            # No verbatim hit to land on: fall back to where this key would
+            # have opened without a search.
+            fb = _vim_pos_call(src, pos, mark)
             jump = "silent! keepjumps call cursor(1, 1) | if search(@/, 'cw') == 0"
-            jump += " | call NotojOpenAtTitle() | endif" if src else " | endif"
+            jump += (" | %s | endif" % fb) if fb else " | endif"
             args += ["-c", jump]
-    elif src:
-        args += ["-c", "call NotojOpenAtTitle()"]
+    else:
+        call = _vim_pos_call(src, pos, mark)
+        if call:
+            args += ["-c", call]
     return args
+
+
+def _vim_pos_call(src, pos, mark):
+    """The single Vim command that puts the cursor at `pos`, or "" when there's
+    nothing to run (position 1,1 is where Vim already opens). Without the notoj
+    vimscript sourced (`src`) the helper functions don't exist, so each position
+    falls back to the closest built-in — and `title`, which is the vimscript's
+    own idea, to none at all."""
+    if pos == "first":
+        return ""
+    if pos == "cursor":
+        # silent!: a note Vim has no viminfo entry for has no mark to restore.
+        return "call NotojOpenAtLastPos()" if src else 'silent! normal! g`"'
+    if pos == "last_edit":
+        if mark:
+            return ("call NotojOpenAtLine(%d, %d)" % mark if src else
+                    "silent! keepjumps call cursor(%d, %d)" % mark)
+        return "call NotojOpenAtTitle()" if src else ""
+    return "call NotojOpenAtTitle()" if src else ""
 
 
 def edit_in_editor(n, end, search, at=None, at_pat=None):
     """Suspend curses and open the note in the configured editor, positioned
-    by `end`/`search`/`at`. True when the file was written (its mtime moved); a
-    missing editor or a quit without writing is False. The one launch
-    preamble behind open_note and edit_trash_note."""
+    by the key's configured position (`end` selects `e`'s) and `search`/`at`.
+    True when the file was written (its mtime moved); a missing editor or a
+    quit without writing is False. The one launch preamble behind open_note and
+    edit_trash_note.
+
+    A Vim session is also handed $NOTOJ_EDIT_MARK, a file to drop its `.` mark
+    into on the way out; the mark is filed as this note's last-change position
+    for open_position=last_edit, but only when the note reached the disk."""
     path = n["path"]
     try:
         mtime_before = os.path.getmtime(path)
@@ -3805,16 +4037,33 @@ def edit_in_editor(n, end, search, at=None, at_pat=None):
         mtime_before = None
     ed = vim_cmd(n)
     cmd = list(ed)
+    mark_file = None
     if is_vimlike(ed):
         src = vim_source_args()
-        cmd += src + _vim_position_args(src, end, search, at, at_pat)
+        cmd += src + _vim_position_args(src, end, search, at, at_pat,
+                                        mark=last_edit_mark(path))
+        fd, mark_file = tempfile.mkstemp(prefix="notoj-mark-")
+        os.close(fd)
+        os.environ["NOTOJ_EDIT_MARK"] = mark_file
     cmd.append(path)
     suspend_curses()
-    launch(cmd)   # a missing editor leaves mtime unchanged → False
     try:
-        return os.path.getmtime(path) != mtime_before
+        launch(cmd)   # a missing editor leaves mtime unchanged → False
+    finally:
+        if mark_file:
+            os.environ.pop("NOTOJ_EDIT_MARK", None)
+    try:
+        written = os.path.getmtime(path) != mtime_before
     except OSError:
-        return False
+        written = False
+    if mark_file:
+        if written:
+            record_edit_mark(path, read_edit_mark_file(mark_file))
+        try:
+            os.remove(mark_file)
+        except OSError:
+            pass
+    return written
 
 
 def open_note(n, end=False, search=None, at=None, at_pat=None):
@@ -3828,6 +4077,7 @@ def open_note(n, end=False, search=None, at=None, at_pat=None):
             before = None
     if edit_in_editor(n, end, search, at, at_pat):
         final = check_rename(n) or path
+        move_edit_mark(path, final)
         git_commit(f"edit: {title(n)}")
         if before is not None and os.path.exists(final):
             try:
@@ -3859,6 +4109,7 @@ def edit_trash_note(n, end=False, search=None, at=None, at_pat=None):
     if not restored:
         return None
     final = check_rename({"path": restored}) or restored
+    move_edit_mark(path, final)
     git_commit(f"edit: {title(n)}")
     return final
 

@@ -20,6 +20,8 @@
 * `/` activates incremental search bar
 * Live incremental filtering while typing
 * Enter opens selected note, or creates a new note titled with the query when no results match
+* Enter and `e` open a note at a configurable position: `first`, `title`, `last_edit` (where the last change was made, Vim's `.` mark: last in time, not lowest in the file), `cursor` (where you left it) or `end`. One setting each (`open_position`, `open_end_position`), defaulting to `cursor` and `end`
+* An active search still outranks both and opens on the match; `end` outranks the search, so `e` always lands at the bottom
 * `o` creates a blank new note directly (explicit shortcut, complementary to search-to-create)
 * `n`/`N` step the preview to the next/previous match, which the preview opens on
 * Matching tags are highlighted in the list's tags column, and shown as a `#tag` row atop the preview (`preview_tags`) — so a note that ranked on a tag says why

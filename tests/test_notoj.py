@@ -1,6 +1,8 @@
 """Tests for notoj — pure-logic and filesystem functions."""
 
 import contextlib
+import json
+import shlex
 import importlib.machinery
 import os
 import shutil
@@ -3785,7 +3787,8 @@ class VimSearchPatternTests(unittest.TestCase):
     def test_position_args_set_pattern_then_jump(self):
         # The pattern goes in via `let @/` (never a failing /pat that would
         # leave a stale register), and the cursor jumps via the quiet search().
-        args = notoj._vim_position_args(src=True, end=False, search=r"\c\Vfoo")
+        args = notoj._vim_position_args(src=True, end=False, search=r"\c\Vfoo",
+                                        pos="title")
         self.assertEqual(args[:4], ["-c", r"let @/ = '\c\Vfoo'", "-c", "set hlsearch"])
         self.assertIn("search(@/, 'cw')", args[-1])
         self.assertIn("NotojOpenAtTitle", args[-1])  # fallback when no hit
@@ -3797,15 +3800,421 @@ class VimSearchPatternTests(unittest.TestCase):
         )
         self.assertFalse(any("search(@/" in a for a in args))
 
-    def test_position_args_no_search_uses_title(self):
+    def test_position_args_title(self):
         self.assertEqual(
-            notoj._vim_position_args(src=True, end=False, search=None),
+            notoj._vim_position_args(src=True, end=False, search=None,
+                                     pos="title"),
             ["-c", "call NotojOpenAtTitle()"],
         )
+
+    def test_position_args_cursor_is_enters_default(self):
+        self.assertEqual(
+            notoj._vim_position_args(src=True, end=False, search=None,
+                                     pos="cursor"),
+            ["-c", "call NotojOpenAtLastPos()"],
+        )
+
+    def test_position_args_first_leaves_vim_where_it_opens(self):
+        self.assertEqual(
+            notoj._vim_position_args(src=True, end=False, search=None,
+                                     pos="first"),
+            [],
+        )
+
+    def test_position_args_end_goes_to_the_last_line(self):
+        self.assertEqual(
+            notoj._vim_position_args(src=True, end=False, search=None,
+                                     pos="end"),
+            ["-c", "normal G"],
+        )
+
+    def test_position_args_last_edit_uses_the_remembered_mark(self):
+        self.assertEqual(
+            notoj._vim_position_args(src=True, end=False, search=None,
+                                     pos="last_edit", mark=(12, 4)),
+            ["-c", "call NotojOpenAtLine(12, 4)"],
+        )
+
+    def test_last_edit_with_nothing_remembered_falls_back_to_title(self):
+        self.assertEqual(
+            notoj._vim_position_args(src=True, end=False, search=None,
+                                     pos="last_edit", mark=None),
+            ["-c", "call NotojOpenAtTitle()"],
+        )
+
+    def test_position_args_without_helper_uses_builtins(self):
+        # No vimscript sourced: the helper functions don't exist, so `cursor`
+        # restores the mark directly and `title` has nothing to fall back to.
+        self.assertEqual(
+            notoj._vim_position_args(src=False, end=False, search=None,
+                                     pos="cursor"),
+            ["-c", 'silent! normal! g`"'],
+        )
+        self.assertEqual(
+            notoj._vim_position_args(src=False, end=False, search=None,
+                                     pos="last_edit", mark=(7, 3)),
+            ["-c", "silent! keepjumps call cursor(7, 3)"],
+        )
+        self.assertEqual(
+            notoj._vim_position_args(src=False, end=False, search=None,
+                                     pos="title"),
+            [],
+        )
+
+    def test_a_search_hit_outranks_the_configured_position(self):
+        for pos in ("first", "title", "last_edit", "cursor"):
+            args = notoj._vim_position_args(src=True, end=False,
+                                            search=r"\c\Vfoo", pos=pos,
+                                            mark=(9, 1))
+            self.assertIn("search(@/, 'cw')", args[-1], pos)
+
+    def test_end_outranks_a_search_hit(self):
+        # `e` after a search still goes to the bottom — that is what the key
+        # is for; the pattern is still wired in for n/N.
+        args = notoj._vim_position_args(src=True, end=False,
+                                        search=r"\c\Vfoo", pos="end")
+        self.assertEqual(args[-2:], ["-c", "normal G"])
+
+    def test_no_verbatim_hit_falls_back_to_the_configured_position(self):
+        args = notoj._vim_position_args(src=True, end=False,
+                                        search=r"\c\Vfoo", pos="cursor")
+        self.assertIn("call NotojOpenAtLastPos()", args[-1])
+        args = notoj._vim_position_args(src=True, end=False,
+                                        search=r"\c\Vfoo", pos="last_edit",
+                                        mark=(9, 1))
+        self.assertIn("call NotojOpenAtLine(9, 1)", args[-1])
+        args = notoj._vim_position_args(src=True, end=False,
+                                        search=r"\c\Vfoo", pos="first")
+        self.assertTrue(args[-1].endswith("== 0 | endif"), args[-1])
+
+    def test_open_position_defaults_and_validation(self):
+        saved = notoj._config_cache
+        try:
+            notoj._config_cache = {}
+            self.assertEqual(notoj.open_position(), "cursor")
+            self.assertEqual(notoj.open_position(end=True), "end")
+            notoj._config_cache = {"open_position": "Title",
+                                   "open_end_position": "last_edit"}
+            self.assertEqual(notoj.open_position(), "title")
+            self.assertEqual(notoj.open_position(end=True), "last_edit")
+            # An unrecognized value falls back to that key's default.
+            notoj._config_cache = {"open_position": "middle",
+                                   "open_end_position": "middle"}
+            self.assertEqual(notoj.open_position(), "cursor")
+            self.assertEqual(notoj.open_position(end=True), "end")
+        finally:
+            notoj._config_cache = saved
 
     def test_position_args_quotes_escaped_for_let(self):
         args = notoj._vim_position_args(src=False, end=True, search=r"\c\Vit's")
         self.assertIn(r"let @/ = '\c\Vit''s'", args)
+
+
+class LastChangeMarkTests(unittest.TestCase):
+    """The last-change position notoj files away for open_position=last_edit:
+    the (line, col) a spawned Vim reports for its `.` mark."""
+
+    @contextlib.contextmanager
+    def _state(self):
+        d = tempfile.mkdtemp()
+        saved, saved_dir = os.environ.get("XDG_STATE_HOME"), notoj.NOTES_DIR
+        try:
+            os.environ["XDG_STATE_HOME"] = d
+            notoj.NOTES_DIR = os.path.join(d, "notes")
+            yield d
+        finally:
+            notoj.NOTES_DIR = saved_dir
+            if saved is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = saved
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _mark_file(self, d, text):
+        p = os.path.join(d, "mark")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        return p
+
+    def test_reads_what_vim_wrote(self):
+        with self._state() as d:
+            self.assertEqual(
+                notoj.read_edit_mark_file(self._mark_file(d, "12 4\n")), (12, 4))
+            # Vim reports column 0 for an empty line; a cursor() call wants 1.
+            self.assertEqual(
+                notoj.read_edit_mark_file(self._mark_file(d, "12 0\n")), (12, 1))
+
+    def test_nothing_to_read_is_not_an_error(self):
+        with self._state() as d:
+            # Quit with no change made: the file is created but never written.
+            self.assertIsNone(notoj.read_edit_mark_file(self._mark_file(d, "")))
+            self.assertIsNone(notoj.read_edit_mark_file(self._mark_file(d, "0 0")))
+            self.assertIsNone(notoj.read_edit_mark_file(self._mark_file(d, "junk")))
+            self.assertIsNone(notoj.read_edit_mark_file(os.path.join(d, "gone")))
+
+    def test_record_then_read_back(self):
+        with self._state():
+            self.assertIsNone(notoj.last_edit_mark("/n/a.md"))
+            notoj.record_edit_mark("/n/a.md", (3, 5))
+            self.assertEqual(notoj.last_edit_mark("/n/a.md"), (3, 5))
+            # A later edit replaces the earlier position outright.
+            notoj.record_edit_mark("/n/a.md", (9, 1))
+            self.assertEqual(notoj.last_edit_mark("/n/a.md"), (9, 1))
+            # Nothing to record leaves the standing mark alone.
+            notoj.record_edit_mark("/n/a.md", None)
+            self.assertEqual(notoj.last_edit_mark("/n/a.md"), (9, 1))
+
+    def test_a_rename_carries_the_mark_with_it(self):
+        with self._state():
+            notoj.record_edit_mark("/n/old.md", (4, 2))
+            notoj.move_edit_mark("/n/old.md", "/n/new.md")
+            self.assertEqual(notoj.last_edit_mark("/n/new.md"), (4, 2))
+            self.assertIsNone(notoj.last_edit_mark("/n/old.md"))
+
+    def test_a_bare_line_from_an_older_marks_file_still_reads(self):
+        with self._state():
+            notoj.record_edit_mark("/n/a.md", (1, 1))
+            marks = notoj._read_edit_marks()
+            marks["/n/a.md"] = 6            # the shape an older notoj wrote
+            with open(notoj.edit_marks_path(), "w", encoding="utf-8") as f:
+                json.dump(marks, f)
+            self.assertEqual(notoj.last_edit_mark("/n/a.md"), (6, 1))
+
+    def test_a_corrupt_map_is_ignored_not_fatal(self):
+        with self._state():
+            p = notoj.edit_marks_path()
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            self.assertIsNone(notoj.last_edit_mark("/n/a.md"))
+            notoj.record_edit_mark("/n/a.md", (1, 1))   # overwrites it
+            self.assertEqual(notoj.last_edit_mark("/n/a.md"), (1, 1))
+
+    def test_the_map_is_capped(self):
+        with self._state():
+            saved = notoj.EDIT_MARKS_CAP
+            notoj.EDIT_MARKS_CAP = 3
+            try:
+                for i in range(5):
+                    notoj.record_edit_mark("/n/%d.md" % i, (i + 1, 1))
+                self.assertIsNone(notoj.last_edit_mark("/n/0.md"))
+                self.assertIsNone(notoj.last_edit_mark("/n/1.md"))
+                self.assertEqual(notoj.last_edit_mark("/n/4.md"), (5, 1))
+            finally:
+                notoj.EDIT_MARKS_CAP = saved
+
+
+class EditInEditorMarkPlumbingTests(unittest.TestCase):
+    """edit_in_editor hands the editor a $NOTOJ_EDIT_MARK file and files what
+    it finds there — but only when the note actually reached the disk."""
+
+    def _run(self, write, mark_text):
+        """Run edit_in_editor against a stub editor named `vim` (so it counts
+        as vim-family) that records the mark path it was handed, optionally
+        writes a mark, and optionally changes the note."""
+        d = tempfile.mkdtemp()
+        saved_env = os.environ.get("XDG_STATE_HOME")
+        saved_dir = notoj.NOTES_DIR
+        saved_vim = os.environ.get("NOTOJ_VIM")
+        saved_suspend = notoj.suspend_curses
+        try:
+            os.environ["XDG_STATE_HOME"] = d
+            notoj.NOTES_DIR = os.path.join(d, "notes")
+            os.makedirs(notoj.NOTES_DIR)
+            note = os.path.join(notoj.NOTES_DIR, "note.md")
+            with open(note, "w", encoding="utf-8") as f:
+                f.write("a\nb\n")
+            # The note is the LAST argument; everything before it is notoj's
+            # -c positioning args, which this stub ignores the way a non-Vim
+            # editor would.
+            script = ['#!/bin/sh',
+                      'for a in "$@"; do :; done',
+                      'printf "%s" "$NOTOJ_EDIT_MARK" > "$a.markpath"']
+            if mark_text:
+                script.append('printf %s > "$NOTOJ_EDIT_MARK"'
+                              % shlex.quote(mark_text))
+            if write:
+                script.append('echo edited >> "$a"')
+            stub = os.path.join(d, "vim")
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write("\n".join(script) + "\n")
+            os.chmod(stub, 0o755)
+            os.environ["NOTOJ_VIM"] = stub
+            notoj.suspend_curses = lambda: None
+            os.utime(note, (0, 0))   # so a write is visible as an mtime change
+            written = notoj.edit_in_editor({"path": note, "tags": []},
+                                           False, None)
+            with open(note + ".markpath", encoding="utf-8") as f:
+                mark_path = f.read()
+            return written, mark_path, notoj.last_edit_mark(note)
+        finally:
+            notoj.suspend_curses = saved_suspend
+            notoj.NOTES_DIR = saved_dir
+            os.environ.pop("NOTOJ_VIM", None)
+            if saved_vim is not None:
+                os.environ["NOTOJ_VIM"] = saved_vim
+            if saved_env is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = saved_env
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_saved_edit_files_the_mark(self):
+        written, mark_path, mark = self._run(write=True, mark_text="4 2")
+        self.assertTrue(written)
+        self.assertTrue(mark_path)                  # the editor was given one
+        self.assertEqual(mark, (4, 2))
+
+    def test_a_quit_without_writing_files_nothing(self):
+        written, _mark_path, mark = self._run(write=False, mark_text="4 2")
+        self.assertFalse(written)
+        self.assertIsNone(mark)
+
+    def test_the_env_var_does_not_outlive_the_launch(self):
+        self._run(write=True, mark_text="4 2")
+        self.assertNotIn("NOTOJ_EDIT_MARK", os.environ)
+
+
+@unittest.skipUnless(
+    shutil.which("vim"), "vim not installed"
+)
+class VimEditMarkCaptureTests(unittest.TestCase):
+    """Drive a real Vim through an edit and read back the mark it leaves.
+
+    The case that decides the semantics: change the LAST line of a note, then a
+    line in the middle. The middle line is the change made most recently — what
+    `g;` and `gi` go to — even though the other one is further down the file.
+    """
+
+    def _edit(self, keys, body="l1\nl2\nl3\nl4\nl5\nl6\n"):
+        d = tempfile.mkdtemp()
+        try:
+            note = os.path.join(d, "note.md")
+            with open(note, "w", encoding="utf-8") as f:
+                f.write(body)
+            mark = os.path.join(d, "mark")
+            open(mark, "w").close()
+            helper = os.path.join(d, "notoj.vim")
+            with open(helper, "w", encoding="utf-8") as f:
+                f.write(notoj.NOTOJ_VIM_SCRIPT)
+            env = dict(os.environ, NOTOJ_EDIT_MARK=mark)
+            subprocess.run(["vim", "-N", "-u", "NONE", "-i", "NONE",
+                            "-c", "source " + helper] + keys + [note],
+                           env=env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return notoj.read_edit_mark_file(mark)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_last_change_wins_over_the_lowest_one(self):
+        mark = self._edit(["-c", "call cursor(6, 1)", "-c", "normal Axx",
+                           "-c", "call cursor(3, 1)", "-c", "normal Ayy",
+                           "-c", "wq"])
+        self.assertEqual(mark[0], 3)
+
+    def test_editing_downward_reports_the_lower_line(self):
+        mark = self._edit(["-c", "call cursor(3, 1)", "-c", "normal Ayy",
+                           "-c", "call cursor(6, 1)", "-c", "normal Axx",
+                           "-c", "wq"])
+        self.assertEqual(mark[0], 6)
+
+    def test_a_deletion_counts_as_a_change(self):
+        mark = self._edit(["-c", "call cursor(2, 1)", "-c", "normal dd",
+                           "-c", "wq"])
+        self.assertEqual(mark[0], 2)
+
+    def test_reading_without_changing_leaves_no_mark(self):
+        # Moving around and quitting is not an edit, so nothing is reported and
+        # the note keeps whatever position it already had.
+        self.assertIsNone(self._edit(["-c", "call cursor(5, 1)", "-c", "qa!"]))
+
+
+@unittest.skipUnless(
+    shutil.which("vim"), "vim not installed"
+)
+class VimOpenPositionIntegrationTests(unittest.TestCase):
+    """Drive a real Vim twice over one viminfo file: `cursor` must land back
+    where the previous session left off (falling back to the title line for a
+    note it has no record of), and every other position must land on its own
+    line."""
+
+    BODY = "---\nid: x\ntitle: t\n---\nThe title line\nb\nc\nd\ne\nf\n"
+
+    def _open(self, note, viminfo, args, leave_on=None):
+        out = note + ".pos"
+        # Record where the open landed BEFORE moving away, so the recorded
+        # line is the one notoj's args chose, not the one we then left behind.
+        cmds = list(args) + ["-c", 'call writefile([line(".")], "%s")' % out]
+        if leave_on:
+            cmds += ["-c", "call cursor(%d, 1)" % leave_on]
+        cmds += ["-c", "qa!"]
+        subprocess.run(["vim", "-N", "-u", "NONE", "-i", viminfo] + cmds + [note],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        with open(out, encoding="utf-8") as f:
+            return int(f.read().strip())
+
+    def _helper(self, d):
+        path = os.path.join(d, "notoj.vim")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(notoj.NOTOJ_VIM_SCRIPT)
+        return ["-c", "source " + path]
+
+    def test_cursor_returns_to_the_last_cursor_position(self):
+        d = tempfile.mkdtemp()
+        try:
+            note = os.path.join(d, "note.md")
+            with open(note, "w", encoding="utf-8") as f:
+                f.write(self.BODY)
+            viminfo = os.path.join(d, "viminfo")
+            src = self._helper(d)
+            args = src + notoj._vim_position_args(src=src, end=False,
+                                                  search=None, pos="cursor")
+            # First visit: nothing remembered yet -> the title line (5), and we
+            # leave the cursor down on line 8.
+            self.assertEqual(self._open(note, viminfo, args, leave_on=8), 5)
+            # Second visit: back to line 8.
+            self.assertEqual(self._open(note, viminfo, args), 8)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_every_other_position_lands_on_its_own_line(self):
+        d = tempfile.mkdtemp()
+        try:
+            note = os.path.join(d, "note.md")
+            with open(note, "w", encoding="utf-8") as f:
+                f.write(self.BODY)          # 10 lines, title on 5
+            viminfo = os.path.join(d, "viminfo")
+            src = self._helper(d)
+            for pos, kwargs, want in (("first", {}, 1),
+                                      ("title", {}, 5),
+                                      ("end", {}, 10),
+                                      ("last_edit", {"mark": (7, 1)}, 7),
+                                      # a remembered line past the end (the
+                                      # note was cut shorter since) -> title
+                                      ("last_edit", {"mark": (99, 1)}, 5)):
+                args = src + notoj._vim_position_args(src=src, end=False,
+                                                      search=None, pos=pos,
+                                                      **kwargs)
+                self.assertEqual(self._open(note, viminfo, args), want,
+                                 (pos, kwargs))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_title_always_opens_at_the_title(self):
+        d = tempfile.mkdtemp()
+        try:
+            note = os.path.join(d, "note.md")
+            with open(note, "w", encoding="utf-8") as f:
+                f.write(self.BODY)
+            viminfo = os.path.join(d, "viminfo")
+            src = self._helper(d)
+            args = src + notoj._vim_position_args(src=src, end=False,
+                                                  search=None, pos="title")
+            self.assertEqual(self._open(note, viminfo, args, leave_on=8), 5)
+            self.assertEqual(self._open(note, viminfo, args), 5)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 @unittest.skipUnless(

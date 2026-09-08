@@ -50,6 +50,29 @@
 #   tag_editor.syriac = gedit --new-window -w
 #   tag_editor.draft  = gedit --new-window -w
 
+# Where a note opens. Enter and `e` take the SAME five positions; only their
+# defaults differ, and each default is the behavior that key already had.
+#   first      file line 1, the frontmatter's opening ---
+#   title      the title line (the frontmatter scrolled off the top)
+#   last_edit  where you made your last change to the note: Vim's `.` mark,
+#              the one `g;` and `gi` jump to. Change the bottom line and then
+#              a line in the middle and this opens on the middle one — last in
+#              time, not lowest in the file. Vim saves that mark but won't
+#              restore it into a new session, so the editing session reports it
+#              to notoj on the way out; notoj keeps it beside the undo journal,
+#              never in the notes tree. Only edits made through notoj (in a
+#              vim-family editor, and saved) leave one — a note edited on your
+#              phone opens at its title.
+#   cursor     where the cursor was when you last left the note (Vim's " mark,
+#              via viminfo, so it survives reboots)
+#   end        the last line
+# A note with nothing remembered yet (cursor/last_edit) opens at its title.
+# An active search still outranks these and puts the cursor on the match —
+# except `end`, which is what `e` is for and always wins. Vim-family editors
+# only; another editor just gets the file.
+# open_position=cursor          # Enter   (default: cursor)
+# open_end_position=end         # e       (default: end)
+
 # ===========================================================================
 # Display
 # ===========================================================================
