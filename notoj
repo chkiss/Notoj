@@ -916,11 +916,6 @@ def fuzzy_words(n, tokens):
     return out
 
 
-def is_recent(n):
-    m = n.get("modificationDate", 0)
-    return m and (datetime.now().timestamp() - float(m)) < 3600
-
-
 # ----------------------------
 # Sorting / filtering
 # ----------------------------
@@ -6038,9 +6033,7 @@ def preview_source_rows(text, width):
 
     # Shares wrap_preview_rows with the modal previews so one config knob and
     # one wrap rule serve every pane; the `last` flag is for the panes that
-    # park something after a line's final row, which this one doesn't. Both
-    # views are cached together — deriving one from the other per call would
-    # rebuild a list per frame and undo the memoization.
+    # park something after a line's final row, which this one doesn't.
     lines = text.split("\n")
     if config_bool("preview_align_tables", True):
         # \tr before wrapping: realigned walls only stay put if the padding is
@@ -6049,18 +6042,10 @@ def preview_source_rows(text, width):
         lines = align_table_lines(lines, config_bool("render_markdown", True))
     rows = [(r[0], r[1]) for r in wrap_preview_rows(lines,
                                                     width if wrap else 0)]
-    _PREVIEW_ROWS[key] = (text, rows, [r[0] for r in rows])
+    _PREVIEW_ROWS[key] = (text, rows)
     if len(_PREVIEW_ROWS) > _PREVIEW_ROWS_MAX:
         _PREVIEW_ROWS.popitem(last=False)
     return rows
-
-
-def preview_body_lines(text, width):
-    """Just the row text of preview_source_rows — for the panes that only paint
-    rows and never map them back to the note."""
-    preview_source_rows(text, width)          # fills / refreshes the entry
-    wrap = width > 0 and config_bool("preview_wrap", True)
-    return _PREVIEW_ROWS[(hash(text), len(text), width if wrap else 0)][2]
 
 
 PREVIEW_TAGS_DEFAULT = "always"

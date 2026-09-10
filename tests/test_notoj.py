@@ -113,6 +113,12 @@ def make_note(title="", content="", tags=None, modified=0.0, created=0.0, path="
     }
 
 
+def body_lines(text, width):
+    """Just the row text of preview_source_rows, for the tests that care about
+    what a note wraps to and not about which source line each row came from."""
+    return [r[0] for r in notoj.preview_source_rows(text, width)]
+
+
 # ---------------------------------------------------------------------------
 # yaml_scalar
 # ---------------------------------------------------------------------------
@@ -2555,18 +2561,6 @@ class TestNoteHelpers(unittest.TestCase):
         n = make_note(tags=[])
         self.assertEqual(notoj.tags(n), "")
 
-    def test_is_recent_within_hour(self):
-        n = make_note(modified=datetime.now().timestamp() - 1800)
-        self.assertTrue(notoj.is_recent(n))
-
-    def test_is_recent_over_hour(self):
-        n = make_note(modified=datetime.now().timestamp() - 7200)
-        self.assertFalse(notoj.is_recent(n))
-
-    def test_is_recent_no_date(self):
-        n = make_note(modified=0)
-        self.assertFalse(notoj.is_recent(n))
-
 
 # ---------------------------------------------------------------------------
 # Resurface: find_loops / snooze / schedule / parse_when / remove_tag
@@ -4608,7 +4602,11 @@ class TestImportMsgs(unittest.TestCase):
         self.assertEqual(notoj.import_msgs([], []), [])
 
 
-class TestPreviewBodyLines(unittest.TestCase):
+class TestPreviewRowWrapping(unittest.TestCase):
+    """What the preview pane's rows look like, whatever the note. These ran
+    through preview_body_lines until nothing in the app painted rows without
+    their source line any more; they read preview_source_rows directly now."""
+
     def setUp(self):
         self._cache = notoj._config_cache
         notoj._config_cache = {}
@@ -4617,37 +4615,37 @@ class TestPreviewBodyLines(unittest.TestCase):
         notoj._config_cache = self._cache
 
     def test_wraps_by_default(self):
-        self.assertEqual(notoj.preview_body_lines("aaa bbb ccc", 7),
+        self.assertEqual(body_lines("aaa bbb ccc", 7),
                          ["aaa bbb", "ccc"])
 
     def test_wrap_keeps_indent_on_continuation(self):
-        self.assertEqual(notoj.preview_body_lines("  aaa bbb ccc", 9),
+        self.assertEqual(body_lines("  aaa bbb ccc", 9),
                          ["  aaa bbb", "  ccc"])
 
     def test_short_lines_and_blanks_pass_through(self):
-        self.assertEqual(notoj.preview_body_lines("one\n\ntwo", 20),
+        self.assertEqual(body_lines("one\n\ntwo", 20),
                          ["one", "", "two"])
 
     def test_long_word_is_broken(self):
-        self.assertEqual(notoj.preview_body_lines("abcdefgh", 3),
+        self.assertEqual(body_lines("abcdefgh", 3),
                          ["abc", "def", "gh"])
 
     def test_tabs_expand_before_wrapping(self):
-        self.assertEqual(notoj.preview_body_lines("\tab", 20), ["    ab"])
+        self.assertEqual(body_lines("\tab", 20), ["    ab"])
 
     def test_rows_never_exceed_the_pane_in_columns(self):
         # "→" is two columns to disp_width; a character-counting wrapper would
         # emit a row one column too wide and the draw would clip its last char.
-        for row in notoj.preview_body_lines("aa → bb → cc → dd", 6):
+        for row in body_lines("aa → bb → cc → dd", 6):
             self.assertLessEqual(notoj.disp_width(row), 6, row)
 
     def test_off_leaves_source_lines_whole(self):
         notoj._config_cache = {"preview_wrap": "false"}
-        self.assertEqual(notoj.preview_body_lines("aaa bbb ccc", 7),
+        self.assertEqual(body_lines("aaa bbb ccc", 7),
                          ["aaa bbb ccc"])
 
     def test_zero_width_pane_never_wraps(self):
-        self.assertEqual(notoj.preview_body_lines("aaa bbb", 0), ["aaa bbb"])
+        self.assertEqual(body_lines("aaa bbb", 0), ["aaa bbb"])
 
 
 class TestSharedPreviewWrap(unittest.TestCase):
@@ -4744,37 +4742,37 @@ class TestPreviewScrollSpeed(unittest.TestCase):
         text = self._note("redraw")
         calls, spy = self._counting_wrap()
         with unittest.mock.patch.object(notoj, "wrap_to_width", spy):
-            first = notoj.preview_body_lines(text, 40)
+            first = body_lines(text, 40)
             after_first = len(calls)
             for _ in range(30):
-                notoj.preview_body_lines(text, 40)
+                body_lines(text, 40)
         self.assertGreater(after_first, 0, "the note should wrap at least once")
         self.assertEqual(len(calls), after_first,
                          "30 redraws re-wrapped the note instead of reusing it")
-        self.assertEqual(notoj.preview_body_lines(text, 40), first)
+        self.assertEqual(body_lines(text, 40), first)
 
     def test_pgdn_clamp_reuses_the_drawn_rows(self):
         # draw() renders the rows, then KEY_NPAGE asks how many there are.
         text = self._note("pgdn")
         calls, spy = self._counting_wrap()
         with unittest.mock.patch.object(notoj, "wrap_to_width", spy):
-            notoj.preview_body_lines(text, 40)
+            body_lines(text, 40)
             after_draw = len(calls)
-            len(notoj.preview_body_lines(text, 40))
+            len(body_lines(text, 40))
         self.assertEqual(len(calls), after_draw,
                          "the PgDn clamp wrapped the note a second time")
 
     def test_resizing_the_pane_rewraps(self):
         text = self._note("resize")
-        wide = notoj.preview_body_lines(text, 60)
-        narrow = notoj.preview_body_lines(text, 30)
+        wide = body_lines(text, 60)
+        narrow = body_lines(text, 30)
         self.assertNotEqual(wide, narrow)
-        self.assertEqual(notoj.preview_body_lines(text, 60), wide)
+        self.assertEqual(body_lines(text, 60), wide)
 
     def test_edited_text_is_not_served_from_cache(self):
         text = self._note("edited")
-        before = notoj.preview_body_lines(text, 40)
-        after = notoj.preview_body_lines(text + "\nappended line", 40)
+        before = body_lines(text, 40)
+        after = body_lines(text + "\nappended line", 40)
         self.assertEqual(after[:len(before)], before)
         self.assertEqual(after[-1], "appended line")
 
@@ -4782,15 +4780,18 @@ class TestPreviewScrollSpeed(unittest.TestCase):
         # A keypress redraws the preview; PgDn also measures it. Budget the
         # whole round trip against one cold wrap, so the assertion tracks the
         # machine rather than a hard-coded millisecond count.
+        # preview_source_rows, not body_lines: the app re-reads the cached
+        # rows on a redraw and never rebuilds a list from them, so timing the
+        # helper would be timing the test.
         text = self._note("responsive", n_lines=3000)
         t0 = time.perf_counter()
-        notoj.preview_body_lines(text, 60)          # landing on the note
+        notoj.preview_source_rows(text, 60)          # landing on the note
         cold = time.perf_counter() - t0
 
         t0 = time.perf_counter()
         for _ in range(50):                          # 25 PgDn presses
-            notoj.preview_body_lines(text, 60)
-            len(notoj.preview_body_lines(text, 60))
+            notoj.preview_source_rows(text, 60)
+            len(notoj.preview_source_rows(text, 60))
         warm = time.perf_counter() - t0
         self.assertLess(warm, cold,
                         "50 scroll redraws cost more than one cold wrap")
@@ -6546,13 +6547,13 @@ class TestScrollHotPath(unittest.TestCase):
         texts = ["note %d %s" % (i, "lorem ipsum dolor sit amet " * 50)
                  for i in range(20)]
         for t in texts:
-            notoj.preview_body_lines(t, 40)                # walk down
+            body_lines(t, 40)                # walk down
         calls, spy = [], notoj.wrap_to_width
         try:
             notoj.wrap_to_width = lambda *a, **kw: (
                 calls.append(1), spy(*a, **kw))[1]
             for t in reversed(texts):                      # walk back up
-                notoj.preview_body_lines(t, 40)
+                body_lines(t, 40)
         finally:
             notoj.wrap_to_width = spy
         self.assertEqual(calls, [],
