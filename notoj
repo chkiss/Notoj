@@ -2556,6 +2556,62 @@ def ensure_gitignore():
         pass
 
 
+def syncthing_folder_root():
+    """The Syncthing folder containing the notes, or None.
+
+    Syncthing marks every folder root with a `.stfolder` directory and reads
+    `.stignore` only from there — a subdirectory's `.stignore` is not consulted.
+    So the notes dir is usually the wrong place to write one: notes commonly
+    live below the folder root, and a rule written beside them would be
+    silently inert.
+    """
+    d = os.path.abspath(NOTES_DIR)
+    while True:
+        if os.path.exists(os.path.join(d, ".stfolder")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def ensure_stignore():
+    """Keep the notes' `.git` out of Syncthing.
+
+    Each machine commits independently, so syncing git internals corrupts the
+    repo — and even after the rule is added, debris left behind can block `git
+    gc` forever (see git_gc_unblock). The `.md` files still sync; only git
+    internals stay machine-local.
+
+    Syncthing is first-match-wins, so the rule is prepended: a broad include
+    rule already in the file would otherwise claim `.git` first. `.stignore` is
+    per-machine and does not itself sync, so this runs on every machine.
+    """
+    root = syncthing_folder_root()
+    if root is None:
+        return False
+    rel = os.path.relpath(os.path.join(NOTES_DIR, ".git"), root)
+    rule = "/" + rel.replace(os.sep, "/")
+    stignore = os.path.join(root, ".stignore")
+    try:
+        existing = ""
+        if os.path.exists(stignore):
+            with open(stignore, "r", encoding="utf-8") as f:
+                existing = f.read()
+            if rule in existing.splitlines():
+                return False
+        block = (
+            "// notoj keeps a machine-local git repo in the notes dir; syncing "
+            "it corrupts\n// the repo. The .md files still sync; only git "
+            "internals stay machine-local.\n" + rule + "\n"
+        )
+        with open(stignore, "w", encoding="utf-8") as f:
+            f.write(block + ("\n" + existing if existing else ""))
+    except OSError:
+        return False
+    return True
+
+
 # A leftover Syncthing temp file inside .git/objects/, from a period when the
 # repo was being synced. Read-only, not a git object, and invisible to
 # everything except the one command that cares.
@@ -2621,6 +2677,7 @@ def git_init():
     if not os.path.exists(git_dir):
         subprocess.run(["git", "init"], cwd=NOTES_DIR, capture_output=True)
         ensure_gitignore()
+        ensure_stignore()   # before the first commit, so .git never syncs at all
         subprocess.run(["git", "add", "-A"], cwd=NOTES_DIR, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "init: notoj snapshot history"],
@@ -2628,6 +2685,7 @@ def git_init():
         )
     else:
         ensure_gitignore()
+        ensure_stignore()
         git_gc_unblock()
 
 

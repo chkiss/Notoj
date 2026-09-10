@@ -7306,6 +7306,59 @@ class TestRepoHygiene(unittest.TestCase):
                 self.assertTrue(notoj.git_gc_unblock())
             self.assertTrue(os.path.exists(keep))
 
+    # -- .stignore ----------------------------------------------------
+
+    def test_stignore_rule_is_relative_to_the_folder_root(self):
+        """The notes usually sit below the Syncthing root, and Syncthing reads
+        .stignore only at that root — so the rule must be written there, with a
+        path reaching down to the notes."""
+        with tempfile.TemporaryDirectory() as root:
+            notes = os.path.join(root, "docs", "notes")
+            os.makedirs(notes)
+            os.makedirs(os.path.join(root, ".stfolder"))
+            with self._notes_dir(notes):
+                self.assertTrue(notoj.ensure_stignore())
+            with open(os.path.join(root, ".stignore")) as f:
+                body = f.read()
+            self.assertIn("/docs/notes/.git", body)
+
+    def test_stignore_rule_is_prepended_and_preserves_existing_rules(self):
+        with tempfile.TemporaryDirectory() as root:
+            notes = os.path.join(root, "notes")
+            os.makedirs(notes)
+            os.makedirs(os.path.join(root, ".stfolder"))
+            with open(os.path.join(root, ".stignore"), "w") as f:
+                f.write("!/keep-me/\n**/node_modules\n")
+            with self._notes_dir(notes):
+                self.assertTrue(notoj.ensure_stignore())
+            with open(os.path.join(root, ".stignore")) as f:
+                lines = [ln for ln in f.read().splitlines() if ln
+                         and not ln.startswith("//")]
+            # first-match-wins: ours must precede the pre-existing include rule
+            self.assertEqual(lines[0], "/notes/.git")
+            self.assertIn("**/node_modules", lines)
+            self.assertIn("!/keep-me/", lines)
+
+    def test_stignore_is_not_rewritten_when_the_rule_is_present(self):
+        with tempfile.TemporaryDirectory() as root:
+            notes = os.path.join(root, "notes")
+            os.makedirs(notes)
+            os.makedirs(os.path.join(root, ".stfolder"))
+            with self._notes_dir(notes):
+                notoj.ensure_stignore()
+                with open(os.path.join(root, ".stignore")) as f:
+                    once = f.read()
+                self.assertFalse(notoj.ensure_stignore())
+                with open(os.path.join(root, ".stignore")) as f:
+                    self.assertEqual(f.read(), once)
+
+    def test_no_stfolder_means_no_stignore_is_invented(self):
+        """Not every vault is synced; don't scatter config into a plain dir."""
+        with tempfile.TemporaryDirectory() as d:
+            with self._notes_dir(d):
+                self.assertFalse(notoj.ensure_stignore())
+            self.assertEqual(os.listdir(d), [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
