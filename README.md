@@ -179,9 +179,9 @@ notoj maintains a git repo inside the notes directory and commits every
 edit, create, trash, restore, and conflict resolution automatically. It also
 keeps a few private files there (auto-gitignored): `.trash/` (trashed
 notes), `.notoj_state` (cursor position), `.notoj_review.json` (loop
-snoozes). Editor swap files (`*.swp`, `*.swo`) and Syncthing conflict copies
-(`*.sync-conflict-*`) are ignored too — both are scratch that `git add -A`
-would otherwise commit on every keystroke.
+snoozes), plus editor swap files (`*.swp`, `*.swo`) and Syncthing conflict
+copies (`*.sync-conflict-*`), which `git add -A` would otherwise commit on
+every keystroke.
 
 Syncing the `.md` files with Syncthing works out of the box: external edits
 are detected, reloaded, and committed, and sync-conflict copies are surfaced
@@ -191,44 +191,32 @@ committed to history first, so it's always recoverable via `git show`).
 ### `.git` must not sync
 
 Each machine commits independently, so syncing git internals corrupts the
-repo. notoj handles this for you: on launch it locates the enclosing
-Syncthing folder (the directory holding `.stfolder`) and prepends a rule to
-that folder's `.stignore`. It prepends because Syncthing is first-match-wins
-— a broad include rule already in the file would otherwise claim `.git`
-first. The `.md` files still sync; only git internals stay machine-local.
+repo. On launch notoj finds the enclosing Syncthing folder (the directory
+holding `.stfolder`) and prepends a rule to its `.stignore`. The `.md` files
+still sync; only git internals stay machine-local.
 
-Two things worth knowing:
-
-* **It has to be the folder root.** Syncthing reads `.stignore` only there,
-  not from subdirectories, so if your notes sit below the root the rule is
-  written above them and reaches down (`/docs/notes/.git`).
-* **`.stignore` does not itself sync.** It is per-machine, which is why notoj
-  writes it on every machine rather than assuming one setup propagates. If a
-  vault is not inside a Syncthing folder at all, notoj writes nothing.
-
-The rule can't live in `install.sh`: the notes directory is chosen on first
-launch, after the installer is done, so only the app knows where to write.
+The rule goes at the folder root because Syncthing ignores `.stignore` in
+subdirectories, and it goes first because Syncthing is first-match-wins. It
+is written on every machine, since `.stignore` doesn't itself sync. A vault
+outside a Syncthing folder gets nothing. `install.sh` can't do any of this,
+since the notes directory is chosen on first launch.
 
 ### Repo maintenance
 
-git repacks loose objects by itself, but a failed `git gc` writes
-`.git/gc.log` and then **refuses to retry while that file exists**. That
-turns one bad run into permanently disabled maintenance: every later commit
-piles up loose and the repo grows without bound while the notes barely
-change. The failure that prompted this — seven Syncthing temp files left in
-`.git/objects/` from before the `.stignore` rule existed — cost 45 MiB of
-loose objects against a 3 MiB pack before anyone noticed.
+A failed `git gc` writes `.git/gc.log` and then refuses to retry while that
+file exists, so one bad run disables repacking for good. Later commits pile
+up loose and the repo grows while the notes barely change. Seven Syncthing
+temp files left in `.git/objects/` cost one vault 45 MiB of loose objects
+against a 3 MiB pack.
 
-So on launch notoj clears that specific stall: it removes stray
-`.syncthing.*.tmp` files from `.git/objects/` and deletes `gc.log`, letting
-git's own auto-gc resume. It does this **only when every error in the log
-names debris it removed**. A gc that failed for any other reason is left
-alone — that is real corruption, and hiding it would cost more than the disk.
+On launch notoj removes stray `.syncthing.*.tmp` files and deletes `gc.log`,
+letting git's auto-gc resume, but only when every error in the log names
+debris it removed. Any other gc failure is left alone.
 
 To check a vault by hand:
 
 ```bash
-git -C /path/to/notes count-objects -vH   # a large `size:` vs `size-pack:` means gc is stalled
+git -C /path/to/notes count-objects -vH   # large `size:` vs `size-pack:` means gc is stalled
 cat /path/to/notes/.git/gc.log            # absent is healthy
 ```
 
