@@ -119,6 +119,8 @@ def body_lines(text, width):
     return [r[0] for r in notoj.preview_source_rows(text, width)]
 
 
+
+
 # ---------------------------------------------------------------------------
 # yaml_scalar
 # ---------------------------------------------------------------------------
@@ -4614,38 +4616,36 @@ class TestPreviewRowWrapping(unittest.TestCase):
     def tearDown(self):
         notoj._config_cache = self._cache
 
+    body = staticmethod(body_lines)
+
     def test_wraps_by_default(self):
-        self.assertEqual(body_lines("aaa bbb ccc", 7),
-                         ["aaa bbb", "ccc"])
+        self.assertEqual(self.body("aaa bbb ccc", 7), ["aaa bbb", "ccc"])
 
     def test_wrap_keeps_indent_on_continuation(self):
-        self.assertEqual(body_lines("  aaa bbb ccc", 9),
+        self.assertEqual(self.body("  aaa bbb ccc", 9),
                          ["  aaa bbb", "  ccc"])
 
     def test_short_lines_and_blanks_pass_through(self):
-        self.assertEqual(body_lines("one\n\ntwo", 20),
-                         ["one", "", "two"])
+        self.assertEqual(self.body("one\n\ntwo", 20), ["one", "", "two"])
 
     def test_long_word_is_broken(self):
-        self.assertEqual(body_lines("abcdefgh", 3),
-                         ["abc", "def", "gh"])
+        self.assertEqual(self.body("abcdefgh", 3), ["abc", "def", "gh"])
 
     def test_tabs_expand_before_wrapping(self):
-        self.assertEqual(body_lines("\tab", 20), ["    ab"])
+        self.assertEqual(self.body("\tab", 20), ["    ab"])
 
     def test_rows_never_exceed_the_pane_in_columns(self):
         # "→" is two columns to disp_width; a character-counting wrapper would
         # emit a row one column too wide and the draw would clip its last char.
-        for row in body_lines("aa → bb → cc → dd", 6):
+        for row in self.body("aa → bb → cc → dd", 6):
             self.assertLessEqual(notoj.disp_width(row), 6, row)
 
     def test_off_leaves_source_lines_whole(self):
         notoj._config_cache = {"preview_wrap": "false"}
-        self.assertEqual(body_lines("aaa bbb ccc", 7),
-                         ["aaa bbb ccc"])
+        self.assertEqual(self.body("aaa bbb ccc", 7), ["aaa bbb ccc"])
 
     def test_zero_width_pane_never_wraps(self):
-        self.assertEqual(body_lines("aaa bbb", 0), ["aaa bbb"])
+        self.assertEqual(self.body("aaa bbb", 0), ["aaa bbb"])
 
 
 class TestSharedPreviewWrap(unittest.TestCase):
@@ -5239,12 +5239,12 @@ class TestMarkdownHeaderColor(unittest.TestCase):
         # pair 5 — the search-match slot — and every "# Heading" wore whatever
         # color.match was set to.
         cp = curses_stub.color_pair
-        attr = notoj._md_entries("# Head", cp(4))[0][2]
+        attr = notoj._md_entries_state("# Head", cp(4))[0][2]
         self.assertEqual(attr, cp(9) | curses_stub.A_BOLD)
         self.assertNotEqual(attr & ~curses_stub.A_BOLD, cp(5))
 
     def test_header_marker_is_dropped(self):
-        self.assertEqual("".join(e[0] for e in notoj._md_entries("## Head", 0)),
+        self.assertEqual("".join(e[0] for e in notoj._md_entries_state("## Head", 0)),
                          "Head")
 
 
@@ -6283,7 +6283,7 @@ class TestWrapToWidthSpeed(unittest.TestCase):
 
 class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
     """A wrap may split an inline backtick code span across rows, but the
-    preview pairs backticks over the whole source line (row_code_states →
+    preview pairs backticks over the whole source line (row_md_states →
     _md_entries_state), so every row of a split span still paints as code and
     the prose between two spans never turns up in reverse video — while a
     backtick that never finds a partner stays literal text."""
@@ -6302,12 +6302,11 @@ class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
             # Render the wrapped rows the way the preview does: threading the
             # in-code-span state across the rows of each source line.
             pairs = [(r[0], r[1]) for r in notoj.wrap_preview_rows([line], width)]
-            states = notoj.row_code_states(pairs)
+            states = notoj.row_md_states(pairs)
             all_runs = []
             for i, (row, src) in enumerate(pairs):
                 runs, last, cur = [], None, ""
-                for _log, draw, attr in notoj._md_entries_state(
-                        row, base, *states[i])[0]:
+                for _log, draw, attr in notoj._md_entries_state(row, base, states[i]):
                     if attr != last:
                         if cur:
                             runs.append((last & curses_stub.A_REVERSE, cur))
@@ -6337,7 +6336,7 @@ class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
     def _runs(self, line, base=0):
         """(is_code, text) runs for one complete line, as drawn."""
         runs, last, cur = [], None, ""
-        for _log, draw, attr in notoj._md_entries(line, base):
+        for _log, draw, attr in notoj._md_entries_state(line, base):
             if attr != last:
                 if cur:
                     runs.append((bool(last & curses_stub.A_REVERSE), cur))
@@ -6390,7 +6389,7 @@ class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
         # they must render bold throughout, with the code span in reverse
         # video and neither the ** nor the backticks drawn as text.
         line = "- **`deploy.sh` deletes backups.** It uses `--delete`"
-        entries = notoj._md_entries(line, 0)
+        entries = notoj._md_entries_state(line, 0)
         drawn = "".join(d for _l, d, _a in entries)
         self.assertNotIn("*", drawn, "bold markers drawn as text")
         self.assertNotIn("`", drawn, "code delimiters drawn as text")
@@ -6407,36 +6406,171 @@ class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
     def test_marker_inside_a_code_span_is_literal(self):
         # Code binds tighter than emphasis, so a marker character inside a
         # span is text and cannot open a run that eats the rest of the line.
-        entries = notoj._md_entries("use `a * b` then plain", 0)
+        entries = notoj._md_entries_state("use `a * b` then plain", 0)
         self.assertEqual("".join(d for _l, d, _a in entries),
                          "use a * b then plain")
         for _l, _d, a in entries:
             self.assertFalse(a & curses_stub.A_BOLD)
 
     def test_states_scan_only_the_visible_window(self):
-        # row_code_states widens to source-line boundaries and no further, so
+        # row_md_states widens to source-line boundaries and no further, so
         # the scroll hot path does not pay for the whole note on every frame.
         rows = [("row %d with a `span` in it" % i, i // 3) for i in range(5000)]
-        states = notoj.row_code_states(rows, 3000, 3040)
+        states = notoj.row_md_states(rows, 3000, 3040)
         self.assertLess(len(states), 60,
                         "whole note scanned for a 40-row window")
         self.assertTrue(all(k in states for k in range(3000, 3040)),
                         "visible rows missing from the state map")
         # Windowed and full scans must agree wherever they overlap.
-        full = notoj.row_code_states(rows)
+        full = notoj.row_md_states(rows)
         for k in range(3000, 3040):
             self.assertEqual(states[k], full[k])
+
+    def _drawn(self, rows, mask=None):
+        """(drawn text, text carrying `mask`) across wrapped `rows`, rendered
+        the way the preview does — with the markup read over each whole
+        source line."""
+        states = notoj.row_md_states(rows)
+        drawn, marked = "", ""
+        for i, (row, _src) in enumerate(rows):
+            for log, draw, attr in notoj._md_entries_state(row, 0, states[i]):
+                drawn += draw
+                if mask is not None and attr & mask:
+                    marked += log
+        return drawn, marked
 
     def test_span_split_across_rows_of_a_wrapped_line(self):
         # The wrap case the fix exists for, stated directly: an opener on one
         # row and its closer on a later row of the SAME source line still pair.
-        rows = [("start `open", 7), ("close` end", 7)]
-        states = notoj.row_code_states(rows)
-        self.assertEqual(states[0][0], False)
-        self.assertEqual(states[1][0], True, "span did not flow to next row")
+        _drawn, code = self._drawn([("start `open", 7), ("close` end", 7)],
+                                   curses_stub.A_REVERSE)
+        self.assertEqual(code, "openclose", "span did not flow to next row")
         # A new source line resets the state even if the prior one ended open.
-        rows = [("start `unclosed", 7), ("next line", 8)]
-        self.assertEqual(notoj.row_code_states(rows)[1][0], False)
+        drawn, code = self._drawn([("start `unclosed", 7), ("next line", 8)],
+                                  curses_stub.A_REVERSE)
+        self.assertEqual(code, "", "unpaired backtick opened a span")
+        self.assertIn("`", drawn, "literal backtick was eaten")
+
+
+class TestWrapKeepsEmphasisIntact(unittest.TestCase):
+    """Emphasis pairs over the whole source line too, not per wrapped row: a
+    `**bold**` run whose opener and closer land on different rows renders bold
+    across the split, instead of showing its asterisks as text and no bold at
+    all."""
+
+    _drawn = TestWrapKeepsCodeSpansIntact._drawn
+
+    def test_bold_split_across_rows(self):
+        # The note that surfaced it: a long **bold** lead sentence that wraps.
+        line = ("**This note carries only what is still OWED — an action, an "
+                "ask, a decision, a price, an address.** Findings do **not** "
+                "belong here.")
+        for width in (30, 45, 60, 72, 90, 120):
+            rows = [(r[0], r[1])
+                    for r in notoj.wrap_preview_rows([line], width)]
+            drawn, bold = self._drawn(rows, curses_stub.A_BOLD)
+            # The space a wrap consumes isn't drawn, so compare on the text
+            # with whitespace stripped out.
+            squeeze = lambda s: "".join(s.split())
+            bold, drawn = squeeze(bold), squeeze(drawn)
+            self.assertNotIn("*", drawn,
+                             "bold markers drawn as text at width %d" % width)
+            self.assertIn(squeeze("still OWED"), bold,
+                          "head of the split run not bold at width %d" % width)
+            self.assertIn(squeeze("a price, an address."), bold,
+                          "tail of the split run not bold at width %d" % width)
+            self.assertIn("not", bold)
+            self.assertNotIn("Findings", bold,
+                             "bold leaked past its closer at width %d" % width)
+
+    def test_strike_split_across_rows(self):
+        rows = [("~~a struck run that", 3), (" wraps here~~ and stops", 3)]
+        states = notoj.row_md_states(rows)
+        struck = "".join(
+            log for i, (row, _s) in enumerate(rows)
+            for log, draw, _a in notoj._md_entries_state(row, 0, states[i])
+            if len(draw) > 1)
+        self.assertEqual(struck, "a struck run that wraps here")
+
+    def test_heading_wrapped_stays_a_heading(self):
+        # A header owns its whole source line, continuation rows included: the
+        # `#` markers are dropped and every row draws in the header attribute.
+        rows = [("## A heading long enough", 4), (" that it wraps", 4)]
+        drawn, header = self._drawn(rows, curses_stub.A_BOLD)
+        self.assertEqual(drawn, "A heading long enough that it wraps")
+        self.assertEqual(header, drawn,
+                         "continuation row of a heading lost the header attr")
+
+    def test_marker_that_never_pairs_stays_literal(self):
+        # An asterisk with no partner anywhere on the source line is prose,
+        # exactly as it is on an unwrapped line.
+        drawn, bold = self._drawn([("2 * 3 is six and", 1), (" 4 * 5 is", 1)],
+                                  curses_stub.A_BOLD)
+        self.assertEqual(drawn, "2 * 3 is six and 4 * 5 is")
+        self.assertEqual(bold, "")
+
+    def test_indent_is_not_read_as_line_content(self):
+        # A wrapped list item gets its indent back on every continuation row,
+        # and the wrap eats the space it broke at. Reading the markup off a
+        # plain join would judge `*` markers against neighbours the note does
+        # not have, so the rejoin puts the space back and takes the indent out.
+        line = ("  - **A bullet whose bold lead runs on** and then some tail "
+                "prose that carries *an italic* too.")
+        for width in (28, 40, 55, 80):
+            rows = [(r[0], r[1])
+                    for r in notoj.wrap_preview_rows([line], width)]
+            self.assertGreater(len(rows), 1)
+            drawn, bold = self._drawn(rows, curses_stub.A_BOLD)
+            self.assertNotIn("*", drawn,
+                             "markers drawn as text at width %d" % width)
+            self.assertIn("boldleadrunson", "".join(bold.split()),
+                          "bold lost across the wrap at width %d" % width)
+            self.assertNotIn("tail", bold)
+
+    def test_rejoin_puts_the_source_line_back(self):
+        line = "  - **a bullet that is long enough to wrap more than once** ok"
+        rows = [r[0] for r in notoj.wrap_preview_rows([line], 30)]
+        self.assertGreater(len(rows), 2)
+        rejoined, spans = notoj._rejoin_wrapped(rows)
+        self.assertEqual(rejoined, line)
+        # Each row's content sits where its span says it does.
+        for text, (off, pad) in zip(rows, spans):
+            self.assertEqual(rejoined[off:off + len(text) - pad], text[pad:])
+
+    def test_wrapped_renders_the_same_as_unwrapped(self):
+        # The invariant behind the whole change: wrapping is a display
+        # decision and must not change what markup a line has. Compared with
+        # the spaces the wrap consumes taken out of both sides.
+        lines = [
+            "**bold** then `code` then *italic* and ~~struck~~ text to wrap",
+            "- **A bullet with `a code span` inside its bold lead** and tail",
+            "## A heading long enough that it has to wrap somewhere",
+            "a lone * asterisk and a lone ` backtick, neither of them paired",
+            "**bold with `a long code span inside it` that also wraps** end",
+            "~~a struck run long enough to cross more than one row boundary~~",
+        ]
+        for line in lines:
+            want = [(l, d, a) for l, d, a in notoj._md_entries_state(line, 7)
+                    if not l.isspace()]
+            for width in (20, 30, 45, 60, 80):
+                rows = [(r[0], r[1])
+                        for r in notoj.wrap_preview_rows([line], width)]
+                states = notoj.row_md_states(rows)
+                got = [(l, d, a)
+                       for i, (row, _s) in enumerate(rows)
+                       for l, d, a in notoj._md_entries_state(row, 7, states[i])
+                       if not l.isspace()]
+                self.assertEqual(got, want,
+                                 "wrapping at %d changed the markup of %r"
+                                 % (width, line))
+
+    def test_emphasis_does_not_pair_across_source_lines(self):
+        # Two different source lines, each with one stray marker: they must
+        # not join into a run across the boundary.
+        drawn, bold = self._drawn([("**unclosed bold", 1), ("next line**", 2)],
+                                  curses_stub.A_BOLD)
+        self.assertEqual(drawn, "**unclosed boldnext line**")
+        self.assertEqual(bold, "")
 
 
 # ---------------------------------------------------------------------------
