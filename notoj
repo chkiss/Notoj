@@ -5019,6 +5019,19 @@ def clip_to_width(s, max_w):
 # pre-shape to presentation forms here (display-only; the file on disk is
 # never touched). Ligatures OFF keeps it 1 char -> 1 form so column widths are
 # unchanged. Bidi is left to the terminal (VTE).
+#
+# Arabic *script* (covers Urdu, Persian, Pashto, Sindhi, Uyghur, Kurdish…),
+# the only script with Unicode presentation forms to swap to: Arabic, Arabic
+# Supplement, Arabic Extended-A/B, and the two presentation-form blocks.
+_ARABIC_BLOCKS = ((0x600, 0x6ff),      # Arabic
+                  (0x750, 0x77f),      # Arabic Supplement
+                  (0x870, 0x8ff),      # Arabic Extended-A/B
+                  (0xfb50, 0xfdff),    # Presentation Forms-A
+                  (0xfe70, 0xfeff))    # Presentation Forms-B
+_ARABIC_SCRIPT = re.compile(
+    "[%s]" % "".join("%s-%s" % (chr(lo), chr(hi))
+                     for lo, hi in _ARABIC_BLOCKS))
+
 try:
     import arabic_reshaper as _ar
     _reshaper = _ar.ArabicReshaper(configuration={
@@ -5027,21 +5040,15 @@ try:
     })
 
     def _reshape(s):
-        # Arabic *script* (covers Urdu, Persian, Pashto, Sindhi, Uyghur,
-        # Kurdish…), the only script with Unicode presentation forms to swap
-        # to. Trigger ranges: Arabic, Arabic Supplement, Arabic Extended-A/B,
-        # and the two presentation-form blocks.
-        if s.isascii():        # no Arabic script in an ASCII string, and
-            return s           # every drawn string comes through here
+        # Every drawn string comes through here, so both tests below are one
+        # C-level pass: an ASCII string cannot hold Arabic script, and one
+        # em dash or accent used to send the rest of the line through a
+        # per-character scan looking for a block it never contained.
+        if s.isascii() or not _ARABIC_SCRIPT.search(s):
+            return s
         if not config_bool("reshape_arabic", True):
             return s
-        for ch in s:
-            o = ord(ch)
-            if (0x600 <= o <= 0x6ff or 0x750 <= o <= 0x77f
-                    or 0x870 <= o <= 0x8ff
-                    or 0xfb50 <= o <= 0xfdff or 0xfe70 <= o <= 0xfeff):
-                return _reshaper.reshape(s)
-        return s
+        return _reshaper.reshape(s)
 except Exception:
     def _reshape(s):
         return s
@@ -5388,34 +5395,6 @@ _MD_MARKERS = re.compile(r"[*`~_#]")
 _MD_MARKER_WIDTH = {"bi": 3, "b": 2, "bu": 2, "s": 2, "i": 1, "iu": 1, "code": 1}
 
 
-def _md_emphasis_only(raw, base_attr):
-    """Entries for a row with no code span in it — the overwhelming majority.
-    Emphasis is the only markup left, so the runs come straight off the regex
-    with no per-character bookkeeping. Safe because the caller has established
-    that no backtick on this source line pairs: the `code` alternative cannot
-    match, so nothing here can swallow a backtick."""
-    out = []
-    pos = 0
-    for mt in _md_inline_pattern().finditer(raw):
-        if mt.start() > pos:
-            out += [(c, c, base_attr) for c in raw[pos:mt.start()]]
-        g, s = mt.lastgroup, mt.group()
-        strike = False
-        if g == "bi":
-            inner, a = s[3:-3], base_attr | curses.A_BOLD | MD_ITALIC
-        elif g in ("b", "bu"):           # **bold** or __bold__
-            inner, a = s[2:-2], base_attr | curses.A_BOLD
-        elif g == "s":
-            inner, a, strike = s[2:-2], base_attr, True
-        else:                            # i (*italic*) or iu (_italic_)
-            inner, a = s[1:-1], base_attr | MD_ITALIC
-        out += [(c, (c + MD_STRIKE) if strike else c, a) for c in inner]
-        pos = mt.end()
-    if pos < len(raw):
-        out += [(c, c, base_attr) for c in raw[pos:]]
-    return out
-
-
 def _md_emphasis(masked, attrs, drop, strike):
     """Apply bold/italic/strike to the per-character `attrs`, `drop` and
     `strike` arrays of one source line, reading `masked` — the line with any
@@ -5540,32 +5519,67 @@ def _md_line_arrays(line):
     return (attrs, drop, strike, False)
 
 
-def _md_entries_state(raw, base_attr, state=None):
-    """Like _md_entries, but for one wrapped row of a longer source line:
+def _md_runs(raw, base_attr, state=None):
+    """One preview row as the ``(text, attr, struck)`` runs that paint it.
+
     `state` is this row's slice of the line-level markup — the
     ``(attrs, drop, strike, header)`` tuple row_md_states cut for it. Passing
-    state=None treats `raw` as a complete line and reads its markup itself."""
+    state=None treats `raw` as a complete line and reads its markup itself.
+
+    `text` is the LOGICAL text: markers dropped, what the reader sees and what
+    token search matches. `struck` says the run wears the strikethrough
+    overlay, a combining character per character rather than a curses
+    attribute — which is why it splits runs the way an attribute does, and why
+    the overlay is woven in at paint time rather than carried around here.
+
+    Runs, not an entry per character: emitting one tuple per character and
+    grouping them afterwards was 60% of a preview frame, and the row almost
+    never has more than a handful of runs in it. Both shortcuts below matter —
+    a row with no markup, and a row wholly inside one run of it (every row of
+    a wrapped **bold** sentence but the first and last), are the common
+    cases."""
     if state is None:
         if not _MD_MARKERS.search(raw):
-            return [(c, c, base_attr) for c in raw]
-        if "`" not in raw and not MD_HEADER.match(raw):
-            # No code span to reconcile with: the runs come straight off the
-            # regex, with no per-character bookkeeping.
-            return _md_emphasis_only(raw, base_attr)
+            return [(raw, base_attr, False)] if raw else []
         attrs, drop, strike, header = _md_line_arrays(raw)
     else:
         attrs, drop, strike, header = state
+    n = len(raw)
+    if not n:
+        return []
     base = (md_header_attr() | curses.A_BOLD) if header else base_attr
-    return [(raw[k], (raw[k] + MD_STRIKE) if strike[k] else raw[k],
-             base | attrs[k])
-            for k in range(len(raw)) if not drop[k]]
+    # any()/count() are C loops over the arrays; the per-character walk below
+    # only runs for a row that genuinely changes attribute partway across.
+    if not any(drop) and not any(strike) and attrs.count(attrs[0]) == n:
+        return [(raw, base | attrs[0], False)]
+
+    runs = []
+    k = 0
+    while k < n:
+        if drop[k]:
+            k += 1
+            continue
+        a, s = attrs[k], strike[k]
+        start = k
+        k += 1
+        while k < n and not drop[k] and attrs[k] == a and strike[k] == s:
+            k += 1
+        attr = base | a
+        # Dropped markers between two stretches that paint identically leave
+        # them adjacent (``**a** **b**`` around a shared attribute), so fold
+        # them into one write rather than two.
+        if runs and runs[-1][1] == attr and runs[-1][2] == s:
+            runs[-1] = (runs[-1][0] + raw[start:k], attr, s)
+        else:
+            runs.append((raw[start:k], attr, s))
+    return runs
 
 
 def _md_logical(raw, state=None):
     """The marker-stripped text of one row — what the reader sees, and so what
     token search must match against for the count to agree with the drawing.
 
-    The same answer as joining the logical characters of _md_entries_state,
+    The same answer as joining the text of _md_runs,
     without building an entry per character: the match list runs over every
     row of the note each time the note or the query changes, and on a long
     note that per-character churn was most of the cost. A row with no markup
@@ -5579,14 +5593,6 @@ def _md_logical(raw, state=None):
     if not any(drop):
         return raw
     return "".join([c for k, c in enumerate(raw) if not drop[k]])
-
-
-def _md_entries(raw, base_attr):
-    """Parse one complete preview line into [(logical_char, draw_string,
-    attr)]. The logical char drives token-search matching and width; the draw
-    string is what's painted (identical, except struck chars carry a combining
-    overlay)."""
-    return _md_entries_state(raw, base_attr)
 
 
 def _rejoin_wrapped(texts):
@@ -5675,38 +5681,70 @@ def row_md_states(rows, lo=0, hi=None):
     return states
 
 
+def _hit_runs(runs, hi):
+    """`runs` re-cut so the search hits in them carry the hit attribute.
+
+    A hit wins over the markdown attribute wherever the two overlap, so a run
+    is split at every span edge that falls inside it, and a span that straddles
+    two runs colors the part of each that it covers — it keeps the markdown
+    only in the sense that both halves stay separate writes.
+
+    Matched against the logical (marker-stripped) text, which is what the
+    reader sees, so a hit inside **bold** or a `# Heading` is found where it
+    looks like it is.
+
+    Runs and spans are both in logical order and match_spans returns spans
+    leftmost-first and non-overlapping, which is what lets this walk the two
+    lists once between them. Overlapping spans would need the later one to
+    repaint characters the earlier one already emitted."""
+    spans = match_spans("".join([r[0] for r in runs]), hi.tokens)
+    if not spans:
+        return runs
+    out = []
+    pos = 0                      # logical offset where the current run starts
+    si = 0
+    for text, attr, struck in runs:
+        end = pos + len(text)
+        cut = pos                # logical offset of the first char not emitted
+        while si < len(spans) and spans[si][0] < end:
+            s, e, tok = spans[si]
+            hot = hi.attr_for(si, tok)
+            s, e = max(s, pos), min(e, end)
+            if s > cut:
+                out.append((text[cut - pos:s - pos], attr, struck))
+            if e > s:
+                out.append((text[s - pos:e - pos], hot, struck))
+            cut = e
+            if spans[si][1] <= end:
+                si += 1
+            else:
+                break            # this span runs on into the next run
+        if cut < end:
+            out.append((text[cut - pos:], attr, struck))
+        pos = end
+    return out
+
+
 def draw_markdown_line(stdscr, y, x, raw, max_w, base_attr, hi, md_state=None):
     """Like draw_line_highlighted but renders inline markdown; search hits
     still win, overriding the markdown attribute on the matched run.
     `md_state` is this row's slice of the markup read across its whole source
     line, from row_md_states; None treats `raw` as a complete line."""
-    entries = _md_entries_state(raw, base_attr, md_state)
-    if not entries:
-        return
+    runs = _md_runs(raw, base_attr, md_state)
     if hi and hi.tokens:
-        # Matched against the logical (marker-stripped) text, which is what the
-        # reader sees — so a hit inside **bold** or a `# Heading` is found where
-        # it looks like it is.
-        spans = match_spans("".join(e[0] for e in entries), hi.tokens)
-        hot = [None] * len(entries)
-        for k, (start, end, tok) in enumerate(spans):
-            attr = hi.attr_for(k, tok)
-            for j in range(start, end):
-                hot[j] = attr
-        entries = [(e[0], e[1], hot[k] if hot[k] is not None else e[2])
-                   for k, e in enumerate(entries)]
-    col, rem, i, n = x, max_w, 0, len(entries)
-    while i < n and rem > 0:
-        attr = entries[i][2]
-        j = i
-        while j < n and entries[j][2] == attr:
-            j += 1
-        seg = "".join(e[1] for e in entries[i:j])
-        addnstr_w(stdscr, y, col, seg, rem, attr)
-        w = disp_width(seg)
+        runs = _hit_runs(runs, hi)
+    col, rem = x, max_w
+    for text, attr, struck in runs:
+        if rem <= 0:
+            return
+        if struck:
+            text = "".join([c + MD_STRIKE for c in text])
+        addnstr_w(stdscr, y, col, text, rem, attr)
+        # The width of the whole run, clipped or not: a run that overruns the
+        # pane leaves rem <= 0 and ends the line, which is what clipping means.
+        w = disp_width(text)
         col += w
         rem -= w
-        i = j
 
 
 # ----------------------------

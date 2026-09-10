@@ -119,6 +119,17 @@ def body_lines(text, width):
     return [r[0] for r in notoj.preview_source_rows(text, width)]
 
 
+def md_entries(raw, base_attr, state=None):
+    """Per-character ``(logical, drawn, attr)`` view of one preview row.
+
+    The app renders in runs — one write per stretch of row that looks the same
+    — because grouping per-character entries was most of a frame. These tests
+    are mostly about what happens to a particular character, so they read that
+    view back out of the runs here; doing so also asserts that the runs spell
+    the row correctly."""
+    return [(c, c + notoj.MD_STRIKE if struck else c, attr)
+            for text, attr, struck in notoj._md_runs(raw, base_attr, state)
+            for c in text]
 
 
 # ---------------------------------------------------------------------------
@@ -5239,12 +5250,12 @@ class TestMarkdownHeaderColor(unittest.TestCase):
         # pair 5 — the search-match slot — and every "# Heading" wore whatever
         # color.match was set to.
         cp = curses_stub.color_pair
-        attr = notoj._md_entries_state("# Head", cp(4))[0][2]
+        attr = md_entries("# Head", cp(4))[0][2]
         self.assertEqual(attr, cp(9) | curses_stub.A_BOLD)
         self.assertNotEqual(attr & ~curses_stub.A_BOLD, cp(5))
 
     def test_header_marker_is_dropped(self):
-        self.assertEqual("".join(e[0] for e in notoj._md_entries_state("## Head", 0)),
+        self.assertEqual("".join(e[0] for e in md_entries("## Head", 0)),
                          "Head")
 
 
@@ -5632,7 +5643,7 @@ class TestPreviewMatchList(unittest.TestCase):
 
     def test_logical_text_is_what_the_drawing_paints(self):
         # The match list counts hits on _md_logical; the pane paints
-        # _md_entries_state. If the two ever disagree, the count and n/N drift
+        # _md_runs. If the two ever disagree, the count and n/N drift
         # away from what is on screen — so they must agree character for
         # character, unwrapped and wrapped alike.
         lines = ["**bold** and `code` and *it* and ~~struck~~ and plain",
@@ -5643,7 +5654,7 @@ class TestPreviewMatchList(unittest.TestCase):
         for line in lines:
             self.assertEqual(
                 notoj._md_logical(line),
-                "".join(e[0] for e in notoj._md_entries_state(line, 0)),
+                "".join(e[0] for e in md_entries(line, 0)),
                 "logical text diverged from the drawing for %r" % line)
         for width in (12, 20, 30):
             for line in lines:
@@ -5654,7 +5665,7 @@ class TestPreviewMatchList(unittest.TestCase):
                     self.assertEqual(
                         notoj._md_logical(row, states[i]),
                         "".join(e[0] for e in
-                                notoj._md_entries_state(row, 0, states[i])),
+                                md_entries(row, 0, states[i])),
                         "logical text diverged at width %d on %r"
                         % (width, row))
 
@@ -6312,7 +6323,7 @@ class TestWrapToWidthSpeed(unittest.TestCase):
 class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
     """A wrap may split an inline backtick code span across rows, but the
     preview pairs backticks over the whole source line (row_md_states →
-    _md_entries_state), so every row of a split span still paints as code and
+    _md_runs), so every row of a split span still paints as code and
     the prose between two spans never turns up in reverse video — while a
     backtick that never finds a partner stays literal text."""
 
@@ -6334,7 +6345,7 @@ class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
             all_runs = []
             for i, (row, src) in enumerate(pairs):
                 runs, last, cur = [], None, ""
-                for _log, draw, attr in notoj._md_entries_state(row, base, states[i]):
+                for _log, draw, attr in md_entries(row, base, states[i]):
                     if attr != last:
                         if cur:
                             runs.append((last & curses_stub.A_REVERSE, cur))
@@ -6364,7 +6375,7 @@ class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
     def _runs(self, line, base=0):
         """(is_code, text) runs for one complete line, as drawn."""
         runs, last, cur = [], None, ""
-        for _log, draw, attr in notoj._md_entries_state(line, base):
+        for _log, draw, attr in md_entries(line, base):
             if attr != last:
                 if cur:
                     runs.append((bool(last & curses_stub.A_REVERSE), cur))
@@ -6417,7 +6428,7 @@ class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
         # they must render bold throughout, with the code span in reverse
         # video and neither the ** nor the backticks drawn as text.
         line = "- **`deploy.sh` deletes backups.** It uses `--delete`"
-        entries = notoj._md_entries_state(line, 0)
+        entries = md_entries(line, 0)
         drawn = "".join(d for _l, d, _a in entries)
         self.assertNotIn("*", drawn, "bold markers drawn as text")
         self.assertNotIn("`", drawn, "code delimiters drawn as text")
@@ -6434,7 +6445,7 @@ class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
     def test_marker_inside_a_code_span_is_literal(self):
         # Code binds tighter than emphasis, so a marker character inside a
         # span is text and cannot open a run that eats the rest of the line.
-        entries = notoj._md_entries_state("use `a * b` then plain", 0)
+        entries = md_entries("use `a * b` then plain", 0)
         self.assertEqual("".join(d for _l, d, _a in entries),
                          "use a * b then plain")
         for _l, _d, a in entries:
@@ -6461,7 +6472,7 @@ class TestWrapKeepsCodeSpansIntact(unittest.TestCase):
         states = notoj.row_md_states(rows)
         drawn, marked = "", ""
         for i, (row, _src) in enumerate(rows):
-            for log, draw, attr in notoj._md_entries_state(row, 0, states[i]):
+            for log, draw, attr in md_entries(row, 0, states[i]):
                 drawn += draw
                 if mask is not None and attr & mask:
                     marked += log
@@ -6516,7 +6527,7 @@ class TestWrapKeepsEmphasisIntact(unittest.TestCase):
         states = notoj.row_md_states(rows)
         struck = "".join(
             log for i, (row, _s) in enumerate(rows)
-            for log, draw, _a in notoj._md_entries_state(row, 0, states[i])
+            for log, draw, _a in md_entries(row, 0, states[i])
             if len(draw) > 1)
         self.assertEqual(struck, "a struck run that wraps here")
 
@@ -6578,7 +6589,7 @@ class TestWrapKeepsEmphasisIntact(unittest.TestCase):
             "~~a struck run long enough to cross more than one row boundary~~",
         ]
         for line in lines:
-            want = [(l, d, a) for l, d, a in notoj._md_entries_state(line, 7)
+            want = [(l, d, a) for l, d, a in md_entries(line, 7)
                     if not l.isspace()]
             for width in (20, 30, 45, 60, 80):
                 rows = [(r[0], r[1])
@@ -6586,7 +6597,7 @@ class TestWrapKeepsEmphasisIntact(unittest.TestCase):
                 states = notoj.row_md_states(rows)
                 got = [(l, d, a)
                        for i, (row, _s) in enumerate(rows)
-                       for l, d, a in notoj._md_entries_state(row, 7, states[i])
+                       for l, d, a in md_entries(row, 7, states[i])
                        if not l.isspace()]
                 self.assertEqual(got, want,
                                  "wrapping at %d changed the markup of %r"
@@ -6599,6 +6610,81 @@ class TestWrapKeepsEmphasisIntact(unittest.TestCase):
                                   curses_stub.A_BOLD)
         self.assertEqual(drawn, "**unclosed boldnext line**")
         self.assertEqual(bold, "")
+
+
+class TestMarkdownRuns(unittest.TestCase):
+    """The preview paints a row as runs — one write per stretch that looks the
+    same. A row that looks uniform must come out as ONE run: fragmenting it
+    would put the per-character cost back where the runs were meant to remove
+    it, and that is invisible to any test that only checks what is drawn."""
+
+    # A color pair, so the markdown attributes OR-ed onto it stay visible in
+    # the assertions — a base of 7 already carries curses' A_BOLD bit.
+    BASE = curses_stub.color_pair(4)
+    BOLD = curses_stub.color_pair(4) | curses_stub.A_BOLD
+
+    def test_a_plain_row_is_a_single_run(self):
+        runs = notoj._md_runs("nothing marked up on this row", self.BASE)
+        self.assertEqual(
+            runs, [("nothing marked up on this row", self.BASE, False)])
+
+    def test_a_row_inside_a_wrapped_bold_run_is_a_single_run(self):
+        # Every row of a wrapped **bold** sentence except the first and last
+        # is uniformly bold with no markers on it — the hot case while
+        # scrolling a marked-up note.
+        rows = [("**bold text that", 1), ("wraps over three", 1),
+                ("rows in total**", 1)]
+        states = notoj.row_md_states(rows)
+        middle = notoj._md_runs(rows[1][0], self.BASE, states[1])
+        self.assertEqual(middle, [("wraps over three", self.BOLD, False)])
+
+    def test_an_empty_row_paints_nothing(self):
+        self.assertEqual(notoj._md_runs("", self.BASE), [])
+
+    def test_strike_splits_a_run_even_at_the_same_attribute(self):
+        # ~~strike~~ is a combining overlay, not a curses attribute, so it
+        # cannot share a run with unstruck text that happens to match it.
+        runs = notoj._md_runs("plain ~~struck~~ plain", self.BASE)
+        self.assertEqual(runs, [("plain ", self.BASE, False),
+                                ("struck", self.BASE, True),
+                                (" plain", self.BASE, False)])
+
+    def test_stretches_that_paint_alike_are_folded_into_one_write(self):
+        # The dropped markers between them left them adjacent.
+        self.assertEqual(notoj._md_runs("**a****b**", self.BASE),
+                         [("ab", self.BOLD, False)])
+
+    def _hits(self, raw, tokens):
+        hi = notoj.Hi(tokens, attr=99, focus=None, focus_attr=98)
+        return notoj._hit_runs(notoj._md_runs(raw, self.BASE), hi)
+
+    def test_a_hit_splits_the_run_it_lands_in(self):
+        self.assertEqual(self._hits("find the word here", ["word"]),
+                         [("find the ", self.BASE, False), ("word", 99, False),
+                          (" here", self.BASE, False)])
+
+    def test_a_hit_wins_over_the_markdown_attribute(self):
+        runs = self._hits("say **bold** now", ["bold"])
+        self.assertEqual(runs, [("say ", self.BASE, False),
+                                ("bold", 99, False),
+                                (" now", self.BASE, False)])
+
+    def test_a_hit_straddling_two_runs_colors_both_parts(self):
+        # "aabb" spans the end of the bold run and the start of the plain one;
+        # both halves take the hit attribute, in two writes.
+        runs = self._hits("**xaa**bby", ["aabb"])
+        self.assertEqual(runs, [("x", self.BOLD, False), ("aa", 99, False),
+                                ("bb", 99, False), ("y", self.BASE, False)])
+
+    def test_hits_are_counted_on_the_marker_stripped_text(self):
+        # The markers are not on screen, so a token made of them cannot hit.
+        runs = self._hits("**bold**", ["**"])
+        self.assertEqual(runs, [("bold", self.BOLD, False)])
+
+    def test_runs_without_hits_are_returned_untouched(self):
+        runs = notoj._md_runs("no hit here", self.BASE)
+        hi = notoj.Hi(["zzz"], attr=99, focus=None, focus_attr=98)
+        self.assertIs(notoj._hit_runs(runs, hi), runs)
 
 
 # ---------------------------------------------------------------------------
