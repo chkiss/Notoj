@@ -2556,6 +2556,66 @@ def ensure_gitignore():
         pass
 
 
+# A leftover Syncthing temp file inside .git/objects/, from a period when the
+# repo was being synced. Read-only, not a git object, and invisible to
+# everything except the one command that cares.
+SYNC_DEBRIS_RE = re.compile(r"^\.syncthing\..*\.tmp$")
+
+
+def _sync_debris(git_dir):
+    """Paths of Syncthing temp files sitting in .git/objects/."""
+    found = []
+    objects = os.path.join(git_dir, "objects")
+    try:
+        for entry in os.listdir(objects):
+            sub = os.path.join(objects, entry)
+            if not os.path.isdir(sub):
+                continue
+            for fn in os.listdir(sub):
+                if SYNC_DEBRIS_RE.match(fn):
+                    found.append(os.path.join(sub, fn))
+    except OSError:
+        pass
+    return found
+
+
+def git_gc_unblock():
+    """Clear a `git gc` failure caused solely by Syncthing debris.
+
+    git repacks loose objects on its own, but a failed gc writes `.git/gc.log`
+    and then *refuses to retry while that file exists* — reporting the old
+    error instead of running. So a handful of stale temp files stop all
+    maintenance permanently: every later commit piles up loose, and the repo
+    grows without bound while the notes themselves barely change. Observed in
+    the wild at 45 MiB of loose objects against a 3 MiB pack, from seven dead
+    files that a `.stignore` rule had already stopped producing months earlier.
+
+    Only clears the log when every error in it names debris we removed. A gc
+    that failed for any other reason is left alone: that is real corruption,
+    and hiding it would be worse than the disk it costs.
+    """
+    git_dir = os.path.join(NOTES_DIR, ".git")
+    log = os.path.join(git_dir, "gc.log")
+    if not os.path.exists(log):
+        return False
+    try:
+        with open(log, "r", encoding="utf-8", errors="replace") as f:
+            complaints = [ln for ln in f.read().splitlines() if ln.strip()]
+        debris = _sync_debris(git_dir)
+        names = {os.path.basename(p) for p in debris}
+        # Every complaint must name a file we are about to remove.
+        for ln in complaints:
+            if not any(n in ln for n in names):
+                return False
+        for p in debris:
+            os.chmod(p, 0o644)   # git writes objects read-only
+            os.remove(p)
+        os.remove(log)
+    except OSError:
+        return False
+    return True
+
+
 def git_init():
     git_dir = os.path.join(NOTES_DIR, ".git")
     if not os.path.exists(git_dir):
@@ -2568,6 +2628,7 @@ def git_init():
         )
     else:
         ensure_gitignore()
+        git_gc_unblock()
 
 
 def git_commit(msg):

@@ -7235,6 +7235,19 @@ class TestRepoHygiene(unittest.TestCase):
         finally:
             notoj.NOTES_DIR = old
 
+    def _debris(self, d, name="deadbeef"):
+        objects = os.path.join(d, ".git", "objects", "ab")
+        os.makedirs(objects)
+        p = os.path.join(objects, ".syncthing.%s.tmp" % name)
+        with open(p, "w") as f:
+            f.write("x")
+        os.chmod(p, 0o444)          # git writes objects read-only
+        return p
+
+    def _gc_log(self, d, text):
+        with open(os.path.join(d, ".git", "gc.log"), "w") as f:
+            f.write(text)
+
     # -- .gitignore ---------------------------------------------------
 
     def test_editor_and_conflict_scratch_are_ignored(self):
@@ -7251,6 +7264,47 @@ class TestRepoHygiene(unittest.TestCase):
                 lines = f.read().splitlines()
             self.assertIn("*.swp", lines)
             self.assertEqual(lines.count(".trash/"), 1)   # no duplication
+
+    # -- gc unblocking ------------------------------------------------
+
+    def test_gc_log_of_pure_sync_debris_is_cleared(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._debris(d)
+            self._gc_log(d, "bad sha1 file: %s\n" % p)
+            with self._notes_dir(d):
+                self.assertTrue(notoj.git_gc_unblock())
+            self.assertFalse(os.path.exists(p))
+            self.assertFalse(os.path.exists(os.path.join(d, ".git", "gc.log")))
+
+    def test_a_real_gc_error_is_left_alone(self):
+        """The whole point: a stale log is cleared, a genuine one is not
+        hidden. Debris present, but the log also names something else."""
+        with tempfile.TemporaryDirectory() as d:
+            p = self._debris(d)
+            self._gc_log(d, "bad sha1 file: %s\n"
+                            "fatal: loose object a0b1c2 is corrupt\n" % p)
+            with self._notes_dir(d):
+                self.assertFalse(notoj.git_gc_unblock())
+            self.assertTrue(os.path.exists(p))
+            self.assertTrue(os.path.exists(os.path.join(d, ".git", "gc.log")))
+
+    def test_no_gc_log_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, ".git", "objects"))
+            with self._notes_dir(d):
+                self.assertFalse(notoj.git_gc_unblock())
+
+    def test_only_syncthing_temp_files_are_removed(self):
+        """A real loose object living beside the debris must survive."""
+        with tempfile.TemporaryDirectory() as d:
+            p = self._debris(d)
+            keep = os.path.join(d, ".git", "objects", "ab", "c0ffee")
+            with open(keep, "w") as f:
+                f.write("object")
+            self._gc_log(d, "bad sha1 file: %s\n" % p)
+            with self._notes_dir(d):
+                self.assertTrue(notoj.git_gc_unblock())
+            self.assertTrue(os.path.exists(keep))
 
 
 if __name__ == "__main__":
