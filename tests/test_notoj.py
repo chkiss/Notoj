@@ -5630,6 +5630,34 @@ class TestPreviewMatchList(unittest.TestCase):
             [notoj.Match(0, 0, 0, 0, None), notoj.Match(2, 0, 2, 0, None),
              notoj.Match(2, 1, 2, 1, None)])
 
+    def test_logical_text_is_what_the_drawing_paints(self):
+        # The match list counts hits on _md_logical; the pane paints
+        # _md_entries_state. If the two ever disagree, the count and n/N drift
+        # away from what is on screen — so they must agree character for
+        # character, unwrapped and wrapped alike.
+        lines = ["**bold** and `code` and *it* and ~~struck~~ and plain",
+                 "## a heading",
+                 "- **a bullet whose bold lead is long enough to wrap** tail",
+                 "a lone * and a lone ` neither of which pairs",
+                 "no markup at all on this line"]
+        for line in lines:
+            self.assertEqual(
+                notoj._md_logical(line),
+                "".join(e[0] for e in notoj._md_entries_state(line, 0)),
+                "logical text diverged from the drawing for %r" % line)
+        for width in (12, 20, 30):
+            for line in lines:
+                rows = [(r[0], r[1])
+                        for r in notoj.wrap_preview_rows([line], width)]
+                states = notoj.row_md_states(rows)
+                for i, (row, _src) in enumerate(rows):
+                    self.assertEqual(
+                        notoj._md_logical(row, states[i]),
+                        "".join(e[0] for e in
+                                notoj._md_entries_state(row, 0, states[i])),
+                        "logical text diverged at width %d on %r"
+                        % (width, row))
+
     def test_wrapped_line_keeps_one_source_line(self):
         # Two rows on screen, one source line: the source ordinals run 0,1 —
         # they're what Vim is told to step over, and Vim doesn't wrap.
@@ -6692,6 +6720,28 @@ class TestScrollHotPath(unittest.TestCase):
             notoj.wrap_to_width = spy
         self.assertEqual(calls, [],
                          "backtracking re-wrapped notes it recently wrapped")
+
+    def test_scrolling_reparses_only_the_newly_exposed_line(self):
+        # A j moves the preview window by one row, so all but one of the
+        # source lines on screen were parsed for the previous frame. Re-
+        # reading the whole window every frame is what made scrolling a
+        # markup-heavy note cost four times what it does now.
+        text = "\n".join(
+            "- **bold %d** with `code %d` and enough words after it to wrap"
+            % (i, i) for i in range(120))
+        note = make_note(path="/v/long.md", content=text)
+        state = {"cur": 0, "off": 0, "p_scroll": 0}
+        rows = notoj.preview_rows(note, [], 40, state)
+
+        notoj._md_line_arrays.cache_clear()
+        notoj.row_md_states(rows, 0, 40)
+        cold = notoj._md_line_arrays.cache_info().misses
+        self.assertGreater(cold, 1, "nothing was parsed for the first frame")
+        notoj.row_md_states(rows, 1, 41)             # one j
+        stepped = notoj._md_line_arrays.cache_info().misses - cold
+        self.assertLessEqual(stepped, 1,
+                             "a one-row scroll re-parsed %d source lines"
+                             % stepped)
 
     def test_settling_starts_a_fetch_without_waiting_for_it(self):
         state = _hist_state("/vault/slow.md")

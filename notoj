@@ -6,6 +6,7 @@ import ctypes
 import calendar
 import curses
 import fcntl
+import functools
 import hashlib
 import locale
 import os
@@ -4962,13 +4963,19 @@ def fit_hints(segments, width):
                 break
 
 
+@functools.lru_cache(maxsize=None)
 def char_width(ch):
     """Display columns a character occupies. Deliberately conservative: any
     glyph that *might* render double-width (CJK, fullwidth, ambiguous, arrows,
     symbols, emoji) counts as 2. A clipped string then never overflows its pane
     and wraps into the neighbouring column — which is what painted preview text
     over the left list. Over-truncating an accented line by a column at the far
-    right edge is invisible; under-counting corrupts the screen."""
+    right edge is invisible; under-counting corrupts the screen.
+
+    Memoized: this is a pure function of one character, and it is the busiest
+    function in the program — wrapping one 90k-character note called it 2.5
+    million times, 85% of that note's wrap cost. The cache is bounded by the
+    distinct characters a vault actually uses, a few thousand at most."""
     if unicodedata.combining(ch):
         return 0
     o = ord(ch)
@@ -4986,7 +4993,10 @@ def char_width(ch):
 def disp_width(s):
     if s.isascii():            # fast path: plain ASCII is one column per char
         return len(s)
-    return sum(char_width(c) for c in s)
+    # map() rather than a generator: one C-level loop over the string instead
+    # of a Python frame per character, which is most of what the slow path
+    # cost before. One non-ASCII character sends a whole line down it.
+    return sum(map(char_width, s))
 
 
 def clip_to_width(s, max_w):
@@ -5021,6 +5031,8 @@ try:
         # Kurdish…), the only script with Unicode presentation forms to swap
         # to. Trigger ranges: Arabic, Arabic Supplement, Arabic Extended-A/B,
         # and the two presentation-form blocks.
+        if s.isascii():        # no Arabic script in an ASCII string, and
+            return s           # every drawn string comes through here
         if not config_bool("reshape_arabic", True):
             return s
         for ch in s:
@@ -5366,8 +5378,10 @@ def _md_inline_pattern():
 
 # Every character that can start inline markup. A line holding none of them
 # carries no markup at all — the overwhelmingly common case — and skips the
-# parse entirely.
-_MD_MARKER_CHARS = frozenset("*`~_#")
+# parse entirely. A compiled search beats a set intersection here: it is one
+# C pass that stops at the first hit, instead of building a set of every
+# character in the row.
+_MD_MARKERS = re.compile(r"[*`~_#]")
 
 # Marker widths per inline-regex group: how many characters of the match are
 # opening and closing delimiter rather than content.
@@ -5469,6 +5483,7 @@ def _code_delims(line):
         i = b + 1
 
 
+@functools.lru_cache(maxsize=256)
 def _md_line_arrays(line):
     """Per-character markup for one whole SOURCE line, as
     ``(attrs, drop, strike, header)``:
@@ -5481,7 +5496,13 @@ def _md_line_arrays(line):
               the body one
 
     Every kind of markup pairs over the line, never over a wrapped row, which
-    is the only unit that can see both ends of a run split by word-wrap."""
+    is the only unit that can see both ends of a run split by word-wrap.
+
+    Memoized because scrolling asks the same question over and over: a j moves
+    the window by one row, so the other forty-odd rows on screen belong to
+    source lines that were just parsed. The cache is small — a window's worth
+    of lines is a couple of dozen. Callers only ever read or slice what comes
+    back; nothing may mutate these lists in place."""
     n = len(line)
     attrs = [0] * n
     drop = [False] * n
@@ -5525,7 +5546,7 @@ def _md_entries_state(raw, base_attr, state=None):
     ``(attrs, drop, strike, header)`` tuple row_md_states cut for it. Passing
     state=None treats `raw` as a complete line and reads its markup itself."""
     if state is None:
-        if not _MD_MARKER_CHARS.intersection(raw):
+        if not _MD_MARKERS.search(raw):
             return [(c, c, base_attr) for c in raw]
         if "`" not in raw and not MD_HEADER.match(raw):
             # No code span to reconcile with: the runs come straight off the
@@ -5538,6 +5559,26 @@ def _md_entries_state(raw, base_attr, state=None):
     return [(raw[k], (raw[k] + MD_STRIKE) if strike[k] else raw[k],
              base | attrs[k])
             for k in range(len(raw)) if not drop[k]]
+
+
+def _md_logical(raw, state=None):
+    """The marker-stripped text of one row — what the reader sees, and so what
+    token search must match against for the count to agree with the drawing.
+
+    The same answer as joining the logical characters of _md_entries_state,
+    without building an entry per character: the match list runs over every
+    row of the note each time the note or the query changes, and on a long
+    note that per-character churn was most of the cost. A row with no markup
+    is its own logical text and is returned untouched."""
+    if state is None:
+        if not _MD_MARKERS.search(raw):
+            return raw
+        drop = _md_line_arrays(raw)[1]
+    else:
+        drop = state[1]
+    if not any(drop):
+        return raw
+    return "".join([c for k, c in enumerate(raw) if not drop[k]])
 
 
 def _md_entries(raw, base_attr):
@@ -5612,7 +5653,7 @@ def row_md_states(rows, lo=0, hi=None):
             j += 1
         # An unwrapped line needs no line-level pass — it IS the line — and a
         # line with no marker character on it has nothing to read.
-        if j - i > 1 and any(_MD_MARKER_CHARS.intersection(rows[k][0])
+        if j - i > 1 and any(_MD_MARKERS.search(rows[k][0])
                              for k in range(i, j)):
             texts = [rows[k][0] for k in range(i, j)]
             line, spans = _rejoin_wrapped(texts)
@@ -5868,14 +5909,20 @@ def wrap_to_width(line, width):
     re-measured: disp_width sums char_width over every character, so
     disp_width(cur + " " + word) is always disp_width(cur) + 1 +
     disp_width(word), and re-walking the whole prefix per word made long
-    lines quadratic — seconds to preview a note with one huge line."""
+    lines quadratic — seconds to preview a note with one huge line.
+
+    disp_width's own ASCII fast path is inlined at the three points this loop
+    measures, because the call was the cost: an ASCII word's width IS its
+    length, and this is the busiest loop in the program. A realigned table row
+    is mostly padding, and `split(" ")` hands one empty word per padding
+    column, so a table-heavy note pays this loop hundreds of times per line."""
     indent = line[:len(line) - len(line.lstrip())]
-    avail = width - disp_width(indent)
+    avail = width - (len(indent) if indent.isascii() else disp_width(indent))
     if avail < 1:
         indent, avail = "", width
     rows, cur, cur_w = [], "", 0
     for word in line[len(indent):].split(" "):
-        word_w = disp_width(word)
+        word_w = len(word) if word.isascii() else disp_width(word)
         cand_w = word_w if not cur else cur_w + 1 + word_w
         if cand_w <= avail:
             cur = word if not cur else cur + " " + word
@@ -5885,12 +5932,13 @@ def wrap_to_width(line, width):
             rows.append(cur)
             cur, cur_w = "", 0
         while word_w > avail:
-            head = clip_to_width(word, avail)
+            head = (word[:avail] if word.isascii()
+                    else clip_to_width(word, avail))
             if not head:
                 break
             rows.append(head)
             word = word[len(head):]
-            word_w = disp_width(word)
+            word_w = len(word) if word.isascii() else disp_width(word)
         cur, cur_w = word, word_w
     rows.append(cur)
     return [indent + r for r in rows]
@@ -5982,6 +6030,8 @@ def _cell_logical(s):
     the raw text so `**bold**` doesn't pad its column four spaces wider than
     what actually appears, which would tilt every wall after it. Mirrors the
     inline branch of _md_entries (a fragment can't be a # heading)."""
+    if not _MD_MARKERS.search(s):     # most cells are plain text: nothing to drop
+        return s
     pos, out = 0, []
     for mt in _md_inline_pattern().finditer(s):
         out.append(s[pos:mt.start()])
@@ -6543,7 +6593,7 @@ def preview_match_list(rows, tokens, render_md):
         # Match the logical (marker-stripped) text when markdown is rendered,
         # so the counting agrees with draw_markdown_line. The tag row is drawn
         # literally, so it's counted literally.
-        line = ("".join(e[0] for e in _md_entries_state(raw, 0, md_states[i]))
+        line = (_md_logical(raw, md_states[i])
                 if render_md and src is not None else raw)
         spans = match_spans(line, tokens)
         seen = per_src.get(src, 0)
