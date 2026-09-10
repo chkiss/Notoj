@@ -261,6 +261,6 @@ Both run on every push and pull request (`.github/workflows/tests.yml`).
 | `notoj` | The application. One executable Python file, no dependencies beyond the stdlib. |
 | `scripts/` | Standalone companions: rating tables, the sync-conflict sentinel, the Simplenote importer. |
 | `tests/` | Both `unittest` suites. |
-| `docs/` | [`feature_list.md`](docs/feature_list.md), the running list of what the app does. |
+| `docs/` | [`feature_list.md`](docs/feature_list.md), the running list of what the app does; [`performance.md`](docs/performance.md), what the preview costs to draw and how to verify a change to it. |
 | `install.sh` | Clone-and-symlink installer; see [Install](#install). |
 | `config.example` | Every configuration option, documented in full. |
