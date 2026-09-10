@@ -2522,7 +2522,19 @@ def session_alive(sess):
 # Git snapshot helpers
 # ----------------------------
 
-GITIGNORE_ENTRIES = [".trash/", ".notoj_state", ".new_*.md", ".notoj_review.json"]
+GITIGNORE_ENTRIES = [
+    ".trash/", ".notoj_state", ".new_*.md", ".notoj_review.json",
+    # Editor scratch. Vim names its swap for "note.md" ".note.md.swp", which
+    # `git add -A` picks up: binary, uncompressible, and rewritten on every
+    # keystroke, so one abandoned session can add dozens of revisions.
+    "*.swp", "*.swo",
+    # Syncthing conflict copies. resolve_conflict() snapshots the copy it is
+    # about to delete with `git add -f`, so ignoring them here costs nothing
+    # and enforces what that function already assumes: conflict copies enter
+    # history only as their own deliberate commit, never as part of a
+    # routine snapshot.
+    "*.sync-conflict-*",
+]
 
 
 def ensure_gitignore():

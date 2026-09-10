@@ -7222,5 +7222,36 @@ class TestSelectionPaint(unittest.TestCase):
                          set(range(1, 29)))             # rows 1..h-2
 
 
+class TestRepoHygiene(unittest.TestCase):
+    """Keeping the notes repo out of the two states that make it grow without
+    bound: committing editor/sync scratch, and a `git gc` that can never run."""
+
+    @contextlib.contextmanager
+    def _notes_dir(self, d):
+        old = notoj.NOTES_DIR
+        notoj.NOTES_DIR = d
+        try:
+            yield
+        finally:
+            notoj.NOTES_DIR = old
+
+    # -- .gitignore ---------------------------------------------------
+
+    def test_editor_and_conflict_scratch_are_ignored(self):
+        for pat in ("*.swp", "*.swo", "*.sync-conflict-*"):
+            self.assertIn(pat, notoj.GITIGNORE_ENTRIES)
+
+    def test_ensure_gitignore_adds_entries_to_an_older_repo(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, ".gitignore"), "w") as f:
+                f.write(".trash/\n")          # a repo from before these existed
+            with self._notes_dir(d):
+                notoj.ensure_gitignore()
+            with open(os.path.join(d, ".gitignore")) as f:
+                lines = f.read().splitlines()
+            self.assertIn("*.swp", lines)
+            self.assertEqual(lines.count(".trash/"), 1)   # no duplication
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
