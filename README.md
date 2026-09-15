@@ -107,7 +107,10 @@ full keybinding reference. The essentials:
   (across a line break too), and mixes freely with plain words:
   `"cat food" vet`. A misspelled word still finds the note through the
   near-miss matching; a quoted phrase never does, since quoting asks for
-  exactly that text.
+  exactly that text. A leading `-` excludes — `recipe -draft`,
+  `recipe -"cat food"` — and never matches fuzzily, so nothing disappears for
+  a reason you can't see. (To search for text starting with a hyphen, quote
+  it: `"-v"`.)
 - With a multi-word query, `Tab`/`Shift-Tab` cycle which term `n`/`N` step
   through: all of them, then each one, then all again. The result list is
   untouched: retyping `/food` would rank a different set of notes, while this

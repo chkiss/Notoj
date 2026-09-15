@@ -1281,24 +1281,27 @@ class Term(str):
     hands these to Vim keeps treating a term as the text it is. `phrase` marks
     a quoted term — matched contiguously, with any whitespace between its
     words, and never corrected for typos, because quoting asks for exactly
-    that text."""
+    that text. `neg` marks a `-term`, which excludes rather than requires."""
 
     phrase = False
+    neg = False
 
-    def __new__(cls, text, phrase=False):
+    def __new__(cls, text, phrase=False, neg=False):
         t = str.__new__(cls, text)
         t.phrase = phrase
+        t.neg = neg
         return t
 
     def key(self):
         """What distinguishes this term from the same text typed unquoted —
         the part of a cache key a bare string would lose."""
-        return (str(self), self.phrase)
+        return (str(self), self.phrase, self.neg)
 
 
-# One query token: a quoted run (closed, or still being typed at the end of
-# the query), else a run of non-space non-quote characters.
-_QUERY_TOKEN_RE = re.compile(r'"[^"]*(?:"|$)|[^\s"]+')
+# One query token: an optional leading "-" (exclude), then a quoted run
+# (closed, or still being typed at the end of the query), else a run of
+# non-space non-quote characters.
+_QUERY_TOKEN_RE = re.compile(r'(-?)("[^"]*(?:"|$)|[^\s"]+)')
 
 
 def parse_query(q):
@@ -1311,16 +1314,19 @@ def parse_query(q):
     the phrase it is turning into, which keeps the live filter from lurching
     between two meanings on the keystroke that opens the quote. Empty quotes
     are dropped rather than made unmatchable — while typing, `""` is a term
-    the user hasn't written yet."""
+    the user hasn't written yet.
+
+    A leading `-` excludes: `recipe -draft` drops every note that says
+    "draft". To search for text that starts with a hyphen, quote it (`"-v"`)."""
     terms = []
     for m in _QUERY_TOKEN_RE.finditer(q or ""):
-        raw = m.group(0)
+        neg, raw = m.group(1) == "-", m.group(2)
         if raw.startswith('"'):
             words = raw.strip('"').lower().split()
             if words:
-                terms.append(Term(" ".join(words), phrase=True))
+                terms.append(Term(" ".join(words), phrase=True, neg=neg))
         else:
-            terms.append(Term(raw.lower()))
+            terms.append(Term(raw.lower(), neg=neg))
     return terms
 
 
@@ -1359,10 +1365,12 @@ def rank_notes(notes, q):
     if not terms:
         return notes
 
-    # Only unquoted terms are offered to the typo correction; a phrase is
-    # matched literally or not at all.
-    words = [t for t in terms if not t.phrase]
-    q_lower = " ".join(terms)
+    # Only unquoted terms the query actually asks for are offered to the typo
+    # correction: a phrase is matched literally or not at all, and an
+    # exclusion is strict on purpose — a fuzzy `-draft` would silently hide
+    # notes that say "drift", with nothing on screen to explain the gap.
+    words = [t for t in terms if not t.phrase and not t.neg]
+    q_lower = " ".join(t for t in terms if not t.neg)
     now = datetime.now().timestamp()
     results = []
 
@@ -1375,6 +1383,11 @@ def rank_notes(notes, q):
 
         for term in terms:
             in_t, in_tag, in_body = term_hits(n, term)
+            if term.neg:
+                if in_t or in_tag or in_body:
+                    matched_all = False
+                    break
+                continue
             if in_t:
                 score += 100
             if in_tag:
@@ -1395,7 +1408,9 @@ def rank_notes(notes, q):
         if not matched_all:
             continue
 
-        if t == q_lower:
+        if not q_lower:
+            pass  # nothing but exclusions: no title to be closer or further to
+        elif t == q_lower:
             score += 1000
         elif t.startswith(q_lower):
             score += 500
@@ -5287,8 +5302,9 @@ def addnstr_w(win, y, x, text, max_w, attr=0):
 def search_tokens(q):
     """The terms a query highlights on — parse_query's terms, so what's
     ranked is exactly what's highlighted, counted in the header and handed to
-    Vim."""
-    return parse_query(q)
+    Vim. Exclusions are left out: a `-term` is by definition absent from every
+    note that survived it, so there is nothing to mark, count or step to."""
+    return [t for t in parse_query(q) if not t.neg]
 
 
 def tag_at(tag_text, pos):

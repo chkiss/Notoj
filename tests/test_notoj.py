@@ -1070,6 +1070,49 @@ class TestRankNotes(unittest.TestCase):
         result = notoj.rank_notes(notes, '"cat food')
         self.assertEqual([n["title"] for n in result], ["a"])
 
+    def test_excluded_term_drops_the_note(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="recipe draft", modified=now, path="/a.md"),
+            make_note(title="b", content="recipe final", modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, "recipe -draft")
+        self.assertEqual([n["title"] for n in result], ["b"])
+
+    def test_excluded_phrase(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="recipe with cat\nfood", modified=now, path="/a.md"),
+            make_note(title="b", content="recipe food cat", modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, 'recipe -"cat food"')
+        self.assertEqual([n["title"] for n in result], ["b"])
+
+    def test_exclusion_is_never_fuzzy(self):
+        # A fuzzy exclude would hide "drift" notes with nothing on screen to
+        # say why, so -draft drops only literal "draft".
+        now = datetime.now().timestamp()
+        notes = [make_note(title="drift recipe", content="x", modified=now, path="/a.md")]
+        self.assertEqual(len(notoj.rank_notes(notes, "recipe -draft")), 1)
+
+    def test_exclusion_is_not_highlighted(self):
+        self.assertEqual(list(notoj.search_tokens("recipe -draft")), ["recipe"])
+
+    def test_exclusions_only_filter_and_keep_the_rest(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="draft", modified=now, path="/a.md"),
+            make_note(title="b", content="final", modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, "-draft")
+        self.assertEqual([n["title"] for n in result], ["b"])
+
+    def test_hyphen_text_can_be_quoted(self):
+        now = datetime.now().timestamp()
+        notes = [make_note(title="flags", content="use -v for verbose",
+                           modified=now, path="/a.md")]
+        self.assertEqual(len(notoj.rank_notes(notes, '"-v"')), 1)
+
     def test_a_typo_in_one_term_still_narrows_by_the_other(self):
         # Fuzzy keeps a misspelled term from dropping the note, but the other
         # term still has to match.
