@@ -112,7 +112,8 @@ full keybinding reference. The essentials:
   a reason you can't see. (To search for text starting with a hyphen, quote
   it: `"-v"`.) A bare uppercase `OR` takes either side — `cat OR dog food` is
   (cat or dog) and food — while a lowercase "or" stays an ordinary searchable
-  word.
+  word. `#work` (or `tag:work`) matches the note's *tags* by prefix, instead
+  of every note that happens to mention the word.
 - With a multi-word query, `Tab`/`Shift-Tab` cycle which term `n`/`N` step
   through: all of them, then each one, then all again. The result list is
   untouched: retyping `/food` would rank a different set of notes, while this

@@ -1152,6 +1152,55 @@ class TestRankNotes(unittest.TestCase):
                          [["cat", "dog"], ["food"]])
         self.assertEqual(negs, [])
 
+    def test_tag_term_matches_tags_only(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="x", tags=["work"], modified=now, path="/a.md"),
+            make_note(title="b", content="work notes", modified=now, path="/b.md"),
+        ]
+        for q in ("#work", "tag:work"):
+            with self.subTest(q=q):
+                result = notoj.rank_notes(notes, q)
+                self.assertEqual([n["title"] for n in result], ["a"])
+
+    def test_tag_term_matches_by_prefix_not_substring(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="x", tags=["workout"], modified=now, path="/a.md"),
+            make_note(title="b", content="x", tags=["homework"], modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, "#work")
+        self.assertEqual([n["title"] for n in result], ["a"])
+
+    def test_tag_term_combines_with_a_plain_term(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="hummus", tags=["food"], modified=now, path="/a.md"),
+            make_note(title="b", content="hummus", tags=["work"], modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, "#food hummus")
+        self.assertEqual([n["title"] for n in result], ["a"])
+
+    def test_tag_term_can_be_excluded(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="x", tags=["draft"], modified=now, path="/a.md"),
+            make_note(title="b", content="x", tags=["final"], modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, "-#draft")
+        self.assertEqual([n["title"] for n in result], ["b"])
+
+    def test_tag_term_is_never_fuzzy(self):
+        now = datetime.now().timestamp()
+        notes = [make_note(title="a", content="x", tags=["syncthing"],
+                           modified=now, path="/a.md")]
+        self.assertEqual(notoj.rank_notes(notes, "#syncthign"), [])
+
+    def test_bare_hash_is_still_ordinary_text(self):
+        now = datetime.now().timestamp()
+        notes = [make_note(title="a", content="issue # 3", modified=now, path="/a.md")]
+        self.assertEqual(len(notoj.rank_notes(notes, "#")), 1)
+
     def test_a_typo_in_one_term_still_narrows_by_the_other(self):
         # Fuzzy keeps a misspelled term from dropping the note, but the other
         # term still has to match.

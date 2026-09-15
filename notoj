@@ -221,7 +221,11 @@ KEYMAP = [
     ("Search", [
         ("search", "/", "enter search mode"),
         (None, "<type>", "filter notes live (any language — UTF-8 input is accepted)"),
+        (None, "<word> <word>", "all terms must match (each word narrows)"),
         (None, '"phrase"', "quoted = strict phrase (contiguous, crosses whitespace)"),
+        (None, "-<term>", "exclude notes containing it (never fuzzy)"),
+        (None, "<a> OR <b>", "either term (uppercase OR; lowercase 'or' is a word)"),
+        (None, "#tag / tag:tag", "match the note's tags only, by prefix"),
         (None, "←/→", "move the edit cursor; Home/End jump to start/end"),
         (None, "Ctrl-a/e/b/f", "readline motion: start / end / back / forward"),
         (None, "Ctrl-w/u/k/d", "kill: prev word / to start / to end / char ahead"),
@@ -903,9 +907,10 @@ def fuzzy_words(n, tokens):
         t, body, tag_str = search_text(n)
         pool = None
         for tok in tokens:
-            # A quoted phrase is exact by definition — correcting it would
-            # hand back something other than what was asked for.
-            if getattr(tok, "phrase", False):
+            # A quoted phrase is exact by definition, and a tag names
+            # something that exists — correcting either would hand back
+            # something other than what was asked for.
+            if isinstance(tok, Term) and tok.strict():
                 continue
             limit = fuzzy_threshold(tok)
             # A token the note already contains isn't a near-miss — it's a
@@ -1284,29 +1289,37 @@ class Term(str):
     that text. `neg` marks a `-term`, which excludes rather than requires.
 
     Terms joined by `OR` share a `group`: the query needs one of them, not all
-    of them. Every other term gets a group of its own."""
+    of them. Every other term gets a group of its own. `tag` marks a `#term` /
+    `tag:term`, which is matched against the note's tags alone, by prefix."""
 
     phrase = False
     neg = False
+    tag = False
     group = -1
 
-    def __new__(cls, text, phrase=False, neg=False, group=-1):
+    def __new__(cls, text, phrase=False, neg=False, tag=False, group=-1):
         t = str.__new__(cls, text)
         t.phrase = phrase
         t.neg = neg
+        t.tag = tag
         t.group = group
         return t
+
+    def strict(self):
+        """Whether the term refuses typo correction — a quoted phrase (which
+        asks for exact text) or a tag (which names something that exists)."""
+        return self.phrase or self.tag
 
     def key(self):
         """What distinguishes this term from the same text typed unquoted —
         the part of a cache key a bare string would lose."""
-        return (str(self), self.phrase, self.neg)
+        return (str(self), self.phrase, self.neg, self.tag)
 
 
-# One query token: an optional leading "-" (exclude), then a quoted run
-# (closed, or still being typed at the end of the query), else a run of
-# non-space non-quote characters.
-_QUERY_TOKEN_RE = re.compile(r'(-?)("[^"]*(?:"|$)|[^\s"]+)')
+# One query token: an optional leading "-" (exclude), an optional "#"/"tag:"
+# (match tags only), then a quoted run (closed, or still being typed at the
+# end of the query), else a run of non-space non-quote characters.
+_QUERY_TOKEN_RE = re.compile(r'(-?)((?:tag:|#)?)("[^"]*(?:"|$)|[^\s"]+)')
 
 
 def parse_query(q):
@@ -1330,21 +1343,25 @@ def parse_query(q):
     searches for the word itself. An `OR` with nothing usable on one side —
     dangling at the end of a half-typed query, or next to an exclusion — is
     ignored rather than searched for, since typing it was plainly not a
-    request to find the letters O and R."""
+    request to find the letters O and R.
+
+    A `#tag` or `tag:tag` prefix matches the note's tags alone, by prefix, so
+    `#work` finds the tag without dragging in every note that merely mentions
+    the word."""
     terms = []
     join = False
     for m in _QUERY_TOKEN_RE.finditer(q or ""):
-        neg, raw = m.group(1) == "-", m.group(2)
-        if raw == "OR" and not neg:
+        neg, tag, raw = m.group(1) == "-", bool(m.group(2)), m.group(3)
+        if raw == "OR" and not neg and not tag:
             join = bool(terms) and not terms[-1].neg
             continue
         if raw.startswith('"'):
             words = raw.strip('"').lower().split()
             if not words:
                 continue
-            term = Term(" ".join(words), phrase=True, neg=neg)
+            term = Term(" ".join(words), phrase=True, neg=neg, tag=tag)
         else:
-            term = Term(raw.lower(), neg=neg)
+            term = Term(raw.lower(), neg=neg, tag=tag)
         term.group = terms[-1].group if (join and not neg) else len(terms)
         join = False
         terms.append(term)
@@ -1378,6 +1395,12 @@ def term_hits(n, term):
     a note can match, scored differently by rank_notes and reported separately
     by the header summary."""
     t, body, tag_str = search_text(n)
+    if getattr(term, "tag", False):
+        # Prefix, not substring: #work shouldn't answer for "homework". A tag
+        # is a name the note already carries, so matching the start of it is
+        # what makes the term usable while it's still being typed.
+        return False, any(tg.lower().startswith(term)
+                          for tg in (n.get("tags") or [])), False
     if getattr(term, "phrase", False):
         rx = _phrase_re(term)
         # Tags are single words joined for matching, so a phrase across two of
@@ -1403,7 +1426,7 @@ def rank_notes(notes, q):
     # correction: a phrase is matched literally or not at all, and an
     # exclusion is strict on purpose — a fuzzy `-draft` would silently hide
     # notes that say "drift", with nothing on screen to explain the gap.
-    words = [t for t in terms if not t.phrase and not t.neg]
+    words = [t for t in terms if not t.strict() and not t.neg]
     groups, negs = query_clauses(terms)
     q_lower = " ".join(t for t in terms if not t.neg)
     now = datetime.now().timestamp()
@@ -5525,7 +5548,10 @@ def match_summary(note, tokens):
     fz = fuzzy_words(note, tokens)
     out = []
     for tok in tokens:
-        n = sum(term_count(note, tok, f) for f in (t, tag_str, body))
+        # A tag term is answered by the tags alone, so its count is too —
+        # otherwise #work would report the word's hits in the body as its own.
+        fields = (tag_str,) if getattr(tok, "tag", False) else (t, tag_str, body)
+        n = sum(term_count(note, tok, f) for f in fields)
         if n:
             out.append(Matched(tok, tok, n, False))
             continue
