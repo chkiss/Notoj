@@ -1113,6 +1113,45 @@ class TestRankNotes(unittest.TestCase):
                            modified=now, path="/a.md")]
         self.assertEqual(len(notoj.rank_notes(notes, '"-v"')), 1)
 
+    def test_or_takes_either_term(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="cat food", modified=now, path="/a.md"),
+            make_note(title="b", content="dog food", modified=now, path="/b.md"),
+            make_note(title="c", content="bird food", modified=now, path="/c.md"),
+        ]
+        result = notoj.rank_notes(notes, "cat OR dog food")
+        self.assertEqual(sorted(n["title"] for n in result), ["a", "b"])
+
+    def test_lowercase_or_is_an_ordinary_word(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="cat or dog", modified=now, path="/a.md"),
+            make_note(title="b", content="cat dog", modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, "cat or dog")
+        self.assertEqual([n["title"] for n in result], ["a"])
+
+    def test_quoted_or_searches_for_the_word(self):
+        self.assertEqual(list(notoj.parse_query('"OR"')), ["or"])
+
+    def test_dangling_or_is_ignored(self):
+        # Half-typed "cat OR" must not start searching for the letters O and R.
+        self.assertEqual(list(notoj.parse_query("cat OR")), ["cat"])
+        self.assertEqual(list(notoj.parse_query("OR cat")), ["cat"])
+
+    def test_or_next_to_an_exclusion_is_ignored(self):
+        terms = notoj.parse_query("-draft OR cat")
+        self.assertEqual([(str(t), t.neg) for t in terms],
+                         [("draft", True), ("cat", False)])
+        self.assertNotEqual(terms[0].group, terms[1].group)
+
+    def test_or_groups_only_the_terms_it_joins(self):
+        groups, negs = notoj.query_clauses(notoj.parse_query("cat OR dog food"))
+        self.assertEqual([[str(t) for t in g] for g in groups],
+                         [["cat", "dog"], ["food"]])
+        self.assertEqual(negs, [])
+
     def test_a_typo_in_one_term_still_narrows_by_the_other(self):
         # Fuzzy keeps a misspelled term from dropping the note, but the other
         # term still has to match.

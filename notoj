@@ -1281,15 +1281,20 @@ class Term(str):
     hands these to Vim keeps treating a term as the text it is. `phrase` marks
     a quoted term — matched contiguously, with any whitespace between its
     words, and never corrected for typos, because quoting asks for exactly
-    that text. `neg` marks a `-term`, which excludes rather than requires."""
+    that text. `neg` marks a `-term`, which excludes rather than requires.
+
+    Terms joined by `OR` share a `group`: the query needs one of them, not all
+    of them. Every other term gets a group of its own."""
 
     phrase = False
     neg = False
+    group = -1
 
-    def __new__(cls, text, phrase=False, neg=False):
+    def __new__(cls, text, phrase=False, neg=False, group=-1):
         t = str.__new__(cls, text)
         t.phrase = phrase
         t.neg = neg
+        t.group = group
         return t
 
     def key(self):
@@ -1317,17 +1322,46 @@ def parse_query(q):
     the user hasn't written yet.
 
     A leading `-` excludes: `recipe -draft` drops every note that says
-    "draft". To search for text that starts with a hyphen, quote it (`"-v"`)."""
+    "draft". To search for text that starts with a hyphen, quote it (`"-v"`).
+
+    A bare uppercase `OR` joins the terms either side of it into one
+    alternative — `cat OR dog food` is (cat or dog) and food. Uppercase only,
+    so the ordinary word "or" stays searchable, and quoting it (`"OR"`)
+    searches for the word itself. An `OR` with nothing usable on one side —
+    dangling at the end of a half-typed query, or next to an exclusion — is
+    ignored rather than searched for, since typing it was plainly not a
+    request to find the letters O and R."""
     terms = []
+    join = False
     for m in _QUERY_TOKEN_RE.finditer(q or ""):
         neg, raw = m.group(1) == "-", m.group(2)
+        if raw == "OR" and not neg:
+            join = bool(terms) and not terms[-1].neg
+            continue
         if raw.startswith('"'):
             words = raw.strip('"').lower().split()
-            if words:
-                terms.append(Term(" ".join(words), phrase=True, neg=neg))
+            if not words:
+                continue
+            term = Term(" ".join(words), phrase=True, neg=neg)
         else:
-            terms.append(Term(raw.lower(), neg=neg))
+            term = Term(raw.lower(), neg=neg)
+        term.group = terms[-1].group if (join and not neg) else len(terms)
+        join = False
+        terms.append(term)
     return terms
+
+
+def query_clauses(terms):
+    """(alternatives, exclusions) — the shape ranking needs: a list of OR
+    groups, every one of which a note must satisfy, plus the terms that must
+    be absent."""
+    groups, negs = collections.OrderedDict(), []
+    for term in terms:
+        if term.neg:
+            negs.append(term)
+        else:
+            groups.setdefault(term.group, []).append(term)
+    return list(groups.values()), negs
 
 
 @functools.lru_cache(maxsize=256)
@@ -1370,40 +1404,43 @@ def rank_notes(notes, q):
     # exclusion is strict on purpose — a fuzzy `-draft` would silently hide
     # notes that say "drift", with nothing on screen to explain the gap.
     words = [t for t in terms if not t.phrase and not t.neg]
+    groups, negs = query_clauses(terms)
     q_lower = " ".join(t for t in terms if not t.neg)
     now = datetime.now().timestamp()
     results = []
 
     for n in notes:
         t, _body, _tag_str = search_text(n)
-        fz = fuzzy_words(n, words)
 
+        if any(any(term_hits(n, term)) for term in negs):
+            continue
+
+        fz = fuzzy_words(n, words)
         score = 0
         matched_all = True
 
-        for term in terms:
-            in_t, in_tag, in_body = term_hits(n, term)
-            if term.neg:
+        for group in groups:
+            hit = False
+            for term in group:
+                in_t, in_tag, in_body = term_hits(n, term)
+                if in_t:
+                    score += 100
+                if in_tag:
+                    score += 80
+                if in_body:
+                    score += 20
                 if in_t or in_tag or in_body:
-                    matched_all = False
-                    break
-                continue
-            if in_t:
-                score += 100
-            if in_tag:
-                score += 80
-            if in_body:
-                score += 20
-            if in_t or in_tag or in_body:
-                continue
-            # Near-miss: a term that matched no word exactly but is one or two
-            # edits from one the note actually uses. Scored below every literal
-            # hit — a typo should surface the note, not outrank a real one.
-            if term in fz:
-                score += 30
-                continue
-            matched_all = False
-            break
+                    hit = True
+                # Near-miss: a term that matched no word exactly but is one or
+                # two edits from one the note actually uses. Scored below every
+                # literal hit — a typo should surface the note, not outrank a
+                # real one.
+                elif term in fz:
+                    score += 30
+                    hit = True
+            if not hit:
+                matched_all = False
+                break
 
         if not matched_all:
             continue
