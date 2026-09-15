@@ -1036,11 +1036,50 @@ class TestRankNotes(unittest.TestCase):
         result = notoj.rank_notes(notes, '"cat food"')
         self.assertEqual(result, [])
 
-    def test_quoted_empty_phrase_no_match(self):
-        # '""' has len==2 so the quoted-phrase branch (len>2) is NOT taken;
-        # it falls through to token matching where '""' literally matches nothing.
+    def test_quoted_empty_phrase_is_not_a_term(self):
+        # Mid-typing, '""' is a term the user hasn't written yet: it drops out
+        # rather than becoming a term nothing can match.
         result = notoj.rank_notes(self.notes, '""')
-        self.assertEqual(result, [])
+        self.assertEqual(len(result), len(self.notes))
+
+    def test_terms_are_anded(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="both", content="cat food", modified=now, path="/a.md"),
+            make_note(title="one", content="cat only", modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, "cat food")
+        self.assertEqual([n["title"] for n in result], ["both"])
+
+    def test_phrase_mixed_with_a_plain_term(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="cat food\nvet visit", modified=now, path="/a.md"),
+            make_note(title="b", content="cat food only", modified=now, path="/b.md"),
+            make_note(title="c", content="food cat vet", modified=now, path="/c.md"),
+        ]
+        result = notoj.rank_notes(notes, '"cat food" vet')
+        self.assertEqual([n["title"] for n in result], ["a"])
+
+    def test_unterminated_quote_reads_as_a_phrase(self):
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="a", content="cat food", modified=now, path="/a.md"),
+            make_note(title="b", content="food cat", modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, '"cat food')
+        self.assertEqual([n["title"] for n in result], ["a"])
+
+    def test_a_typo_in_one_term_still_narrows_by_the_other(self):
+        # Fuzzy keeps a misspelled term from dropping the note, but the other
+        # term still has to match.
+        now = datetime.now().timestamp()
+        notes = [
+            make_note(title="hummus recipe", content="chickpeas", modified=now, path="/a.md"),
+            make_note(title="hummus notes", content="nothing here", modified=now, path="/b.md"),
+        ]
+        result = notoj.rank_notes(notes, "humms chickpeas")
+        self.assertEqual([n["title"] for n in result], ["hummus recipe"])
 
     def test_recency_bonus(self):
         # gifts was modified 1h ago (within 7d), dentist 1d ago — both match "ideas" is only in gifts
@@ -3783,10 +3822,17 @@ class VimSearchPatternTests(unittest.TestCase):
         self.assertEqual(notoj.vim_search_pattern("syncthign", ["syncthing"]),
                          r"\c\Vsyncthign\|syncthing")
 
-    def test_a_quoted_phrase_takes_no_corrections(self):
-        # Quoting asks for exactly that text; a guess would betray it.
-        self.assertEqual(notoj.vim_search_pattern('"cat food"', ["cats"]),
-                         r"\c\Vcat\_s\+food")
+    def test_a_quoted_phrase_yields_no_corrections(self):
+        # Quoting asks for exactly that text; a guess would betray it, so the
+        # phrase never produces an `extra` to OR in.
+        note = make_note(title="cats and food", content="x")
+        self.assertEqual(notoj.fuzzy_words(note, notoj.parse_query('"cat food"')), {})
+
+    def test_a_phrase_and_a_plain_term_are_ored_for_navigation(self):
+        # The result list ANDs them; inside the file, n/N should step through
+        # every hit of either.
+        self.assertEqual(notoj.vim_search_pattern('"cat food" vet'),
+                         r"\c\Vcat\_s\+food\|vet")
 
     def test_backslash_is_escaped_for_very_nomagic(self):
         self.assertEqual(notoj.vim_search_pattern(r"back\slash"), r"\c\Vback\\slash")

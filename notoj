@@ -893,7 +893,8 @@ def fuzzy_words(n, tokens):
 
     Words that already contain a token literally are left out — those are
     ordinary matches and the plain highlighting has them covered."""
-    key = tuple(tokens)
+    key = tuple(tok.key() if isinstance(tok, Term) else (tok, False)
+                for tok in tokens)
     c = n.get("_fuzzy")
     if c is not None and c[0] == key:
         return c[1]
@@ -902,6 +903,10 @@ def fuzzy_words(n, tokens):
         t, body, tag_str = search_text(n)
         pool = None
         for tok in tokens:
+            # A quoted phrase is exact by definition — correcting it would
+            # hand back something other than what was asked for.
+            if getattr(tok, "phrase", False):
+                continue
             limit = fuzzy_threshold(tok)
             # A token the note already contains isn't a near-miss — it's a
             # match, and the ordinary highlighting has it.
@@ -1268,36 +1273,127 @@ def incremental_update(notes, snap_old, snap_new):
     return result, True
 
 
+class Term(str):
+    """One term of a search query: the lowercased text notes are matched and
+    highlighted on.
+
+    A str subclass, so everything downstream that finds, counts, compares or
+    hands these to Vim keeps treating a term as the text it is. `phrase` marks
+    a quoted term — matched contiguously, with any whitespace between its
+    words, and never corrected for typos, because quoting asks for exactly
+    that text."""
+
+    phrase = False
+
+    def __new__(cls, text, phrase=False):
+        t = str.__new__(cls, text)
+        t.phrase = phrase
+        return t
+
+    def key(self):
+        """What distinguishes this term from the same text typed unquoted —
+        the part of a cache key a bare string would lose."""
+        return (str(self), self.phrase)
+
+
+# One query token: a quoted run (closed, or still being typed at the end of
+# the query), else a run of non-space non-quote characters.
+_QUERY_TOKEN_RE = re.compile(r'"[^"]*(?:"|$)|[^\s"]+')
+
+
+def parse_query(q):
+    """The query as a list of terms a note must match *all* of.
+
+    Space-separated terms are an AND, the way every search box people already
+    use behaves: adding a word narrows the list instead of widening it. A
+    quoted "phrase" is one term, and can be mixed freely with plain ones, so
+    `"cat food" vet` is a phrase AND a word. An unterminated quote is read as
+    the phrase it is turning into, which keeps the live filter from lurching
+    between two meanings on the keystroke that opens the quote. Empty quotes
+    are dropped rather than made unmatchable — while typing, `""` is a term
+    the user hasn't written yet."""
+    terms = []
+    for m in _QUERY_TOKEN_RE.finditer(q or ""):
+        raw = m.group(0)
+        if raw.startswith('"'):
+            words = raw.strip('"').lower().split()
+            if words:
+                terms.append(Term(" ".join(words), phrase=True))
+        else:
+            terms.append(Term(raw.lower()))
+    return terms
+
+
+@functools.lru_cache(maxsize=256)
+def _phrase_re(text):
+    """A phrase term as a regex: its words contiguous, with each gap matching
+    any run of whitespace, so "cat food" still hits when the words straddle a
+    line break. It stays a substring of the running text — "CAT foods" matches,
+    while "food cat" and "catch the food" do not."""
+    return re.compile(r"\s+".join(map(re.escape, text.split())))
+
+
+def term_hits(n, term):
+    """(in title, in tags, in body) for one term of a query — the three places
+    a note can match, scored differently by rank_notes and reported separately
+    by the header summary."""
+    t, body, tag_str = search_text(n)
+    if getattr(term, "phrase", False):
+        rx = _phrase_re(term)
+        # Tags are single words joined for matching, so a phrase across two of
+        # them would be an artefact of that join, not something in the note.
+        return bool(rx.search(t)), False, bool(rx.search(body))
+    return term in t, term in tag_str, term in body
+
+
+def term_count(n, term, text):
+    """How many times `term` occurs in one of a note's lowercased fields — a
+    plain count, except that a phrase counts its whitespace-spanning matches."""
+    if getattr(term, "phrase", False):
+        return len(_phrase_re(term).findall(text))
+    return text.count(term)
+
+
 def rank_notes(notes, q):
-    q = q.strip()
-    if not q:
+    terms = parse_query(q)
+    if not terms:
         return notes
 
-    if q.startswith('"') and q.endswith('"') and len(q) > 2:
-        # Quoted = strict contiguous phrase. Case-insensitive, and each run of
-        # whitespace in the query matches any whitespace in the note (\s+), so
-        # "cat food" still hits when the words straddle a line break. It stays a
-        # substring of the running text, so "CAT foods" matches but "food cat"
-        # and "catch the food" (reordered / extra words) do not.
-        words = q[1:-1].split()
-        if not words:
-            return notes
-        phrase_re = re.compile(r"\s+".join(map(re.escape, words)), re.IGNORECASE)
-        matches = [n for n in notes if phrase_re.search(title(n)) or phrase_re.search(content(n))]
-        # Input order is load order (arbitrary after incremental updates), so
-        # give phrase results a deterministic newest-first order like tokens get.
-        matches.sort(key=lambda n: -(n.get("modificationDate") or 0))
-        return matches
-
-    tokens = q.lower().split()
-    q_lower = q.lower()
+    # Only unquoted terms are offered to the typo correction; a phrase is
+    # matched literally or not at all.
+    words = [t for t in terms if not t.phrase]
+    q_lower = " ".join(terms)
     now = datetime.now().timestamp()
     results = []
 
     for n in notes:
-        t, body, tag_str = search_text(n)
+        t, _body, _tag_str = search_text(n)
+        fz = fuzzy_words(n, words)
 
         score = 0
+        matched_all = True
+
+        for term in terms:
+            in_t, in_tag, in_body = term_hits(n, term)
+            if in_t:
+                score += 100
+            if in_tag:
+                score += 80
+            if in_body:
+                score += 20
+            if in_t or in_tag or in_body:
+                continue
+            # Near-miss: a term that matched no word exactly but is one or two
+            # edits from one the note actually uses. Scored below every literal
+            # hit — a typo should surface the note, not outrank a real one.
+            if term in fz:
+                score += 30
+                continue
+            matched_all = False
+            break
+
+        if not matched_all:
+            continue
 
         if t == q_lower:
             score += 1000
@@ -1306,26 +1402,12 @@ def rank_notes(notes, q):
         elif q_lower in t:
             score += 200
 
-        for tok in tokens:
-            if tok in t:
-                score += 100
-            if tok in tag_str:
-                score += 80
-            if tok in body:
-                score += 20
-
-        # Near-misses: a token that matched no word exactly but is one or two
-        # edits from one the note actually uses. Scored per token, below every
-        # literal hit — a typo should surface the note, not outrank a real one.
-        score += 30 * len(fuzzy_words(n, tokens))
-
-        if score > 0:
-            age = now - (n.get("modificationDate") or 0)
-            if age < 7 * 86400:
-                score += 15
-            elif age < 30 * 86400:
-                score += 5
-            results.append((score, n))
+        age = now - (n.get("modificationDate") or 0)
+        if age < 7 * 86400:
+            score += 15
+        elif age < 30 * 86400:
+            score += 5
+        results.append((score, n))
 
     results.sort(key=lambda x: (-x[0], -(x[1].get("modificationDate") or 0)))
     return [n for _, n in results]
@@ -4028,6 +4110,23 @@ def open_position(end=False):
     return v if v in OPEN_POSITIONS else default
 
 
+def vim_term_pattern(terms, extra=()):
+    """The Vim pattern for already-parsed terms — see vim_search_pattern."""
+    lit = lambda s: s.replace("\\", "\\\\")
+    alts = []
+    for term in terms:
+        if getattr(term, "phrase", False):
+            # \_s (not \s) so the gap can span a line break, matching how the
+            # phrase search reads the note's running text in rank_notes.
+            alts.append(r"\_s\+".join(lit(w) for w in term.split()))
+        else:
+            alts.append(lit(term))
+    alts += [lit(e) for e in extra if e]
+    if not alts:
+        return None
+    return r"\c\V" + r"\|".join(alts)
+
+
 def vim_search_pattern(q, extra=()):
     """Translate a notoj search query into a Vim search pattern, so opening a
     matched note can highlight the hits and drop the cursor on the first one.
@@ -4041,24 +4140,8 @@ def vim_search_pattern(q, extra=()):
     corrected spellings. They're ORed in as alternatives because the typed
     query appears nowhere in such a file: without them Vim highlights nothing,
     `n` reports no matches, and the cursor falls back to the title. A quoted
-    phrase is exact by definition, so nothing is added to one."""
-    q = (q or "").strip()
-    if not q:
-        return None
-    lit = lambda s: s.replace("\\", "\\\\")
-    if q.startswith('"') and q.endswith('"') and len(q) > 2:
-        words = q[1:-1].split()
-        if not words:
-            return None
-        # \_s (not \s) so the gap can span a line break, matching how the
-        # quoted-phrase search joins the note's running text in rank_notes.
-        body = r"\_s\+".join(lit(w) for w in words)
-    else:
-        toks = q.split() + [e for e in extra if e]
-        if not toks:
-            return None
-        body = r"\|".join(lit(t) for t in toks)
-    return r"\c\V" + body
+    phrase is exact by definition, so it never yields corrections."""
+    return vim_term_pattern(parse_query(q), extra)
 
 
 def _vim_position_args(src, end, search, at=None, at_pat=None, pos=None,
@@ -5202,15 +5285,10 @@ def addnstr_w(win, y, x, text, max_w, attr=0):
 
 
 def search_tokens(q):
-    """The lowercased substrings a query highlights on: a quoted "phrase" is
-    one token, anything else splits on whitespace. Mirrors how rank_notes
-    reads the same query, so what's ranked is what's highlighted."""
-    q = (q or "").strip()
-    if not q:
-        return []
-    if q.startswith('"') and q.endswith('"') and len(q) > 2:
-        return [q[1:-1].lower()]
-    return q.lower().split()
+    """The terms a query highlights on — parse_query's terms, so what's
+    ranked is exactly what's highlighted, counted in the header and handed to
+    Vim."""
+    return parse_query(q)
 
 
 def tag_at(tag_text, pos):
@@ -5394,7 +5472,7 @@ def match_summary(note, tokens):
     fz = fuzzy_words(note, tokens)
     out = []
     for tok in tokens:
-        n = t.count(tok) + tag_str.count(tok) + body.count(tok)
+        n = sum(term_count(note, tok, f) for f in (t, tag_str, body))
         if n:
             out.append(Matched(tok, tok, n, False))
             continue
@@ -7583,7 +7661,7 @@ def run(stdscr, imports=(), move=False):
             # vim_search_scope=term Vim gets that term alone, so its n/N cycle
             # is the one just being used; under =query it gets the whole query
             # and the narrower pattern only places the cursor.
-            term_pat = vim_search_pattern(term, fz.get(term, ()))
+            term_pat = vim_term_pattern([term], fz.get(term, ()))
             if vim_search_scope() == "query":
                 search = vim_search_pattern(
                     state["q"], sorted({w for ws in fz.values() for w in ws}))

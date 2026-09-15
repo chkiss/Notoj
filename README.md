@@ -102,6 +102,12 @@ full keybinding reference. The essentials:
   `n`/`N` step through them (`o` creates a new note). Enter then opens the note
   in Vim *at that hit*, not back at the first one, with `n`/`N` carrying on
   from there (a quoted `"phrase"` is matched across line breaks too).
+- **Query syntax.** Several words mean *all of them* — each word you add
+  narrows the list. A quoted `"phrase"` is one term, matched contiguously
+  (across a line break too), and mixes freely with plain words:
+  `"cat food" vet`. A misspelled word still finds the note through the
+  near-miss matching; a quoted phrase never does, since quoting asks for
+  exactly that text.
 - With a multi-word query, `Tab`/`Shift-Tab` cycle which term `n`/`N` step
   through: all of them, then each one, then all again. The result list is
   untouched: retyping `/food` would rank a different set of notes, while this
