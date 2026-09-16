@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Refuse a commit whose tests don't pass, so "every commit is independently
+# test-green" is a property of the history rather than a habit.
+#
+# Enable it in a clone with:
+#     git config core.hooksPath scripts/hooks
+#
+# Tracked rather than written into .git/hooks so it travels with the repo and
+# can be reviewed like anything else. -x stops at the first failure: a green
+# run costs the full suite either way, but a red one — the case you're waiting
+# on — reports in seconds.
+set -u
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+# The suites read the working tree, not the index, so a partial `git add -p`
+# would be tested as the unstaged file rather than as what's being committed.
+# Say so instead of implying a coverage the run doesn't have.
+if ! git diff --quiet; then
+    echo "pre-commit: note — unstaged changes present; testing the working" >&2
+    echo "            tree, which is not exactly what is being committed." >&2
+fi
+
+fail=0
+for suite in tests/test_notoj.py tests/test_update_ratings.py; do
+    [ -f "$suite" ] || continue
+    if ! python3 -m pytest -x -q "$suite"; then
+        fail=1
+        break
+    fi
+done
+
+if [ "$fail" -ne 0 ]; then
+    echo >&2
+    echo "pre-commit: tests failed — commit refused." >&2
+    echo "            Fix them, or commit with --no-verify if you mean to." >&2
+    exit 1
+fi

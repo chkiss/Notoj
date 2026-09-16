@@ -284,11 +284,21 @@ Both suites are stdlib `unittest` and run straight from a clone, with nothing
 to install.
 
 ```bash
-python3 tests/test_notoj.py            # core app tests (748)
+python3 tests/test_notoj.py            # core app tests (798)
 python3 tests/test_update_ratings.py   # rating-table tests (39)
 ```
 
 Both run on every push and pull request (`.github/workflows/tests.yml`).
+
+A tracked `pre-commit` hook runs them before every commit, so a red suite
+can't reach the history. Enable it once per clone:
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
+It stops at the first failure, and `git commit --no-verify` skips it when you
+mean to.
 
 ### Layout
 
