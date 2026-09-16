@@ -34,6 +34,8 @@
 
 * Live search updates on every keystroke
 * Substring matching
+* Query language: every term must match (each word narrows the list), `"quoted phrases"` matched contiguously across line breaks, `-excluded` terms, `a OR b` for either, and `#tag` / `tag:tag` scoped to the note's tags by prefix — mixable in one query
+* A scoped term is marked only where it matched: `#work` highlights the tag, never the word in the body, and the pane, the list columns and `n`/`N` all count the same hits
 * Fuzzy matching against title and tag words, punctuation ignored
 * Typo tolerance: substitutions, deletions, insertions and adjacent transpositions, with the edit budget scaling with the length of the word
 * A near-miss shows the word the note actually uses, muted to mark it a guess — and that corrected word is carried into Vim, so `n` and `hlsearch` find it there too

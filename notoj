@@ -5408,7 +5408,7 @@ def tag_file_position(note, tag, tokens):
         j = raw.lower().find(tag.lower())
         if j < 0:
             continue
-        for k, (s, _e, _t) in enumerate(match_spans(raw, tokens)):
+        for k, (s, _e, _t) in enumerate(match_spans(raw, tokens, FIELD_TAGS)):
             if s >= j:
                 # +1 for the opening "---" above the frontmatter, +1 for Vim's
                 # 1-based lines.
@@ -5416,12 +5416,36 @@ def tag_file_position(note, tag, tokens):
     return None
 
 
-def match_spans(text, tokens):
+# Where a line of text came from, for terms that only match in one place.
+FIELD_TITLE, FIELD_TAGS, FIELD_BODY = "title", "tags", "body"
+
+
+def terms_for_field(tokens, field):
+    """The terms that can match a line drawn from `field`.
+
+    Only tag-scoped terms are picky: `#work` answers for the note's tags, so
+    painting it on the word "work" in the body would claim a match the search
+    never made. Everything else matches wherever it appears."""
+    if not any(getattr(t, "tag", False) for t in tokens):
+        return tokens
+    return [t for t in tokens
+            if not getattr(t, "tag", False) or field == FIELD_TAGS]
+
+
+def match_spans(text, tokens, field=FIELD_BODY):
     """The (start, end, token) spans `text` matches on, leftmost first and
     non-overlapping — one definition of "the matches on this line", shared by
     both renderers and by the n/N navigation so the k-th match a renderer
-    paints is the k-th match n/N counts."""
+    paints is the k-th match n/N counts.
+
+    `field` says which part of the note the line came from, and is what keeps
+    a tag-scoped term off the body. It has to be applied here, in the shared
+    definition, rather than by each caller: a renderer that filtered on its
+    own would paint a different set of hits from the one n/N steps through."""
     if not text or not tokens:
+        return []
+    tokens = terms_for_field(tokens, field)
+    if not tokens:
         return []
     tl = text.lower()
     spans, pos = [], 0
@@ -5441,21 +5465,25 @@ def match_spans(text, tokens):
     return spans
 
 
-_Hi = collections.namedtuple("Hi", "tokens attr fuzzy fuzzy_attr focus focus_attr")
+_Hi = collections.namedtuple(
+    "Hi", "tokens attr fuzzy fuzzy_attr focus focus_attr field")
 
 
 class Hi(_Hi):
     """How to paint one line's search hits: the substrings to look for, and
     the attribute for a plain hit, for an approximate one, and for the hit in
     focus. `fuzzy` holds the corrected spellings — they're searched for
-    literally like any other token, but drawn as the guesses they are."""
+    literally like any other token, but drawn as the guesses they are.
+
+    `field` is the part of the note the line came from, so a tag-scoped term
+    is painted on the tags and nowhere else."""
 
     __slots__ = ()
 
     def __new__(cls, tokens, attr, fuzzy=(), fuzzy_attr=None,
-                focus=None, focus_attr=None):
+                focus=None, focus_attr=None, field=FIELD_BODY):
         return _Hi.__new__(cls, tokens, attr, fuzzy, fuzzy_attr,
-                           focus, focus_attr)
+                           focus, focus_attr, field)
 
     def attr_for(self, k, tok):
         """The attribute for the k-th hit on the line, matched by `tok`."""
@@ -5585,13 +5613,14 @@ def match_summary_text(items):
     return text, spans
 
 
-def hi_for(note, tokens, attr, focus=None, focus_attr=None, state=None):
+def hi_for(note, tokens, attr, focus=None, focus_attr=None, state=None,
+           field=FIELD_BODY):
     """The Hi for a note's line: the query's live tokens, plus the corrected
     spelling of anything the query only nearly matched in THIS note — which is
     what makes a fuzzy hit visible instead of a result with nothing marked."""
     keep, words = note_terms(note, tokens, state)
     return Hi(keep + words, attr, frozenset(words),
-              match_fuzzy_attr(), focus, focus_attr)
+              match_fuzzy_attr(), focus, focus_attr, field)
 
 
 def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi):
@@ -5603,7 +5632,7 @@ def draw_line_highlighted(stdscr, y, x, text, max_w, base_attr, hi):
     text = clip_to_width(text, max_w)
     if not text:
         return
-    spans = match_spans(text, hi.tokens) if hi else []
+    spans = match_spans(text, hi.tokens, hi.field) if hi else []
     if not spans:
         addnstr_w(stdscr, y, x, text, max_w, base_attr)
         return
@@ -5985,7 +6014,7 @@ def _hit_runs(runs, hi):
     leftmost-first and non-overlapping, which is what lets this walk the two
     lists once between them. Overlapping spans would need the later one to
     repaint characters the earlier one already emitted."""
-    spans = match_spans("".join([r[0] for r in runs]), hi.tokens)
+    spans = match_spans("".join([r[0] for r in runs]), hi.tokens, hi.field)
     if not spans:
         return runs
     out = []
@@ -6921,7 +6950,8 @@ def preview_match_list(rows, tokens, render_md):
         # literally, so it's counted literally.
         line = (_md_logical(raw, md_states[i])
                 if render_md and src is not None else raw)
-        spans = match_spans(line, tokens)
+        spans = match_spans(line, tokens,
+                            FIELD_BODY if src is not None else FIELD_TAGS)
         seen = per_src.get(src, 0)
         out.extend(Match(i, j, src, seen + j,
                          tag_at(line, s) if src is None else None)
@@ -6939,7 +6969,7 @@ def column_tag_matches(note, tokens):
     if not tg or not tokens:
         return []
     return [Match(None, j, None, None, tag_at(tg, s))
-            for j, (s, _e, _t) in enumerate(match_spans(tg, tokens))]
+            for j, (s, _e, _t) in enumerate(match_spans(tg, tokens, FIELD_TAGS))]
 
 
 def reveal_preview_row(row, state, note, w, h):
@@ -7290,7 +7320,7 @@ def draw(stdscr, notes, state):
         # the same typo through different words of their own.
         row_hi = hi_for(n, tokens,
                         match_attr() | (curses.A_REVERSE if selected else 0),
-                        state=state)
+                        state=state, field=FIELD_TITLE)
         title_w = min(28, list_w)
         # Fill the whole title column with the row's attribute first so the
         # focus highlight always spans the full column, regardless of any
@@ -7329,7 +7359,7 @@ def draw(stdscr, notes, state):
             tag_hi = Hi(row_hi.tokens, match_attr(), row_hi.fuzzy,
                         match_fuzzy_attr(),
                         fm.ord if fm is not None and fm.row is None else None,
-                        match_focus_attr())
+                        match_focus_attr(), FIELD_TAGS)
             draw_line_highlighted(stdscr, y, tag_col, tg, list_w - tag_col,
                                   attr_tag, tag_hi)
 
@@ -7376,11 +7406,15 @@ def draw(stdscr, notes, state):
                         md_states[start + i],
                     )
                 else:
+                    hi = body_hi.at(
+                        focus_ord if start + i == focus_row else None)
+                    if src is None:
+                        # The tag row is the note's tags, so a tag-scoped term
+                        # paints here — and only here.
+                        hi = hi._replace(field=FIELD_TAGS)
                     draw_line_highlighted(
                         stdscr, i + 1, mid + 1, line, preview_w,
-                        curses.color_pair(3 if src is None else 4),
-                        body_hi.at(focus_ord if start + i == focus_row else None),
-                    )
+                        curses.color_pair(3 if src is None else 4), hi)
 
             # The live drag-select band goes on last, attribute-only over the
             # finished cells — see paint_selection.

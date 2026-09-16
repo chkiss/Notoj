@@ -5799,6 +5799,46 @@ class TestMatchSpans(unittest.TestCase):
         self.assertEqual(notoj.match_spans("abc", []), [])
         self.assertEqual(notoj.match_spans("", ["a"]), [])
 
+    def test_a_tag_term_paints_the_tags_and_nothing_else(self):
+        # #work answers for the note's tags, so marking the word in the body
+        # would claim a match the search never made.
+        toks = notoj.parse_query("#work")
+        self.assertEqual(notoj.match_spans("work notes", toks, notoj.FIELD_BODY), [])
+        self.assertEqual(notoj.match_spans("work notes", toks, notoj.FIELD_TITLE), [])
+        self.assertEqual(notoj.match_spans("#work", toks, notoj.FIELD_TAGS),
+                         [(1, 5, "work")])
+
+    def test_a_plain_term_still_paints_every_field(self):
+        toks = notoj.parse_query("work")
+        for field in (notoj.FIELD_BODY, notoj.FIELD_TITLE, notoj.FIELD_TAGS):
+            with self.subTest(field=field):
+                self.assertEqual(notoj.match_spans("work", toks, field),
+                                 [(0, 4, "work")])
+
+    def test_a_plain_term_beside_a_tag_term_is_unaffected(self):
+        # Scoping one term must not narrow the others.
+        toks = notoj.parse_query("#work hummus")
+        self.assertEqual(notoj.match_spans("hummus work", toks, notoj.FIELD_BODY),
+                         [(0, 6, "hummus")])
+
+    def test_field_defaults_to_body(self):
+        toks = notoj.parse_query("#work")
+        self.assertEqual(notoj.match_spans("work", toks), [])
+
+    def test_hi_carries_the_field_to_the_renderer(self):
+        # The renderers paint through Hi, so the scope has to travel on it —
+        # a renderer that filtered on its own would drift from what n/N counts.
+        note = make_note(title="t", content="x", tags=["work"])
+        toks = notoj.parse_query("#work")
+        self.assertEqual(notoj.hi_for(note, toks, 0).field, notoj.FIELD_BODY)
+        self.assertEqual(
+            notoj.hi_for(note, toks, 0, field=notoj.FIELD_TAGS).field,
+            notoj.FIELD_TAGS)
+        # ...and survives the focus move the preview does per row.
+        self.assertEqual(
+            notoj.hi_for(note, toks, 0, field=notoj.FIELD_TAGS).at(2).field,
+            notoj.FIELD_TAGS)
+
 
 class TestPreviewMatchList(unittest.TestCase):
     def setUp(self):
@@ -5884,6 +5924,19 @@ class TestPreviewMatchList(unittest.TestCase):
         rows = [("#alpha #notoj", None)]
         got = notoj.preview_match_list(rows, ["notoj"], True)
         self.assertEqual(got[0].tag, "notoj")
+
+    def test_a_tag_term_is_counted_on_the_tag_row_only(self):
+        # n/N must step through exactly the hits the panes paint: with #notoj
+        # scoped to the tags, the word in the body is not one of them.
+        rows = [("#notoj #notes", None)] + self.rows("notoj in the body")
+        got = notoj.preview_match_list(rows, notoj.parse_query("#notoj"), True)
+        self.assertEqual(got, [notoj.Match(0, 0, None, 0, "notoj")])
+
+    def test_the_same_term_unscoped_is_counted_everywhere(self):
+        rows = [("#notoj #notes", None)] + self.rows("notoj in the body")
+        got = notoj.preview_match_list(rows, notoj.parse_query("notoj"), True)
+        self.assertEqual([(m.row, m.tag) for m in got],
+                         [(0, "notoj"), (1, None)])
 
 
 class TestPreviewAlignTables(unittest.TestCase):
