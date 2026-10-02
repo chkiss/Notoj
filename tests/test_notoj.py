@@ -2327,6 +2327,104 @@ class TestIncrementalUpdate(unittest.TestCase):
                 notoj.NOTES_DIR = old_mod
 
 
+class TestEditLock(unittest.TestCase):
+    """A note another notoj has open in its editor must not be normalized
+    under it — that rewrite is what made Vim raise W11 on the next :w."""
+
+    def setUp(self):
+        self._d = tempfile.mkdtemp()
+        self._notes = os.path.join(self._d, "notes")
+        os.makedirs(self._notes)
+        self._locks = os.path.join(self._d, "locks")
+        self._saved = notoj.NOTES_DIR, notoj.edit_lock_dir
+        notoj.NOTES_DIR = self._notes
+        notoj.edit_lock_dir = lambda: self._locks
+
+    def tearDown(self):
+        notoj.NOTES_DIR, notoj.edit_lock_dir = self._saved
+        shutil.rmtree(self._d)
+
+    def _note(self):
+        path = os.path.join(self._notes, "Alpha.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("---\nid: a1\ntitle: Alpha\ncreated: 2013-10-08T13:08:43Z\n"
+                    "modified: 2013-10-08T13:08:43Z\nversion: 1\ntags: []\n---\n\nAlpha\n")
+        os.utime(path, (1_000_000, 1_000_000))
+        return path
+
+    def _lock_as(self, path, pid):
+        lock = notoj._edit_lock_file(path)
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        with open(lock, "w") as f:
+            f.write(f"{pid}\n{path}\n")
+        return lock
+
+    def _edit(self, path):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("more\n")
+
+    def test_locked_note_is_deferred_untouched_then_adopted(self):
+        path = self._note()
+        notes = [notoj.load_md(path)]
+        snap = notoj.file_snapshot(self._notes)
+        lock = self._lock_as(path, 999999)
+        self._edit(path)
+        on_disk = open(path, encoding="utf-8").read()
+        with unittest.mock.patch.object(notoj, "_pid_is_notoj", return_value=True):
+            new_snap = notoj.file_snapshot(self._notes)
+            notes, changed = notoj.incremental_update(notes, snap, new_snap)
+        self.assertFalse(changed)
+        self.assertEqual(open(path, encoding="utf-8").read(), on_disk)
+        self.assertEqual(new_snap[path], snap[path])   # still reads as changed
+        self.assertEqual(len(notes), 1)                # the note stays listed
+        notoj.release_edit_lock(lock)
+        notes, changed = notoj.incremental_update(notes, snap, notoj.file_snapshot(self._notes))
+        self.assertTrue(changed)
+        self.assertNotIn("modified: 2013", open(path, encoding="utf-8").read())
+
+    def test_resnapshot_holds_deferred_paths_back(self):
+        path = self._note()
+        other = os.path.join(self._notes, "Beta.md")
+        snap = notoj.file_snapshot(self._notes)
+        self._lock_as(path, 999999)
+        self._edit(path)
+        with open(other, "w", encoding="utf-8") as f:
+            f.write("---\nid: b1\ntitle: Beta\nversion: 1\ntags: []\n---\n\nBeta\n")
+        with unittest.mock.patch.object(notoj, "_pid_is_notoj", return_value=True):
+            notes, changed = notoj.incremental_update(
+                [notoj.load_md(path)], snap, notoj.file_snapshot(self._notes))
+            self.assertTrue(changed)                   # Beta was adopted
+            snap2 = notoj.resnapshot(snap)
+        self.assertEqual(snap2[path], snap[path])
+        self.assertIn(other, snap2)
+
+    def test_stale_lock_is_ignored_and_removed(self):
+        path = self._note()
+        lock = self._lock_as(path, 999999)
+        with unittest.mock.patch.object(notoj, "_pid_is_notoj", return_value=False):
+            self.assertFalse(notoj.edit_locked(path))
+        self.assertFalse(os.path.exists(lock))
+
+    def test_own_lock_does_not_block(self):
+        path = self._note()
+        self._lock_as(path, os.getpid())
+        self.assertFalse(notoj.edit_locked(path))
+
+    def test_open_note_holds_lock_while_editing(self):
+        path = self._note()
+        n = notoj.load_md(path)
+        seen = []
+
+        def fake_editor(*a, **k):
+            seen.append(os.path.exists(notoj._edit_lock_file(path)))
+            return False
+
+        with unittest.mock.patch.object(notoj, "edit_in_editor", fake_editor):
+            notoj.open_note(n)
+        self.assertEqual(seen, [True])
+        self.assertFalse(os.path.exists(notoj._edit_lock_file(path)))
+
+
 # ---------------------------------------------------------------------------
 # clamp_scroll
 # ---------------------------------------------------------------------------

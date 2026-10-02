@@ -1256,6 +1256,21 @@ def normalize_external_note(path):
 
 
 def incremental_update(notes, snap_old, snap_new):
+    """Reload notes whose snapshot entry moved. A note another notoj instance
+    has open in its editor is deferred, not adopted: normalizing it here would
+    rewrite the file under that editor (Vim's W11 on its next :w). Its entry in
+    `snap_new` is put back to the old value, and the paths are left in
+    incremental_update.deferred for resnapshot(), so the change is picked up on
+    the first scan after the editor closes."""
+    deferred = {p for p in set(snap_old) | set(snap_new)
+                if snap_old.get(p) != snap_new.get(p) and edit_locked(p)}
+    incremental_update.deferred = deferred
+    for p in deferred:
+        if p in snap_old:
+            snap_new[p] = snap_old[p]
+        else:
+            snap_new.pop(p, None)
+
     added_or_modified = {
         p for p, m in snap_new.items()
         if p not in snap_old or snap_old[p] != m
@@ -1276,6 +1291,22 @@ def incremental_update(notes, snap_old, snap_new):
             result.append(n)
 
     return result, True
+
+
+incremental_update.deferred = set()
+
+
+def resnapshot(snap_old):
+    """Fresh snapshot after incremental_update changed something, with the
+    paths it deferred held at their old entries so the next scan still sees
+    them as changed."""
+    snap = file_snapshot(NOTES_DIR)
+    for p in incremental_update.deferred:
+        if p in snap_old:
+            snap[p] = snap_old[p]
+        else:
+            snap.pop(p, None)
+    return snap
 
 
 class Term(str):
@@ -4305,6 +4336,85 @@ def _vim_pos_call(src, pos, mark):
     return "call NotojOpenAtTitle()" if src else ""
 
 
+# ----------------------------
+# Edit locks: which notes another notoj has open in its editor
+# ----------------------------
+#
+# Two notoj instances on one vault (an idle one in a tmux pane, a second
+# started as `notoj FILE.md`) each scan for external changes. The one that
+# launched the editor is blocked until it exits, but the other sees every :w
+# as an external edit and normalizes the file — rewriting modified: under the
+# open editor, which Vim then refuses to write over (W11). So the launching
+# instance drops a lock naming the note and its pid, and incremental_update
+# leaves a locked note alone until the lock goes. Locks live in the local state
+# dir, never the synced tree: they describe processes on this machine only.
+
+def edit_lock_dir():
+    return os.path.join(os.path.dirname(undo_log_path()), "editing")
+
+
+def _edit_lock_file(path):
+    key = hashlib.sha1(os.path.realpath(path).encode("utf-8")).hexdigest()
+    return os.path.join(edit_lock_dir(), key)
+
+
+def take_edit_lock(path):
+    """Mark `path` as open in this instance's editor. Returns the lock file to
+    hand to release_edit_lock, or None when it couldn't be written — editing
+    still goes ahead, just unprotected, as it did before locks existed."""
+    lock = _edit_lock_file(path)
+    try:
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        with open(lock, "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()}\n{path}\n")
+        return lock
+    except OSError:
+        return None
+
+
+def release_edit_lock(lock):
+    if lock:
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
+
+
+def _pid_is_notoj(pid):
+    """Whether `pid` is a live notoj process. The cmdline check keeps a lock
+    left by a crashed instance from blocking its note forever once the pid is
+    reused; without /proc, any live pid counts."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return b"notoj" in f.read()
+    except FileNotFoundError:
+        return not os.path.isdir("/proc")
+    except OSError:
+        return True
+
+
+def edit_locked(path):
+    """True while another live notoj has `path` open in its editor. A lock
+    whose owner is gone is stale and removed on sight."""
+    lock = _edit_lock_file(path)
+    try:
+        with open(lock, encoding="utf-8") as f:
+            pid = int(f.readline().strip())
+    except (OSError, ValueError):
+        return False
+    if pid != os.getpid() and _pid_is_notoj(pid):
+        return True
+    if pid != os.getpid():
+        release_edit_lock(lock)
+    return False
+
+
 def edit_in_editor(n, end, search, at=None, at_pat=None):
     """Suspend curses and open the note in the configured editor, positioned
     by the key's configured position (`end` selects `e`'s) and `search`/`at`.
@@ -4360,8 +4470,15 @@ def open_note(n, end=False, search=None, at=None, at_pat=None):
                 before = f.read()
         except Exception:
             before = None
-    if edit_in_editor(n, end, search, at, at_pat):
-        final = check_rename(n) or path
+    # Held through check_rename too: that is the last write to the file, and a
+    # second notoj normalizing it in between would race it.
+    lock = take_edit_lock(path)
+    try:
+        written = edit_in_editor(n, end, search, at, at_pat)
+        final = (check_rename(n) or path) if written else path
+    finally:
+        release_edit_lock(lock)
+    if written:
         move_edit_mark(path, final)
         git_commit(f"edit: {title(n)}")
         if before is not None and os.path.exists(final):
@@ -7653,7 +7770,7 @@ def run(stdscr, imports=(), move=False):
         # incremental_update may rename files (title normalization), so after
         # a change re-snapshot — like the idle scan does — rather than keeping
         # pre-rename paths that would be reprocessed on the next tick.
-        snap = file_snapshot(NOTES_DIR) if changed else new_snap
+        snap = resnapshot(snap) if changed else new_snap
         set_tag_freq(notes)
         state["_trash"] = None
         state["_dups"] = find_duplicates(notes)
@@ -8013,7 +8130,7 @@ def run(stdscr, imports=(), move=False):
                 notes, changed = incremental_update(notes, snap, new_snap)
                 state["_conflicts"] = find_conflicts()
                 if changed:
-                    snap = file_snapshot(NOTES_DIR)
+                    snap = resnapshot(snap)
                     state["_dups"] = find_duplicates(notes)
                     state["_review"] = load_review()   # inline scheduling may have written it
                     state["_hist_cache"].clear()
