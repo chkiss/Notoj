@@ -262,7 +262,7 @@ KEYMAP = [
     ("Resurface (open loops)", [
         ("resurface", "g r", "toggle resurface view (notes tagged #loop, most stale first)"),
         ("snooze", "z", 'snooze loop a week (quick "not now")'),
-        ("schedule", "S", "schedule loop (set when to resurface: +2w, 3mo, 1y, 2026-12-01…); "
+        ("schedule", "S", "schedule loop (set when to resurface: +2w, 3mo, dec, 12/1, fri, 2026-12-01…); "
               ". repeats the last one down the queue"),
         ("loop_done", "x", "mark loop done (removes #loop tag)"),
         (None, "#loop 2w", "typed anywhere in a note's text schedules it as a loop; "
@@ -2251,8 +2251,9 @@ def parse_when(s, now=None):
     """Parse a human horizon into a due timestamp, or None if unparseable.
 
     Accepts relative offsets (+10d, +2w, +3mo, +1y), bare day counts ("14"),
-    absolute ISO dates ("2026-12-01"), and a few keywords (today, tomorrow,
-    next week/month/year, someday)."""
+    absolute ISO dates ("2026-12-01"), a few keywords (today, tomorrow,
+    next week/month/year, someday), and month names, US month/day and
+    weekdays ("dec", "dec 1", "12/1", "fri") via parse_calendar_when."""
     if now is None:
         now = datetime.now().timestamp()
     s = s.strip().lower()
@@ -2293,7 +2294,84 @@ def parse_when(s, now=None):
             return dt.timestamp()
         except ValueError:
             continue
-    return None
+    return parse_calendar_when(s, now)
+
+
+def _name_index(full, abbr):
+    """Map each case-folded spelling in a `calendar` name table to its index.
+    Lookup is by prefix (see _match_name), so these are just the stems."""
+    return [(i, {full[i].casefold(), abbr[i].casefold().rstrip(".")})
+            for i in range(len(full)) if full[i]]
+
+
+def _match_name(word, index):
+    """The index whose name starts with `word` (at least three letters, so
+    "ma" can't silently pick March over May), or None when nothing or more
+    than one name matches. "dec", "decem" and "december" all hit December,
+    and "sept" works because it's a prefix of the full name."""
+    if len(word) < 3 or not word.isalpha():
+        return None
+    hits = {i for i, names in index if any(n.startswith(word) for n in names)}
+    return hits.pop() if len(hits) == 1 else None
+
+
+def parse_calendar_when(s, now):
+    """Calendar dates the strict formats in parse_when miss: a month name
+    ("december", "dec", "dec 1", "1 dec", "dec 1 2027"), a US month/day with
+    an optional short year ("12/1", "12/1/27"), or a weekday ("fri",
+    "next friday"). Month and weekday names come from the `calendar` module,
+    so they follow the locale instead of a hardcoded list.
+
+    A date with no year means its next occurrence, never today or the past:
+    "dec" asked in December means next December. A bare month is its 1st.
+    Returns local midnight, like the ISO formats, or None."""
+    words = [w for w in re.split(r"[\s,/.-]+", s) if w]
+    if not words:
+        return None
+    today = datetime.fromtimestamp(now).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+
+    if words[0] == "next":
+        words = words[1:]
+    if len(words) == 1:
+        wd = _match_name(words[0], _name_index(calendar.day_name, calendar.day_abbr))
+        if wd is not None:
+            ahead = (wd - today.weekday() - 1) % 7 + 1   # 1..7, never today
+            return today.timestamp() + ahead * 86400
+
+    month = day = year = None
+    months = _name_index(calendar.month_name, calendar.month_abbr)
+    nums = []
+    for w in words:
+        m = _match_name(w, months)
+        if m is not None and month is None:
+            month = m
+        elif w.isdigit():
+            nums.append(int(w))
+        else:
+            return None
+    if month is None:
+        if len(nums) not in (2, 3):     # bare numbers are the day counts above
+            return None
+        month, day, year = nums[0], nums[1], nums[2] if len(nums) == 3 else None
+    elif len(nums) == 1 and nums[0] > 31:  # "dec 2027"
+        year = nums[0]
+    elif len(nums) == 1:
+        day = nums[0]
+    elif len(nums) == 2:
+        day, year = nums
+    elif nums:
+        return None
+    if year is not None and year < 100:
+        year += 2000
+
+    try:
+        dt = datetime(year or today.year, month, day or 1)
+        if year is None and dt <= today:
+            dt = dt.replace(year=today.year + 1)
+    except ValueError:                  # 2/30, month 13, Feb 29 rolled forward
+        return None
+    return dt.timestamp()
 
 
 def schedule_loop(review, note_id, due_ts):
@@ -4923,7 +5001,7 @@ SHOW_AGO_MIN  = 53   # min list_w to start showing the relative date     (col 47
 # (aligned) date+relative-date block — see draw().
 
 TAG_PROMPT = "add tags (space-separated): "
-SCHED_PROMPT = "resurface when (e.g. 2w, 3mo, 1y, 2026-12-01, someday): "
+SCHED_PROMPT = "resurface when (e.g. 2w, 3mo, dec, 12/1, fri, someday): "
 
 TRASH_EDIT_NOTICE = [
     "This note is in the trash.",

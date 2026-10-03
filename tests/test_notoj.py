@@ -2937,6 +2937,54 @@ class TestParseWhen(unittest.TestCase):
         self.assertIsNone(notoj.parse_when("", self.now))
 
 
+class TestParseCalendarWhen(unittest.TestCase):
+    """Month names, US month/day and weekdays, from Friday 2026-10-02."""
+
+    def setUp(self):
+        self.now = datetime(2026, 10, 2, 15, 30).timestamp()
+
+    def when(self, s):
+        ts = notoj.parse_when(s, self.now)
+        return None if ts is None else datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+    def test_month_name_spellings(self):
+        for s in ("december", "Dec", "decem", "next december"):
+            self.assertEqual(self.when(s), "2026-12-01", s)
+
+    def test_sept_is_a_prefix(self):
+        self.assertEqual(self.when("sept"), "2027-09-01")
+
+    def test_month_and_day_either_order(self):
+        for s in ("dec 1", "1 dec", "Dec 1,", "december 15"):
+            self.assertEqual(self.when(s)[:7], "2026-12", s)
+        self.assertEqual(self.when("dec 15"), "2026-12-15")
+
+    def test_month_with_year(self):
+        self.assertEqual(self.when("dec 1 2027"), "2027-12-01")
+        self.assertEqual(self.when("dec 2027"), "2027-12-01")
+
+    def test_us_numeric(self):
+        self.assertEqual(self.when("12/1"), "2026-12-01")
+        self.assertEqual(self.when("12/1/27"), "2027-12-01")
+
+    def test_past_or_today_rolls_to_next_year(self):
+        self.assertEqual(self.when("oct"), "2027-10-01")   # this month's 1st is past
+        self.assertEqual(self.when("10/2"), "2027-10-02")  # today
+        self.assertEqual(self.when("3/1"), "2027-03-01")
+
+    def test_weekday_is_next_occurrence(self):
+        self.assertEqual(self.when("mon"), "2026-10-05")
+        self.assertEqual(self.when("next friday"), "2026-10-09")  # never today
+        self.assertEqual(self.when("fri"), "2026-10-09")
+
+    def test_ambiguous_or_invalid_is_none(self):
+        for s in ("ma", "ju", "2/30", "13/1", "dec 1 2 3", "dec banana", "next"):
+            self.assertIsNone(notoj.parse_when(s, self.now), s)
+
+    def test_bare_number_still_days(self):
+        self.assertEqual(notoj.parse_when("12", self.now), self.now + 12 * 86400)
+
+
 class TestScheduleLoop(unittest.TestCase):
     def test_sets_explicit_due(self):
         review = {}

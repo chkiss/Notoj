@@ -179,7 +179,8 @@ Notes are markdown files with YAML frontmatter (`id`, `created`, `modified`,
 
 Tag a note `#loop` and it appears in the resurface view (`g r`), the one left
 untouched longest at the top. There you can snooze a week (`z`), schedule
-precisely (`S`, e.g. `+2w`, `3mo`, `2026-12-01`), or close the loop
+precisely (`S`, e.g. `+2w`, `3mo`, `2026-12-01`, or a month, date or
+weekday: `dec`, `dec 1`, `12/1`, `fri`), or close the loop
 (`x`). Typing `#loop <when>` anywhere in a note's text schedules it from any
 device; on save the relative horizon is pinned to an absolute date
 (`#loop 3d` → `#loop 2026-06-12`), so re-saving never re-anchors it:
