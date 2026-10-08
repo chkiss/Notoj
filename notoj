@@ -3050,8 +3050,15 @@ def ensure_stignore():
     Syncthing is first-match-wins, so the rule is prepended: a broad include
     rule already in the file would otherwise claim `.git` first. `.stignore` is
     per-machine and does not itself sync, so this runs on every machine.
+
+    A kajero opened as the vault gets the rule even before it is a Syncthing
+    folder: it exists to be synced on its own, and Syncthing's first scan of a
+    newly shared folder would otherwise carry off the repo before notoj saw
+    the `.stfolder` appear.
     """
     root = syncthing_folder_root()
+    if root is None and NOTES_DIR and kajero_tag(NOTES_DIR) is not None:
+        root = NOTES_DIR
     if root is None:
         return False
     return _prepend_stignore(
@@ -3090,11 +3097,20 @@ def ensure_kajero_stignore():
     Two Syncthing folders covering the same files fight over them, so once a
     kajero holds a `.stfolder` the enclosing folder must ignore it. Like the
     .git rule this is prepended (first match wins) and written on every
-    machine, since .stignore does not sync. Returns the kajeroj it ignored."""
+    machine, since .stignore does not sync. Returns the kajeroj it ignored.
+
+    The kajero's own .stignore gets the .git rule too. There is no repo in
+    it here, but a machine that runs notoj inside the kajero keeps one, and
+    if that machine ever sends it, this one must not take it in."""
     done = []
     for k in kajeroj():
         if not os.path.exists(os.path.join(k, ".stfolder")):
             continue
+        _prepend_stignore(
+            k, os.path.join(k, ".git"),
+            "// notoj keeps a machine-local git repo in the notes dir; syncing "
+            "it corrupts\n// the repo. The .md files still sync; only git "
+            "internals stay machine-local.\n")
         d = os.path.dirname(os.path.abspath(k))
         while not os.path.exists(os.path.join(d, ".stfolder")):
             parent = os.path.dirname(d)
@@ -3173,9 +3189,9 @@ def git_gc_unblock():
 def git_init():
     git_dir = os.path.join(NOTES_DIR, ".git")
     if not os.path.exists(git_dir):
+        ensure_stignore()   # before the repo exists, so .git never syncs at all
         subprocess.run(["git", "init"], cwd=NOTES_DIR, capture_output=True)
         ensure_gitignore()
-        ensure_stignore()   # before the first commit, so .git never syncs at all
         subprocess.run(["git", "add", "-A"], cwd=NOTES_DIR, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "init: notoj snapshot history"],
@@ -8486,8 +8502,10 @@ def run(stdscr, imports=(), move=False):
             if time.monotonic() - last_scan >= SCAN_EVERY:
                 last_scan = time.monotonic()
                 state["_trash"] = None   # pick up external trash changes too
-                # A kajero may have become its own Syncthing folder since
-                # launch; the overlap should not outlive a scan.
+                # The vault or a kajero may have become a Syncthing folder
+                # since launch; its .git rule and any overlap with an
+                # enclosing folder should not outlive a scan.
+                ensure_stignore()
                 ensure_kajero_stignore()
                 new_snap = file_snapshot(NOTES_DIR)
                 notes, changed = incremental_update(notes, snap, new_snap)

@@ -8122,6 +8122,53 @@ class TestKajeroStignore(unittest.TestCase):
         os.makedirs(os.path.join(self.k, ".stfolder"))
         self.assertEqual(notoj.ensure_kajero_stignore(), [])
 
+    def test_a_synced_kajero_refuses_another_machines_repo(self):
+        """The kajero holds no repo here, but the machine running notoj inside
+        it does; its .git must never be taken in."""
+        os.makedirs(os.path.join(self.k, ".stfolder"))
+        notoj.ensure_kajero_stignore()
+        with open(os.path.join(self.k, ".stignore"), encoding="utf-8") as f:
+            self.assertIn("/.git", f.read().splitlines())
+
+
+class TestKajeroOwnRepoStignore(unittest.TestCase):
+    """notoj opened on a kajero keeps its repo out of Syncthing from the
+    start, even before the folder is shared: the first scan of a newly shared
+    folder would otherwise carry the repo off."""
+
+    def setUp(self):
+        self.vault = tempfile.mkdtemp()
+        self.k = _make_kajero(self.vault, "arlyn")
+        self._saved = notoj.NOTES_DIR
+        notoj.NOTES_DIR = self.k
+
+    def tearDown(self):
+        notoj.NOTES_DIR = self._saved
+        shutil.rmtree(self.vault, ignore_errors=True)
+
+    def test_the_rule_is_written_without_a_stfolder(self):
+        self.assertTrue(notoj.ensure_stignore())
+        with open(os.path.join(self.k, ".stignore"), encoding="utf-8") as f:
+            self.assertIn("/.git", f.read().splitlines())
+
+    def test_git_init_writes_the_rule_before_the_repo_exists(self):
+        seen = []
+        real_run = subprocess.run
+
+        def run(cmd, *a, **kw):
+            if cmd[:2] == ["git", "init"]:
+                seen.append(os.path.exists(os.path.join(self.k, ".stignore")))
+            return real_run(cmd, *a, **kw)
+
+        with unittest.mock.patch.object(notoj.subprocess, "run", run):
+            notoj.git_init()
+        self.assertEqual(seen, [True])
+
+    def test_a_plain_vault_still_gets_no_invented_stignore(self):
+        notoj.NOTES_DIR = self.vault
+        self.assertFalse(notoj.ensure_stignore())
+        self.assertFalse(os.path.exists(os.path.join(self.vault, ".stignore")))
+
 
 @unittest.skipUnless(shutil.which("vim"), "vim not installed")
 class VimKajeroFollowTests(KajeroVaultCase):

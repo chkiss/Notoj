@@ -77,3 +77,9 @@ filter and no vault switching.
   ignore rule for the kajero to the enclosing folder's `.stignore`, so the two
   folders never overlap. Like the `.git` rule, this is written on every machine
   where both exist, since `.stignore` does not sync.
+- The repo stays put: notoj opened on a kajero writes the `.git` rule into
+  the kajero's `.stignore` before creating its repo, even if the folder is not
+  shared yet, because Syncthing's first scan of a newly shared folder would
+  otherwise send the repo to every peer. At the vault root, a kajero that is
+  its own Syncthing folder gets the same rule, so a repo sent by another
+  machine is never taken in. Both checks also run on every scan.
