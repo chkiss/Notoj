@@ -830,8 +830,124 @@ def note_files(root=None):
     return out
 
 
+# Paths place_note() moved this session, old -> new, so a cursor still aimed
+# at the old path lands on the note. And the status lines its moves left for
+# the UI to show; the caller drains the list.
+KAJERO_MOVED = {}
+KAJERO_MSGS = []
+
+
+def tag_in_history(note_id, tag):
+    """Whether the note's last committed version carried `tag`. Found by its
+    id in HEAD rather than by path, so a note renamed or moved since the
+    commit is still recognised. False when there is no such version."""
+    if not note_id:
+        return False
+    line = f"id: {note_id}"
+    try:
+        r = subprocess.run(
+            ["git", "grep", "-z", "-F", "-e", line, "HEAD", "--", "*.md"],
+            cwd=NOTES_DIR, capture_output=True, text=True)
+    except OSError:
+        return False
+    # Hits come back as HEAD:<path>NUL<matched line>. git grep has no
+    # whole-line flag, so the exact match is checked here.
+    refs = []
+    for hit in r.stdout.splitlines():
+        ref, _, rest = hit.partition("\0")
+        if rest == line:
+            refs.append(ref)
+    want = tag.lower()
+    for ref in refs:
+        try:
+            shown = subprocess.run(["git", "show", ref], cwd=NOTES_DIR,
+                                   capture_output=True, text=True)
+        except OSError:
+            return False
+        text = shown.stdout
+        end = text.find("\n---\n", 4) if text.startswith("---\n") else -1
+        if end == -1:
+            continue
+        tags = parse_frontmatter(text[4:end]).get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        if any(t.lower() == want for t in tags):
+            return True
+    return False
+
+
+def live_path(path):
+    """Where a note recorded at `path` lives now, following this session's
+    kajero moves. An action recorded before a move in an earlier session
+    keeps its old path and fails as any action on a vanished note does,
+    rather than guessing at a same-named file elsewhere."""
+    seen = set()
+    while path in KAJERO_MOVED and path not in seen:
+        seen.add(path)
+        path = KAJERO_MOVED[path]
+    return path
+
+
+def _kajero_move(path, dest_dir, msg):
+    dest = unique_dest(os.path.basename(path), dest_dir)
+    os.rename(path, dest)
+    KAJERO_MOVED[path] = dest
+    move_edit_mark(path, dest)
+    KAJERO_MSGS.append(msg)
+    return dest
+
+
+def place_note(path, ks=None, n=None):
+    """File a note into the folder its tags name, at the vault root. Returns
+    (final path, whether anything changed). `ks` is kajeroj() and `n` the
+    loaded note when the caller already has them, so a pass over every note
+    lists the vault once and reads no note twice.
+
+    A note tagged for one kajero moves into it. A note inside a kajero without
+    its tag moves out when its last committed version had the tag (the tag was
+    removed) and is tagged otherwise (a new arrival: written on a machine that
+    sees only the kajero, or dropped into the folder by hand). A note tagged
+    for two kajeroj stays put. Notes open in another notoj's editor are left
+    for a later scan. Does nothing when notoj runs inside a kajero."""
+    ks = {os.path.abspath(d): t
+          for d, t in (kajeroj() if ks is None else ks).items()}
+    if not ks:
+        return path, False
+    n = n or load_md(path)
+    if not n:
+        return path, False
+    have = {t.lower() for t in n.get("tags") or []}
+    wanted = [d for d, t in ks.items() if t.lower() in have]
+    here = os.path.dirname(os.path.abspath(path))
+    stem = _stem(path)
+
+    if len(wanted) > 1:
+        names = ", ".join(os.path.basename(d) + "/" for d in wanted)
+        KAJERO_MSGS.append(f"{stem}: tagged for {names}; left in place")
+        return path, False
+    if wanted and here == wanted[0]:
+        return path, False
+    if not wanted and here not in ks:
+        return path, False
+    if edit_locked(path):
+        return path, False
+    if wanted:
+        name = os.path.basename(wanted[0])
+        return _kajero_move(path, wanted[0],
+                            f"{stem}: moved into {name}/"), True
+    name = os.path.basename(here)
+    if tag_in_history(n.get("id"), ks[here]):
+        return _kajero_move(path, NOTES_DIR,
+                            f"{stem}: moved out of {name}/"), True
+    if not add_tags_keep_date(path, [ks[here]]):
+        return path, False
+    KAJERO_MSGS.append(f"{stem}: tagged #{ks[here]} (new in {name}/)")
+    return path, True
+
+
 def load():
     notes = []
+    ks = kajeroj()
 
     for f in note_files():
         if CONFLICT_RE.match(os.path.basename(f)):
@@ -861,6 +977,9 @@ def load():
             # when the sync actually rewrote the file.
             if sync_hashtags_keep_date(f, text):
                 n = load_md(f)
+            f, placed = place_note(f, ks, n)
+            if placed:
+                n = load_md(f) or n
             notes.append(n)
 
     return notes
@@ -1260,7 +1379,7 @@ def normalize_external_note(path):
         canonicalize_wikilinks(path)
         schedule_inline_loop(path)
         restore_mtime(path)
-        return path
+        return place_note(path)[0]
 
     title_lines = [l for l in fm_lines if l.startswith("title:")]
     # Collapsing keeps the LAST duplicate's text: parse_frontmatter assigns as
@@ -1319,7 +1438,7 @@ def normalize_external_note(path):
     canonicalize_wikilinks(final_path)
     schedule_inline_loop(final_path)
     restore_mtime(final_path)
-    return final_path
+    return place_note(final_path)[0]
 
 
 def incremental_update(notes, snap_old, snap_new):
@@ -3969,7 +4088,7 @@ def check_rename(n):
 
     sync_hashtags(new_path)
     schedule_inline_loop(new_path)
-    return new_path
+    return place_note(new_path)[0]
 
 
 # Vimscript sourced into the Vim sessions notoj spawns. In markdown buffers it:
@@ -4769,6 +4888,8 @@ def undo_action(act, review=None):
     `review` is the live resurface dict; it is required to undo a "defer" action
     — snooze (z) or schedule (S) — (other kinds ignore it)."""
     kind = act["kind"]
+    if act.get("path"):
+        act["path"] = live_path(act["path"])
     if kind == "defer":
         if review is not None:
             # Restore the prior resurface state: a missing "before" means the
@@ -4792,7 +4913,7 @@ def undo_action(act, review=None):
         if _edit_stale(act):
             return STALE
         atomic_write(act["path"], act["before"])
-        act["path"] = rename_to_title(act["path"])
+        act["path"] = place_note(rename_to_title(act["path"]))[0]
         try:
             act["mtime"] = os.path.getmtime(act["path"])
         except OSError:
@@ -4808,6 +4929,10 @@ def undo_action(act, review=None):
                     os.utime(act["path"], (act["mod"], act["mod"]))
                 except OSError:
                     pass
+            # Filed before the commit: with the untagged version committed
+            # first, a kajero would read the note as a new arrival and tag it
+            # straight back.
+            act["path"] = place_note(act["path"])[0]
             git_commit(f"untag: {_stem(act['path'])}")
         return act["path"]
     return None
@@ -4820,6 +4945,8 @@ def redo_action(act, review=None):
     `review` is the live resurface dict; it is required to redo a "defer" action
     — snooze (z) or schedule (S) — (other kinds ignore it)."""
     kind = act["kind"]
+    if act.get("path"):
+        act["path"] = live_path(act["path"])
     if kind == "defer":
         if review is not None:
             review[act["id"]] = act["after"]
@@ -4836,7 +4963,7 @@ def redo_action(act, review=None):
         if _edit_stale(act):
             return STALE
         atomic_write(act["path"], act["after"])
-        act["path"] = rename_to_title(act["path"])
+        act["path"] = place_note(rename_to_title(act["path"]))[0]
         try:
             act["mtime"] = os.path.getmtime(act["path"])
         except OSError:
@@ -4845,6 +4972,7 @@ def redo_action(act, review=None):
         return act["path"]
     if kind == "tags":
         if add_tags_keep_date(act["path"], act["added"]):
+            act["path"] = place_note(act["path"])[0]
             git_commit(f"retag: {_stem(act['path'])}")
         return act["path"]
     return None
@@ -4935,6 +5063,7 @@ def finalize_new_note(tmp_path):
     os.rename(tmp_path, dest)
     sync_hashtags(dest)
     schedule_inline_loop(dest)
+    dest = place_note(dest)[0]
     git_commit(f"add: {first_line}")
     return dest
 
@@ -8181,6 +8310,14 @@ def run(stdscr, imports=(), move=False):
 
         # Restore cursor to a specific note after external reload
         restore_path = state.pop("_restore_path", None)
+        restore_path = live_path(restore_path)
+        # Whatever filed notes into or out of a kajero since the last frame
+        # (a rescan, an edit, a new note) says so on the bar, and is committed
+        # now: the history is what tells a removed tag from a new arrival.
+        if KAJERO_MSGS:
+            push_msg(*KAJERO_MSGS)
+            KAJERO_MSGS.clear()
+            git_commit("file: kajero placement")
         if restore_path is not None:
             for i, n in enumerate(filtered):
                 if n["path"] == restore_path:

@@ -7855,6 +7855,179 @@ class TestKajeroReading(KajeroVaultCase):
                 notoj.parse_import_args(["--move", p])
 
 
+def _git(d, *args):
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                   cwd=d, capture_output=True, check=True)
+
+
+def _set_tags(path, tags):
+    """Rewrite a note's tags: field, as an edit in Vim would."""
+    text = open(path, encoding="utf-8").read()
+    end = text.find("\n---\n", 4)
+    fm = notoj.rewrite_tags_field(text[4:end], list(tags))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("---\n" + fm + text[end:])
+
+
+class TestKajeroPlacement(KajeroVaultCase):
+    def setUp(self):
+        super().setUp()
+        _git(self.vault, "init", "-q")
+        self.k = _make_kajero(self.vault, "arlyn")
+        notoj.KAJERO_MSGS.clear()
+        notoj.KAJERO_MOVED.clear()
+
+    def commit(self):
+        _git(self.vault, "add", "-A")
+        _git(self.vault, "commit", "-q", "-m", "snap")
+
+    def test_a_tagged_root_note_moves_into_its_kajero(self):
+        p = _kajero_note(self.vault, "Log.md", "Log", tags=["arlyn"])
+        final, changed = notoj.place_note(p)
+        self.assertTrue(changed)
+        self.assertEqual(final, os.path.join(self.k, "Log.md"))
+        self.assertFalse(os.path.exists(p))
+        self.assertEqual(notoj.KAJERO_MSGS, ["Log: moved into arlyn/"])
+        self.assertEqual(notoj.KAJERO_MOVED, {p: final})
+
+    def test_the_tag_matches_case_insensitively(self):
+        p = _kajero_note(self.vault, "Log.md", "Log", tags=["Arlyn"])
+        self.assertEqual(notoj.place_note(p)[0],
+                         os.path.join(self.k, "Log.md"))
+
+    def test_a_note_already_in_place_is_left_alone(self):
+        p = _kajero_note(self.k, "Log.md", "Log", tags=["arlyn"])
+        self.assertEqual(notoj.place_note(p), (p, False))
+        self.assertEqual(notoj.KAJERO_MSGS, [])
+
+    def test_removing_the_tag_moves_the_note_out(self):
+        p = _kajero_note(self.k, "Log.md", "Log", tags=["arlyn", "x"])
+        self.commit()
+        _set_tags(p, ["x"])
+        final, changed = notoj.place_note(p)
+        self.assertTrue(changed)
+        self.assertEqual(final, os.path.join(self.vault, "Log.md"))
+        self.assertEqual(notoj.KAJERO_MSGS, ["Log: moved out of arlyn/"])
+
+    def test_the_history_lookup_follows_the_id_across_a_rename(self):
+        """The committed version sat at the root under another name; the
+        note is still recognised as the same one by its id."""
+        _kajero_note(self.vault, "Old name.md", "Old name", tags=["arlyn"],
+                     note_id="n1")
+        self.commit()
+        os.remove(os.path.join(self.vault, "Old name.md"))
+        p = _kajero_note(self.k, "New name.md", "New name", note_id="n1")
+        self.assertEqual(notoj.place_note(p)[0],
+                         os.path.join(self.vault, "New name.md"))
+
+    def test_a_new_arrival_without_the_tag_gets_it(self):
+        p = _kajero_note(self.k, "Fresh.md", "Fresh")
+        os.utime(p, (1_000_000, 1_000_000))
+        final, changed = notoj.place_note(p)
+        self.assertEqual((final, changed), (p, True))
+        self.assertEqual(notoj.load_md(p)["tags"], ["arlyn"])
+        self.assertEqual(os.path.getmtime(p), 1_000_000)   # not an edit
+
+    def test_a_note_committed_untagged_and_dropped_in_gets_the_tag(self):
+        """Moving a note into the folder by hand files it there."""
+        p = _kajero_note(self.vault, "Dropped.md", "Dropped")
+        self.commit()
+        dest = os.path.join(self.k, "Dropped.md")
+        os.rename(p, dest)
+        self.assertEqual(notoj.place_note(dest), (dest, True))
+        self.assertEqual(notoj.load_md(dest)["tags"], ["arlyn"])
+
+    def test_two_kajero_tags_leave_the_note_in_place(self):
+        _make_kajero(self.vault, "home")
+        p = _kajero_note(self.vault, "Both.md", "Both", tags=["arlyn", "home"])
+        self.assertEqual(notoj.place_note(p), (p, False))
+        self.assertEqual(notoj.KAJERO_MSGS,
+                         ["Both: tagged for arlyn/, home/; left in place"])
+
+    def test_a_name_collision_gets_a_suffix_not_an_overwrite(self):
+        _kajero_note(self.k, "Log.md", "Log", tags=["arlyn"], note_id="a")
+        p = _kajero_note(self.vault, "Log.md", "Log", tags=["arlyn"],
+                         note_id="b")
+        final, _ = notoj.place_note(p)
+        self.assertEqual(final, os.path.join(self.k, "Log (2).md"))
+        self.assertEqual(notoj.load_md(os.path.join(self.k, "Log.md"))["id"],
+                         "a")
+
+    def test_a_note_open_in_another_editor_waits(self):
+        p = _kajero_note(self.vault, "Log.md", "Log", tags=["arlyn"])
+        with unittest.mock.patch.object(notoj, "edit_locked",
+                                        return_value=True):
+            self.assertEqual(notoj.place_note(p), (p, False))
+        self.assertTrue(os.path.exists(p))
+
+    def test_inside_a_kajero_nothing_is_filed(self):
+        notoj.NOTES_DIR = self.k
+        p = _kajero_note(self.k, "Untagged.md", "Untagged")
+        self.assertEqual(notoj.place_note(p), (p, False))
+        self.assertEqual(notoj.load_md(p)["tags"], [])
+
+    def test_load_files_notes_on_startup(self):
+        p = _kajero_note(self.vault, "Log.md", "Log", tags=["arlyn"])
+        notes = notoj.load()
+        self.assertEqual([n["path"] for n in notes],
+                         [os.path.join(self.k, "Log.md")])
+        self.assertFalse(os.path.exists(p))
+
+    def test_an_external_tag_edit_is_filed_on_rescan(self):
+        p = _kajero_note(self.vault, "Log.md", "Log")
+        notes = notoj.load()
+        snap = notoj.file_snapshot(self.vault)
+        _set_tags(p, ["arlyn"])
+        result, changed = notoj.incremental_update(
+            notes, snap, notoj.file_snapshot(self.vault))
+        self.assertTrue(changed)
+        self.assertEqual([n["path"] for n in result],
+                         [os.path.join(self.k, "Log.md")])
+
+    def test_a_new_arrival_is_reported(self):
+        _kajero_note(self.k, "Fresh.md", "Fresh")
+        notoj.place_note(os.path.join(self.k, "Fresh.md"))
+        self.assertEqual(notoj.KAJERO_MSGS,
+                         ["Fresh: tagged #arlyn (new in arlyn/)"])
+
+    def test_undoing_the_tag_that_filed_a_note_files_it_back(self):
+        """The undo record holds the pre-move path; undo follows the move,
+        and files the note out before committing, so the untagged commit
+        can't make it look like a new arrival."""
+        p = _kajero_note(self.vault, "Log.md", "Log")
+        self.commit()
+        added = notoj.add_tags_keep_date(p, ["arlyn"])
+        act = {"kind": "tags", "path": p, "added": added, "mod": None}
+        self.commit()
+        moved, _ = notoj.place_note(p)
+        self.commit()
+        self.assertEqual(os.path.dirname(moved), self.k)
+        with unittest.mock.patch.object(notoj, "git_commit",
+                                        side_effect=lambda m: self.commit()):
+            back = notoj.undo_action(act)
+        self.assertEqual(back, p)
+        self.assertEqual(notoj.load_md(p)["tags"], [])
+        # A rescan after the commit leaves it where it is.
+        self.assertEqual(notoj.place_note(p), (p, False))
+
+    def test_redoing_the_tag_files_the_note_again(self):
+        p = _kajero_note(self.vault, "Log.md", "Log")
+        act = {"kind": "tags", "path": p, "added": ["arlyn"], "mod": None}
+        with unittest.mock.patch.object(notoj, "git_commit"):
+            dest = notoj.redo_action(act)
+        self.assertEqual(dest, os.path.join(self.k, "Log.md"))
+        self.assertEqual(act["path"], dest)
+
+    def test_an_inline_hashtag_files_a_new_note(self):
+        tmp = os.path.join(self.vault, ".new_x.md")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("---\nid: x\ncreated: 2026-01-01T00:00:00Z\n"
+                    "modified: 2026-01-01T00:00:00Z\nversion: 1\ntags: []\n"
+                    "---\n\nStandup notes #arlyn\n")
+        dest = notoj.finalize_new_note(tmp)
+        self.assertEqual(os.path.dirname(dest), self.k)
+
+
 @unittest.skipUnless(shutil.which("vim"), "vim not installed")
 class VimKajeroFollowTests(KajeroVaultCase):
     """gf on a [[link]] opens the note in whichever folder holds it."""
