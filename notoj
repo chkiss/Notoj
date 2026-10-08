@@ -764,10 +764,76 @@ def ensure_id(path):
         pass
 
 
+# ----------------------------
+# Kajeroj — tag-filed subfolders (docs/kajeroj.md)
+# ----------------------------
+
+# A direct subfolder of the vault holding this file is a kajero: the home of
+# every note carrying the tag the file names.
+KAJERO_MARKER = ".notoj-kajero"
+
+
+def kajero_tag(d):
+    """The tag the kajero at `d` files, or None when `d` holds no marker. The
+    marker is `key = value` lines like the config; a missing or empty `tag`
+    falls back to the folder name, and a leading `#` is dropped."""
+    try:
+        with open(os.path.join(d, KAJERO_MARKER), "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    tag = ""
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        if k.strip() == "tag":
+            tag = v.strip().lstrip("#").strip()
+    return tag or os.path.basename(os.path.normpath(d))
+
+
+def kajeroj(root=None):
+    """{folder path: tag} for every kajero directly under the vault `root`
+    (default NOTES_DIR). Empty when the root is itself a kajero: notoj running
+    inside one sees a plain vault, and a kajero inside a kajero is not one."""
+    root = root or NOTES_DIR
+    if not root or kajero_tag(root) is not None:
+        return {}
+    out = {}
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except OSError:
+        return out
+    for e in entries:
+        if e.name.startswith(".") or not e.is_dir():
+            continue
+        tag = kajero_tag(e.path)
+        if tag is not None:
+            out[e.path] = tag
+    return out
+
+
+def note_dirs(root=None):
+    """Every folder holding notes: the vault root, then its kajeroj."""
+    root = root or NOTES_DIR
+    if not root:
+        return []
+    return [root] + list(kajeroj(root))
+
+
+def note_files(root=None):
+    """Paths of every *.md note file in the vault root and its kajeroj."""
+    out = []
+    for d in note_dirs(root):
+        out.extend(glob.glob(os.path.join(d, "*.md")))
+    return out
+
+
 def load():
     notes = []
 
-    for f in glob.glob(os.path.join(NOTES_DIR, "*.md")):
+    for f in note_files():
         if CONFLICT_RE.match(os.path.basename(f)):
             continue  # Syncthing conflict copy — handled by find_conflicts()/`c`, never adopted as a note
         # One read per note, reused by every step below. Each step that
@@ -1116,7 +1182,7 @@ def file_snapshot(directory):
     mtime on purpose — tagging from the list keeps the modified date — are
     still detected and reloaded."""
     snap = {}
-    for f in glob.glob(os.path.join(directory, "*.md")):
+    for f in note_files(directory):
         if CONFLICT_RE.match(os.path.basename(f)):
             continue  # conflict copies must not enter the reload snapshot, or normalize_external_note would rename them
         try:
@@ -1244,7 +1310,8 @@ def normalize_external_note(path):
         new_stem = slugify(new_title)
         current_stem = os.path.splitext(os.path.basename(path))[0]
         if new_stem != current_stem:
-            new_path = unique_dest(new_stem + ".md", keep=path)
+            new_path = unique_dest(new_stem + ".md", os.path.dirname(path),
+                                   keep=path)
             os.rename(path, new_path)
             final_path = new_path
 
@@ -2048,12 +2115,11 @@ def canonicalize_wikilinks(path):
             body = text[fm_end + 5:]
 
     # lowercase stem -> actual on-disk stem of every note that currently exists
-    try:
-        stems = {}
-        for fn in os.listdir(NOTES_DIR):
-            if fn.endswith(".md"):
-                stems.setdefault(fn[:-3].lower(), fn[:-3])
-    except OSError:
+    stems = {}
+    for f in note_files():
+        fn = os.path.basename(f)
+        stems.setdefault(fn[:-3].lower(), fn[:-3])
+    if not stems:
         return False
 
     def canon(m):
@@ -3884,7 +3950,8 @@ def check_rename(n):
 
     if title_changed:
         new_stem = slugify(new_first_line)
-        new_path = unique_dest(new_stem + ".md", keep=path)
+        new_path = unique_dest(new_stem + ".md", os.path.dirname(path),
+                               keep=path)
     else:
         new_path = path
 
@@ -3914,9 +3981,23 @@ def check_rename(n):
 # Embedded here (rather than shipped as a sibling file) so notoj stays a single
 # self-contained program.
 NOTOJ_VIM_SCRIPT = r"""
+" The folders notes live in: the vault root, then each kajero (a direct
+" subfolder holding .notoj-kajero) unless the root is itself a kajero.
+function! s:NotojDirs() abort
+  if empty($NOTOJ_NOTES_DIR)
+    return []
+  endif
+  let l:dir = fnamemodify($NOTOJ_NOTES_DIR, ':p:h')
+  if filereadable(l:dir . '/.notoj-kajero')
+    return [l:dir]
+  endif
+  return [l:dir] + map(glob(l:dir . '/*/.notoj-kajero', 1, 1),
+        \ 'fnamemodify(v:val, ":h")')
+endfunction
+
 function! s:NotojEdit(name) abort
-  let l:dir = $NOTOJ_NOTES_DIR
-  if empty(l:dir)
+  let l:dirs = s:NotojDirs()
+  if empty(l:dirs)
     return 0
   endif
   let l:name = substitute(a:name, '^\s*\(.\{-}\)\s*$', '\1', '')
@@ -3927,7 +4008,16 @@ function! s:NotojEdit(name) abort
   if l:name !~? '\.md$'
     let l:name .= '.md'
   endif
-  execute 'edit' fnameescape(l:dir . '/' . l:name)
+  " The note where it exists; a name nothing matches opens at the root, as a
+  " new note would be created there.
+  let l:target = l:dirs[0] . '/' . l:name
+  for l:d in l:dirs
+    if filereadable(l:d . '/' . l:name)
+      let l:target = l:d . '/' . l:name
+      break
+    endif
+  endfor
+  execute 'edit' fnameescape(l:target)
   return 1
 endfunction
 
@@ -4149,17 +4239,17 @@ endfunction
 " --------------------------------------------------------------------------
 
 function! s:NotojSetup() abort
-  if !empty($NOTOJ_NOTES_DIR)
-    let &l:path = $NOTOJ_NOTES_DIR
+  let l:dirs = s:NotojDirs()
+  if !empty(l:dirs)
+    let &l:path = join(map(copy(l:dirs), 'escape(v:val, " ,\\")'), ',')
   endif
   nnoremap <buffer> <silent> gf :call NotojFollow()<CR>
   if !exists('w:notoj_wikilink_match')
     let w:notoj_wikilink_match = matchadd('notojWikiLink', '\[\[[^][]*\]\]')
   endif
-  " Guard notes only — a markdown file outside the notes dir has no frontmatter
-  " contract to protect.
-  if !empty($NOTOJ_NOTES_DIR)
-        \ && expand('%:p:h') ==# fnamemodify($NOTOJ_NOTES_DIR, ':p:h')
+  " Guard notes only — a markdown file outside the notes dirs has no
+  " frontmatter contract to protect.
+  if index(l:dirs, expand('%:p:h')) >= 0
         \ && s:NotojFmTitleLine() > 0
     call s:NotojSnapshot()
     augroup notoj_title_guard
@@ -4761,8 +4851,13 @@ def redo_action(act, review=None):
 
 
 def load_trash():
+    """Trashed notes: the vault's own trash plus each kajero's, which fills
+    when notoj runs inside the kajero on another machine."""
     notes = []
-    for f in glob.glob(os.path.join(TRASH_DIR, "*.md")):
+    files = glob.glob(os.path.join(TRASH_DIR, "*.md"))
+    for d in kajeroj():
+        files.extend(glob.glob(os.path.join(d, ".trash", "*.md")))
+    for f in files:
         n = load_md(f)
         if n:
             notes.append(n)
@@ -4868,12 +4963,14 @@ def parse_import_args(argv):
 
     notes_dir = load_notes_dir()
     notes_dir = os.path.abspath(os.path.expanduser(notes_dir)) if notes_dir else ""
+    vault = ({os.path.abspath(d) for d in note_dirs(notes_dir)}
+             if notes_dir else set())
     for p in paths:
         if not os.path.isfile(p):
             raise ValueError(f"not a file: {p}")
         if os.path.splitext(p)[1].lower() not in IMPORT_EXTS:
             raise ValueError(f"not a markdown file: {p}")
-        if move and notes_dir and os.path.dirname(p) == notes_dir:
+        if move and os.path.dirname(p) in vault:
             # There is nothing to move — it is already where notes live.
             raise ValueError(f"--move: already a note: {p}")
     return paths, move, version
@@ -7738,9 +7835,9 @@ def run(stdscr, imports=(), move=False):
     # arrive this way) is not re-imported — it is just the one to select.
     imported, failed = [], []
     focus = None
-    vault = os.path.abspath(NOTES_DIR)
+    vault = {os.path.abspath(d) for d in note_dirs()}
     for src in imports:
-        if os.path.dirname(src) == vault:
+        if os.path.dirname(src) in vault:
             focus = focus or src
             continue
         final = import_file(src, move)

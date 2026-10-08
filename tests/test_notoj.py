@@ -7736,5 +7736,160 @@ class TestRepoHygiene(unittest.TestCase):
             self.assertEqual(os.listdir(d), [])
 
 
+def _kajero_note(d, name, title, tags=(), note_id=None):
+    """Write a settled note (title: matching its first line) into `d`."""
+    path = os.path.join(d, name)
+    tag_block = ("tags:\n" + "".join(f"  - {t}\n" for t in tags)
+                 if tags else "tags: []\n")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("---\n"
+                f"id: {note_id or name}\n"
+                f"title: {title}\n"
+                "created: 2013-10-08T13:08:43Z\n"
+                "modified: 2013-10-08T13:08:43Z\n"
+                "version: 1\n"
+                + tag_block +
+                "---\n"
+                "\n"
+                f"{title}\n")
+    return path
+
+
+def _make_kajero(vault, name, marker="tag = {name}\n"):
+    d = os.path.join(vault, name)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, notoj.KAJERO_MARKER), "w", encoding="utf-8") as f:
+        f.write(marker.format(name=name))
+    return d
+
+
+class KajeroVaultCase(unittest.TestCase):
+    """A temp vault with NOTES_DIR/TRASH_DIR pointed at it for each test."""
+
+    def setUp(self):
+        self.vault = tempfile.mkdtemp()
+        self._saved = notoj.NOTES_DIR, notoj.TRASH_DIR
+        notoj.NOTES_DIR = self.vault
+        notoj.TRASH_DIR = os.path.join(self.vault, ".trash")
+
+    def tearDown(self):
+        notoj.NOTES_DIR, notoj.TRASH_DIR = self._saved
+        shutil.rmtree(self.vault, ignore_errors=True)
+
+
+class TestKajeroDiscovery(KajeroVaultCase):
+    def test_a_subfolder_with_a_marker_is_a_kajero(self):
+        k = _make_kajero(self.vault, "arlyn")
+        os.makedirs(os.path.join(self.vault, "plain"))
+        self.assertEqual(notoj.kajeroj(), {k: "arlyn"})
+        self.assertEqual(notoj.note_dirs(), [self.vault, k])
+
+    def test_the_tag_falls_back_to_the_folder_name(self):
+        k = _make_kajero(self.vault, "work", marker="# no tag line\n")
+        self.assertEqual(notoj.kajeroj(), {k: "work"})
+
+    def test_a_leading_hash_on_the_tag_is_dropped(self):
+        k = _make_kajero(self.vault, "w", marker="tag = #arlyn\n")
+        self.assertEqual(notoj.kajeroj(), {k: "arlyn"})
+
+    def test_a_vault_that_is_itself_a_kajero_has_none(self):
+        """Running inside a kajero sees a plain vault; one nested in it is not
+        a kajero."""
+        k = _make_kajero(self.vault, "arlyn")
+        _make_kajero(k, "inner")
+        self.assertEqual(notoj.kajeroj(k), {})
+        self.assertEqual(notoj.note_dirs(k), [k])
+
+    def test_hidden_folders_are_never_kajeroj(self):
+        _make_kajero(self.vault, ".trash")
+        self.assertEqual(notoj.kajeroj(), {})
+
+
+class TestKajeroReading(KajeroVaultCase):
+    def test_load_and_snapshot_include_kajero_notes(self):
+        k = _make_kajero(self.vault, "arlyn")
+        a = _kajero_note(self.vault, "Root.md", "Root")
+        b = _kajero_note(k, "Work.md", "Work", tags=["arlyn"])
+        self.assertEqual(sorted(n["path"] for n in notoj.load()), sorted([a, b]))
+        self.assertEqual(sorted(notoj.file_snapshot(self.vault)), sorted([a, b]))
+
+    def test_a_retitle_inside_a_kajero_stays_there(self):
+        k = _make_kajero(self.vault, "arlyn")
+        p = _kajero_note(k, "Old.md", "Old", tags=["arlyn"])
+        text =open(p, encoding="utf-8").read().replace("\nOld\n", "\nNew\n")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        final = notoj.normalize_external_note(p)
+        self.assertEqual(final, os.path.join(k, "New.md"))
+
+    def test_check_rename_keeps_the_kajero(self):
+        k = _make_kajero(self.vault, "arlyn")
+        p = _kajero_note(k, "Old.md", "Old", tags=["arlyn"])
+        text = open(p, encoding="utf-8").read().replace("\nOld\n", "\nNew\n")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        self.assertEqual(notoj.check_rename({"path": p}),
+                         os.path.join(k, "New.md"))
+
+    def test_wikilinks_canonicalize_to_a_kajero_note(self):
+        k = _make_kajero(self.vault, "arlyn")
+        _kajero_note(k, "Meeting Log.md", "Meeting Log", tags=["arlyn"])
+        p = _kajero_note(self.vault, "Root.md", "Root")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("see [[meeting log]]\n")
+        self.assertTrue(notoj.canonicalize_wikilinks(p))
+        self.assertIn("[[Meeting Log]]", open(p, encoding="utf-8").read())
+
+    def test_trash_lists_a_kajero_trash_too(self):
+        k = _make_kajero(self.vault, "arlyn")
+        os.makedirs(os.path.join(k, ".trash"))
+        t = _kajero_note(os.path.join(k, ".trash"), "Gone.md", "Gone")
+        self.assertEqual([n["path"] for n in notoj.load_trash()], [t])
+
+    def test_move_import_refuses_a_file_already_in_a_kajero(self):
+        k = _make_kajero(self.vault, "arlyn")
+        p = _kajero_note(k, "Work.md", "Work", tags=["arlyn"])
+        with unittest.mock.patch.object(notoj, "load_notes_dir",
+                                        return_value=self.vault):
+            with self.assertRaises(ValueError):
+                notoj.parse_import_args(["--move", p])
+
+
+@unittest.skipUnless(shutil.which("vim"), "vim not installed")
+class VimKajeroFollowTests(KajeroVaultCase):
+    """gf on a [[link]] opens the note in whichever folder holds it."""
+
+    def _follow(self, link):
+        k = _make_kajero(self.vault, "arlyn")
+        target = _kajero_note(k, "Meeting Log.md", "Meeting Log")
+        src = _kajero_note(self.vault, "Root.md", "Root")
+        with open(src, "a", encoding="utf-8") as f:
+            f.write(f"[[{link}]]\n")
+        helper = os.path.join(self.vault, "helper.vim")
+        with open(helper, "w", encoding="utf-8") as f:
+            f.write(notoj.NOTOJ_VIM_SCRIPT)
+        out = os.path.join(self.vault, "out")
+        env = dict(os.environ, NOTOJ_NOTES_DIR=self.vault)
+        subprocess.run(["vim", "-N", "-u", "NONE", "-i", "NONE",
+                        "-c", "source " + helper,
+                        "-c", "call cursor(line('$'), 3)",
+                        "-c", "call NotojFollow()",
+                        "-c", f"call writefile([expand('%:p')], '{out}')",
+                        "-c", "qa!", src],
+                       env=env, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=30)
+        with open(out, encoding="utf-8") as f:
+            return f.read().strip(), target
+
+    def test_a_link_opens_the_note_in_its_kajero(self):
+        opened, target = self._follow("Meeting Log")
+        self.assertEqual(opened, target)
+
+    def test_an_unknown_link_opens_at_the_root(self):
+        opened, _ = self._follow("Nowhere")
+        self.assertEqual(opened, os.path.join(self.vault, "Nowhere.md"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
