@@ -24,7 +24,11 @@ done
 REPO="https://github.com/chkiss/Notoj.git"
 INSTALL_DIR="$HOME/Notoj"
 BIN_DIR="$HOME/.local/bin"
-SHELL_FUNC='notoj() { git -C ~/Notoj pull --ff-only -q 2>/dev/null & ~/Notoj/notoj "$@"; }'
+# The pull runs in a backgrounded subshell, not as a job of the interactive
+# shell: zsh reports a finished job the moment it ends ("[2] + done git -C
+# ..."), which lands on top of notoj's screen and scrolls it up a row. A
+# subshell's child is no job of the shell's, so nothing is reported.
+SHELL_FUNC='notoj() { (git -C ~/Notoj pull --ff-only -q >/dev/null 2>&1 &); ~/Notoj/notoj "$@"; }'
 PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 
 # Detect shell rc file
@@ -61,10 +65,14 @@ fi
 # function is installed. Re-running the installer with the other answer
 # switches it either way, which is why an existing function is removed
 # before a new one is written.
-has_shell_func() { grep -qF 'notoj() { git -C' "$RC" 2>/dev/null; }
+# Matches the current function and the older `notoj() { git -C ... &` form,
+# so a re-run replaces an outdated one rather than adding a second.
+FUNC_RE='^notoj\(\) \{ \(?git -C'
+has_shell_func() { grep -qE "$FUNC_RE" "$RC" 2>/dev/null; }
+has_current_func() { grep -qxF "$SHELL_FUNC" "$RC" 2>/dev/null; }
 remove_shell_func() {
     [ -f "$RC" ] || return 0
-    grep -vF 'notoj() { git -C' "$RC" > "$RC.notoj.tmp" && mv "$RC.notoj.tmp" "$RC"
+    grep -vE "$FUNC_RE" "$RC" > "$RC.notoj.tmp" && mv "$RC.notoj.tmp" "$RC"
 }
 
 if [ "$AUTO_UPDATE" = ask ]; then
@@ -86,8 +94,12 @@ if [ "$AUTO_UPDATE" = ask ]; then
 fi
 
 if [ "$AUTO_UPDATE" = yes ]; then
-    if has_shell_func; then
+    if has_current_func; then
         echo "Auto-update already enabled in $RC"
+    elif has_shell_func; then
+        remove_shell_func
+        echo "$SHELL_FUNC" >> "$RC"
+        echo "Updated the notoj() auto-update function in $RC"
     else
         echo "" >> "$RC"
         echo "$SHELL_FUNC" >> "$RC"
