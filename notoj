@@ -1768,7 +1768,9 @@ def sort_label(sort, rev, q, natural, keep):
     retain their natural order, which the label reflects."""
     if sort == "relevance":
         return "relevance" if (q.strip() and not keep) else natural
-    return f"{sort} {'🞃' if rev else '🞁'}"
+    # Arrows rather than the triangles U+1F781/U+1F783: those are missing from
+    # every font macOS ships, so the header showed a placeholder box there.
+    return f"{sort} {'↓' if rev else '↑'}"
 
 
 # ----------------------------
@@ -7644,7 +7646,7 @@ def draw(stdscr, notes, state):
     elif state.get("sched_mode"):
         header = f"{SCHED_PROMPT}{state['sched_input']}"
     elif state.get("trash_mode"):
-        sort = sort_label(state["sort"], state["rev"], state["q"], "modified 🞃", False)
+        sort = sort_label(state["sort"], state["rev"], state["q"], "modified ↓", False)
         header = f"trash ({len(notes)} notes){filt} | sort:{sort}{conflict_badge}"
     elif state.get("dup_mode") is not None:
         sort = sort_label(state["sort"], state["rev"], state["q"], "grouped", True)
@@ -7653,10 +7655,10 @@ def draw(stdscr, notes, state):
         sort = sort_label(state["sort"], state["rev"], state["q"], "most stale first", True)
         header = f"resurface ({len(notes)} loop(s) due){filt} | sort:{sort}{conflict_badge}"
     elif state.get("tagf") is not None:
-        sort = sort_label(state["sort"], state["rev"], state["q"], "modified 🞃", False)
+        sort = sort_label(state["sort"], state["rev"], state["q"], "modified ↓", False)
         header = f"tagged {tagf_label(state['tagf'])} ({len(notes)} notes){filt} | sort:{sort}{conflict_badge}"
     else:
-        sort = sort_label(state["sort"], state["rev"], state["q"], "modified 🞃", False)
+        sort = sort_label(state["sort"], state["rev"], state["q"], "modified ↓", False)
         header = f"notes{filt} | sort:{sort}{conflict_badge}{dup_badge}{loop_badge}{title_badge}"
 
     # Header rule: underline the top row edge to edge. Unlike the content rows

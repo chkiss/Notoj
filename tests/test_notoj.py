@@ -1524,7 +1524,7 @@ class TestSortLabel(unittest.TestCase):
 
     def test_relevance_while_searching_plain_view(self):
         self.assertEqual(
-            notoj.sort_label("relevance", True, "budget", "modified 🞃", False),
+            notoj.sort_label("relevance", True, "budget", "modified ↓", False),
             "relevance")
 
     def test_relevance_while_searching_keep_view_stays_natural(self):
@@ -1534,8 +1534,18 @@ class TestSortLabel(unittest.TestCase):
             "most stale first")
 
     def test_field_sort_shows_arrow(self):
-        self.assertEqual(notoj.sort_label("title", False, "", "x", False), "title 🞁")
-        self.assertEqual(notoj.sort_label("modified", True, "", "x", True), "modified 🞃")
+        self.assertEqual(notoj.sort_label("title", False, "", "x", False), "title ↑")
+        self.assertEqual(notoj.sort_label("modified", True, "", "x", True), "modified ↓")
+
+    def test_the_ui_draws_no_glyph_outside_the_bmp(self):
+        """Astral-plane symbols (U+1F781 and the like) are missing from the
+        fonts macOS ships and draw as a placeholder box there. Emoji in a
+        comment would be harmless, but none is needed, so the whole source
+        is held to it."""
+        with open(_notoj_path, encoding="utf-8") as f:
+            src = f.read()
+        astral = sorted({f"U+{ord(c):X}" for c in src if ord(c) > 0xFFFF})
+        self.assertEqual(astral, [])
 
 
 # ---------------------------------------------------------------------------
