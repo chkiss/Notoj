@@ -214,6 +214,34 @@ is written on every machine, since `.stignore` doesn't itself sync. A vault
 outside a Syncthing folder gets nothing. `install.sh` can't do any of this,
 since the notes directory is chosen on first launch.
 
+### Kajeroj: syncing a subset of the notes
+
+A *kajero* (Esperanto: notebook) is a folder in the vault that holds every
+note carrying one tag. Use one to sync part of the vault to a machine that
+should see only that part. Declare it with a marker file naming the tag:
+
+```bash
+mkdir ~/notes/work
+echo 'tag = work' > ~/notes/work/.notoj-kajero
+```
+
+From then on the tag decides where a note lives. Tag a note `#work` and
+notoj moves it into `work/`; remove the tag and it moves back out. The vault
+still lists every note, kajero or not, and searching `#work` shows just that
+kajero. Moves are reported on the status bar and committed.
+
+Share `work/` as its own Syncthing folder, and on the other machine set
+`notes_dir` to that folder. notoj running there sees only the kajero, and a
+note created there gets the tag automatically, so it stays in the kajero.
+Syncthing filters by path, so the other machine never receives the names of
+notes outside the folder.
+
+If the vault already sits inside a synced folder, notoj adds an ignore rule
+for the kajero to that folder's `.stignore`, so the two Syncthing folders
+never cover the same files. Devices that should keep receiving the kajero's
+notes need the kajero folder shared with them as well.
+[`docs/kajeroj.md`](docs/kajeroj.md) has the full rules.
+
 ### Repo maintenance
 
 A failed `git gc` writes `.git/gc.log` and then refuses to retry while that

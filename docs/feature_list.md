@@ -56,6 +56,7 @@
 * Filesystem is source of truth
 * Human-readable and externally editable
 * No proprietary storage format
+* Kajeroj: subfolders that a marker file (`.notoj-kajero`) ties to a tag; notes are filed into and out of them by that tag, so one tag's notes can sync as their own folder ([`kajeroj.md`](kajeroj.md))
 
 ## Automatic Title/Filename Derivation
 
