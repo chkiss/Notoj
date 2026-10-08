@@ -3052,7 +3052,18 @@ def ensure_stignore():
     root = syncthing_folder_root()
     if root is None:
         return False
-    rel = os.path.relpath(os.path.join(NOTES_DIR, ".git"), root)
+    return _prepend_stignore(
+        root, os.path.join(NOTES_DIR, ".git"),
+        "// notoj keeps a machine-local git repo in the notes dir; syncing "
+        "it corrupts\n// the repo. The .md files still sync; only git "
+        "internals stay machine-local.\n")
+
+
+def _prepend_stignore(root, path, comment):
+    """Put an ignore rule for `path` at the top of the Syncthing folder
+    `root`'s .stignore, after `comment`, unless the rule is already there.
+    Returns True when the file was written."""
+    rel = os.path.relpath(path, root)
     rule = "/" + rel.replace(os.sep, "/")
     stignore = os.path.join(root, ".stignore")
     try:
@@ -3062,16 +3073,39 @@ def ensure_stignore():
                 existing = f.read()
             if rule in existing.splitlines():
                 return False
-        block = (
-            "// notoj keeps a machine-local git repo in the notes dir; syncing "
-            "it corrupts\n// the repo. The .md files still sync; only git "
-            "internals stay machine-local.\n" + rule + "\n"
-        )
         with open(stignore, "w", encoding="utf-8") as f:
-            f.write(block + ("\n" + existing if existing else ""))
+            f.write(comment + rule + "\n"
+                    + ("\n" + existing if existing else ""))
     except OSError:
         return False
     return True
+
+
+def ensure_kajero_stignore():
+    """Keep a kajero that is its own Syncthing folder out of the folder that
+    encloses the vault.
+
+    Two Syncthing folders covering the same files fight over them, so once a
+    kajero holds a `.stfolder` the enclosing folder must ignore it. Like the
+    .git rule this is prepended (first match wins) and written on every
+    machine, since .stignore does not sync. Returns the kajeroj it ignored."""
+    done = []
+    for k in kajeroj():
+        if not os.path.exists(os.path.join(k, ".stfolder")):
+            continue
+        d = os.path.dirname(os.path.abspath(k))
+        while not os.path.exists(os.path.join(d, ".stfolder")):
+            parent = os.path.dirname(d)
+            if parent == d:
+                d = None
+                break
+            d = parent
+        if d and _prepend_stignore(
+                d, k,
+                "// a notoj kajero synced as its own Syncthing folder; this "
+                "folder must not\n// sync the same files too.\n"):
+            done.append(k)
+    return done
 
 
 # A leftover Syncthing temp file inside .git/objects/, from a period when the
@@ -3149,6 +3183,7 @@ def git_init():
         ensure_gitignore()
         ensure_stignore()
         git_gc_unblock()
+    ensure_kajero_stignore()
 
 
 def git_commit(msg):
@@ -8449,6 +8484,9 @@ def run(stdscr, imports=(), move=False):
             if time.monotonic() - last_scan >= SCAN_EVERY:
                 last_scan = time.monotonic()
                 state["_trash"] = None   # pick up external trash changes too
+                # A kajero may have become its own Syncthing folder since
+                # launch; the overlap should not outlive a scan.
+                ensure_kajero_stignore()
                 new_snap = file_snapshot(NOTES_DIR)
                 notes, changed = incremental_update(notes, snap, new_snap)
                 state["_conflicts"] = find_conflicts()

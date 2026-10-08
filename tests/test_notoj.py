@@ -8067,6 +8067,52 @@ class TestKajeroPlacement(KajeroVaultCase):
         self.assertEqual(os.path.dirname(dest), self.k)
 
 
+class TestKajeroStignore(unittest.TestCase):
+    """A kajero synced as its own Syncthing folder is ignored by the folder
+    enclosing the vault."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()            # the enclosing folder
+        os.makedirs(os.path.join(self.root, ".stfolder"))
+        self.vault = os.path.join(self.root, "dokumentoj", "notes")
+        os.makedirs(self.vault)
+        self.k = _make_kajero(self.vault, "arlyn")
+        self._saved = notoj.NOTES_DIR
+        notoj.NOTES_DIR = self.vault
+
+    def tearDown(self):
+        notoj.NOTES_DIR = self._saved
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def rules(self):
+        with open(os.path.join(self.root, ".stignore"), encoding="utf-8") as f:
+            return [ln for ln in f.read().splitlines()
+                    if ln and not ln.startswith("//")]
+
+    def test_a_kajero_not_synced_alone_adds_no_rule(self):
+        self.assertEqual(notoj.ensure_kajero_stignore(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".stignore")))
+
+    def test_a_kajero_with_its_own_stfolder_is_ignored_first(self):
+        os.makedirs(os.path.join(self.k, ".stfolder"))
+        with open(os.path.join(self.root, ".stignore"), "w") as f:
+            f.write("!/dokumentoj/\n")
+        self.assertEqual(notoj.ensure_kajero_stignore(), [self.k])
+        self.assertEqual(self.rules(),
+                         ["/dokumentoj/notes/arlyn", "!/dokumentoj/"])
+
+    def test_the_rule_is_written_once(self):
+        os.makedirs(os.path.join(self.k, ".stfolder"))
+        notoj.ensure_kajero_stignore()
+        self.assertEqual(notoj.ensure_kajero_stignore(), [])
+        self.assertEqual(self.rules(), ["/dokumentoj/notes/arlyn"])
+
+    def test_no_enclosing_folder_means_nothing_to_write(self):
+        shutil.rmtree(os.path.join(self.root, ".stfolder"))
+        os.makedirs(os.path.join(self.k, ".stfolder"))
+        self.assertEqual(notoj.ensure_kajero_stignore(), [])
+
+
 @unittest.skipUnless(shutil.which("vim"), "vim not installed")
 class VimKajeroFollowTests(KajeroVaultCase):
     """gf on a [[link]] opens the note in whichever folder holds it."""
