@@ -7960,11 +7960,50 @@ class TestKajeroPlacement(KajeroVaultCase):
             self.assertEqual(notoj.place_note(p), (p, False))
         self.assertTrue(os.path.exists(p))
 
-    def test_inside_a_kajero_nothing_is_filed(self):
+    def test_inside_a_kajero_a_new_untagged_note_gets_the_tag(self):
         notoj.NOTES_DIR = self.k
-        p = _kajero_note(self.k, "Untagged.md", "Untagged")
+        p = _kajero_note(self.k, "Fresh.md", "Fresh")
+        self.assertEqual(notoj.place_note(p), (p, True))
+        self.assertEqual(notoj.load_md(p)["tags"], ["arlyn"])
+
+    def test_inside_a_kajero_a_removed_tag_stays_removed(self):
+        """The vault root files the note out once it syncs; here, re-adding
+        the tag would undo what the user just did."""
+        notoj.NOTES_DIR = self.k
+        _git(self.k, "init", "-q")
+        p = _kajero_note(self.k, "Log.md", "Log", tags=["arlyn"])
+        _git(self.k, "add", "-A")
+        _git(self.k, "commit", "-q", "-m", "snap")
+        _set_tags(p, [])
         self.assertEqual(notoj.place_note(p), (p, False))
         self.assertEqual(notoj.load_md(p)["tags"], [])
+        self.assertTrue(os.path.exists(p))
+
+    def test_inside_a_kajero_a_new_note_is_tagged_before_its_commit(self):
+        notoj.NOTES_DIR = self.k
+        _git(self.k, "init", "-q")
+        tmp = os.path.join(self.k, ".new_x.md")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("---\nid: x\ncreated: 2026-01-01T00:00:00Z\n"
+                    "modified: 2026-01-01T00:00:00Z\nversion: 1\ntags: []\n"
+                    "---\n\nStandup notes\n")
+        with unittest.mock.patch.object(notoj, "git_commit"):
+            dest = notoj.finalize_new_note(tmp)
+        self.assertEqual(dest, os.path.join(self.k, "Standup notes.md"))
+        self.assertEqual(notoj.load_md(dest)["tags"], ["arlyn"])
+
+    def test_inside_a_kajero_an_import_is_tagged(self):
+        notoj.NOTES_DIR = self.k
+        _git(self.k, "init", "-q")
+        src_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, src_dir, ignore_errors=True)
+        src = os.path.join(src_dir, "outside.md")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("Outside thoughts\n")
+        with unittest.mock.patch.object(notoj, "git_commit"):
+            final = notoj.import_file(src)
+        self.assertEqual(os.path.dirname(final), self.k)
+        self.assertEqual(notoj.load_md(final)["tags"], ["arlyn"])
 
     def test_load_files_notes_on_startup(self):
         p = _kajero_note(self.vault, "Log.md", "Log", tags=["arlyn"])

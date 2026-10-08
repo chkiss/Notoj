@@ -908,11 +908,20 @@ def place_note(path, ks=None, n=None):
     removed) and is tagged otherwise (a new arrival: written on a machine that
     sees only the kajero, or dropped into the folder by hand). A note tagged
     for two kajeroj stays put. Notes open in another notoj's editor are left
-    for a later scan. Does nothing when notoj runs inside a kajero."""
+    for a later scan.
+
+    Inside a kajero there is nowhere to move a note, so only the tagging
+    half applies: a note without the tag gets it unless its history shows
+    the tag was removed here, which the vault root acts on when it syncs."""
     ks = {os.path.abspath(d): t
           for d, t in (kajeroj() if ks is None else ks).items()}
     if not ks:
-        return path, False
+        own = kajero_tag(NOTES_DIR) if NOTES_DIR else None
+        if own is None:
+            return path, False
+        ks = {os.path.abspath(NOTES_DIR): own}
+        if os.path.dirname(os.path.abspath(path)) not in ks:
+            return path, False
     n = n or load_md(path)
     if not n:
         return path, False
@@ -937,6 +946,8 @@ def place_note(path, ks=None, n=None):
                             f"{stem}: moved into {name}/"), True
     name = os.path.basename(here)
     if tag_in_history(n.get("id"), ks[here]):
+        if here == os.path.abspath(NOTES_DIR):
+            return path, False       # inside the kajero: the root moves it
         return _kajero_move(path, NOTES_DIR,
                             f"{stem}: moved out of {name}/"), True
     if not add_tags_keep_date(path, [ks[here]]):
