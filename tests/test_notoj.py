@@ -1537,6 +1537,19 @@ class TestSortLabel(unittest.TestCase):
         self.assertEqual(notoj.sort_label("title", False, "", "x", False), "title ↑")
         self.assertEqual(notoj.sort_label("modified", True, "", "x", True), "modified ↓")
 
+    def test_bidi_marks_default_off_on_macos_only(self):
+        """A terminal that gives U+200E a column shifts the rest of the row,
+        divider included; macOS terminals do, VTE doesn't."""
+        with unittest.mock.patch.object(notoj, "_read_config", return_value={}):
+            with unittest.mock.patch.object(notoj.sys, "platform", "darwin"):
+                self.assertEqual(notoj._bidi_mark(), "")
+            with unittest.mock.patch.object(notoj.sys, "platform", "linux"):
+                self.assertEqual(notoj._bidi_mark(), "‎")
+        with unittest.mock.patch.object(notoj, "_read_config",
+                                        return_value={"bidi_marks": "true"}):
+            with unittest.mock.patch.object(notoj.sys, "platform", "darwin"):
+                self.assertEqual(notoj._bidi_mark(), "‎")
+
     def test_the_ui_draws_no_glyph_outside_the_bmp(self):
         """Astral-plane symbols (U+1F781 and the like) are missing from the
         fonts macOS ships and draw as a placeholder box there. Emoji in a

@@ -359,7 +359,16 @@ SNOOZE_DAYS = 7
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
-LRM = "\u200e"
+# Left-to-right mark, written ahead of the list's date columns so a terminal
+# that does bidi (VTE) can't pull the date into an Arabic title's RTL run.
+# Off by default on macOS: a terminal that gives the mark a column puts every
+# cell after it one column right of where curses thinks it is, and where the
+# row is written in one run (the tags reaching the divider) the divider moves.
+def _bidi_mark():
+    return "\u200e" if config_bool("bidi_marks", sys.platform != "darwin") else ""
+
+
+LRM = _bidi_mark()
 
 # ----------------------------
 # Time utils
@@ -7827,12 +7836,13 @@ def draw(stdscr, notes, state):
 
         if show_date:
             m = fmt(n.get(date_field))
-            # +1 budget so the zero-width LRM doesn't clip the last char.
-            stdscr.addnstr(y, COL_DATE, LRM + m, min(1 + len(m), list_w - COL_DATE), attr_date)
+            # The LRM's own character is added to the budget so the zero-width
+            # mark doesn't clip the last char.
+            stdscr.addnstr(y, COL_DATE, LRM + m, min(len(LRM) + len(m), list_w - COL_DATE), attr_date)
 
         if show_ago:
             ago_str = ago_strs[i]
-            stdscr.addnstr(y, COL_AGO, LRM + ago_str, min(1 + len(ago_str), list_w - COL_AGO), attr_date)
+            stdscr.addnstr(y, COL_AGO, LRM + ago_str, min(len(LRM) + len(ago_str), list_w - COL_AGO), attr_date)
 
         if show_date and tg and tag_col < list_w:
             # Highlighted like the title: a tag is a first-class way to match,

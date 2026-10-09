@@ -95,6 +95,13 @@
 # need a GUI editor instead. Default: true.
 # reshape_arabic=true
 
+# Write an invisible left-to-right mark ahead of the list's date columns, so a
+# terminal that does bidi can't reorder a date next to an Arabic title. Turn it
+# off if the divider between the list and the preview jumps a column or two on
+# rows whose tags run up to it: that terminal draws the mark as a visible
+# column. Default: true on Linux, false on macOS.
+# bidi_marks=true
+
 # Order a note's own tags for display (list + preview). Presentation-only —
 # the frontmatter on disk is never reordered, and the order self-maintains as
 # tag counts change, so you never edit a note just to fix tag order. Ties
