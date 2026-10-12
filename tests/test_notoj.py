@@ -8219,5 +8219,145 @@ class VimKajeroFollowTests(KajeroVaultCase):
         self.assertEqual(opened, os.path.join(self.vault, "Nowhere.md"))
 
 
+def _conflict_note(body_lines, modified="2026-10-12T05:00:00Z", version=1,
+                   id_="abc", title="Brief"):
+    return ("---\n"
+            f"id: {id_}\ntitle: {title}\ncreated: 2026-10-12T04:00:00Z\n"
+            f"modified: {modified}\nversion: {version}\n"
+            "tags:\n  - arlyn\n---\n\n"
+            + "\n".join([title] + body_lines) + "\n")
+
+
+class TestMergeConflictTexts(unittest.TestCase):
+    O = [f"line {i}" for i in range(1, 11)]
+
+    def edit(self, lines, i, text):
+        lines = list(lines)
+        lines[i] = text
+        return lines
+
+    def test_merges_edits_to_different_lines(self):
+        ours = self.edit(self.O, 8, "line 9 from the Mac")
+        theirs = self.edit(self.O, 1, "line 2 from chau")
+        out = notoj.merge_conflict_texts(
+            _conflict_note(ours, "2026-10-12T05:02:53Z", 2),
+            _conflict_note(theirs, "2026-10-12T04:56:23Z", 1),
+            [_conflict_note(self.O)])
+        self.assertIn("line 9 from the Mac", out)
+        self.assertIn("line 2 from chau", out)
+        self.assertIn("modified: 2026-10-12T05:02:53Z\n", out)
+        self.assertIn("version: 3\n", out)
+
+    def test_base_is_the_oldest_tied_version_not_the_losers_last_commit(self):
+        # chau: O -> A1 -> A2 (A2 lost); the Mac: O -> B (won). Basing the
+        # merge on A1 or A2 would read A1's edit as deleted by the Mac.
+        older = self.edit(self.O, 0, "line 1 before O")
+        a1 = self.edit(self.O, 1, "A1")
+        a2 = self.edit(a1, 4, "A2")
+        b = self.edit(self.O, 8, "B")
+        history = [_conflict_note(v) for v in (b, a2, a1, self.O, older)]
+        out = notoj.merge_conflict_texts(_conflict_note(b), _conflict_note(a2), history)
+        body = out.split("\n---\n", 1)[1]
+        for want in ("A1", "A2", "B", "line 1"):
+            self.assertIn(want + "\n", body)
+        self.assertNotIn("before O", body)
+
+    def test_overlapping_edits_are_left_for_a_person(self):
+        out = notoj.merge_conflict_texts(
+            _conflict_note(self.edit(self.O, 3, "ours")),
+            _conflict_note(self.edit(self.O, 3, "theirs")),
+            [_conflict_note(self.O)])
+        self.assertIsNone(out)
+
+    def test_different_notes_or_titles_are_not_merged(self):
+        a = _conflict_note(self.edit(self.O, 0, "x"))
+        self.assertIsNone(notoj.merge_conflict_texts(
+            a, _conflict_note(self.O, id_="other"), [_conflict_note(self.O)]))
+        self.assertIsNone(notoj.merge_conflict_texts(
+            a, _conflict_note(self.O, title="Other"), [_conflict_note(self.O)]))
+
+    def test_no_history_means_no_merge(self):
+        self.assertIsNone(notoj.merge_conflict_texts(
+            _conflict_note(self.edit(self.O, 0, "x")),
+            _conflict_note(self.edit(self.O, 9, "y")), []))
+
+    def test_same_body_needs_no_history(self):
+        out = notoj.merge_conflict_texts(
+            _conflict_note(self.O, "2026-10-12T05:00:00Z", 4),
+            _conflict_note(self.O, "2026-10-12T06:00:00Z", 2), [])
+        self.assertIn("modified: 2026-10-12T06:00:00Z\n", out)
+        self.assertIn("version: 5\n", out)
+
+
+class TestAutoMergeConflicts(unittest.TestCase):
+    O = [f"line {i}" for i in range(1, 11)]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        self._old = notoj.NOTES_DIR
+        notoj.NOTES_DIR = self.d
+        notoj._auto_merge_tried.clear()
+        _git(self.d, "init", "-q")
+        _git(self.d, "config", "user.name", "t")
+        _git(self.d, "config", "user.email", "t@t")
+        self.note = os.path.join(self.d, "Brief.md")
+        self.copy = os.path.join(self.d, "Brief.sync-conflict-20261012-012633-3X7RBTB.md")
+        self.write(self.note, self.O)
+        _git(self.d, "add", "-A")
+        _git(self.d, "commit", "-q", "-m", "base")
+
+    def tearDown(self):
+        notoj.NOTES_DIR = self._old
+        self.tmp.cleanup()
+
+    def write(self, path, lines):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(_conflict_note(lines))
+
+    def lines_with(self, i, text):
+        lines = list(self.O)
+        lines[i] = text
+        return lines
+
+    def log(self):
+        return subprocess.run(["git", "log", "--format=%s"], cwd=self.d,
+                              capture_output=True, text=True).stdout.split("\n")
+
+    def test_clean_conflict_is_merged_committed_and_removed(self):
+        self.write(self.note, self.lines_with(8, "ours"))
+        self.write(self.copy, self.lines_with(1, "theirs"))
+        self.assertEqual(notoj.auto_merge_conflicts(), ["Brief"])
+        self.assertFalse(os.path.exists(self.copy))
+        text = open(self.note, encoding="utf-8").read()
+        self.assertIn("ours\n", text)
+        self.assertIn("theirs\n", text)
+        self.assertEqual(self.log()[:2], ["merge conflict: Brief", "conflict copy: "
+                         "Brief.sync-conflict-20261012-012633-3X7RBTB"])
+
+    def test_overlap_is_left_alone_and_not_retried(self):
+        self.write(self.note, self.lines_with(3, "ours"))
+        self.write(self.copy, self.lines_with(3, "theirs"))
+        with unittest.mock.patch.object(notoj, "_note_versions",
+                                        wraps=notoj._note_versions) as versions:
+            self.assertEqual(notoj.auto_merge_conflicts(), [])
+            self.assertEqual(notoj.auto_merge_conflicts(), [])
+            self.assertEqual(versions.call_count, 1)
+        self.assertTrue(os.path.exists(self.copy))
+
+    def test_note_open_in_another_editor_is_skipped(self):
+        self.write(self.note, self.lines_with(8, "ours"))
+        self.write(self.copy, self.lines_with(1, "theirs"))
+        with unittest.mock.patch.object(notoj, "edit_locked", return_value=True):
+            self.assertEqual(notoj.auto_merge_conflicts(), [])
+        self.assertTrue(os.path.exists(self.copy))
+
+    def test_config_can_turn_it_off(self):
+        self.write(self.note, self.lines_with(8, "ours"))
+        self.write(self.copy, self.lines_with(1, "theirs"))
+        with unittest.mock.patch.object(notoj, "config_bool", return_value=False):
+            self.assertEqual(notoj.auto_merge_conflicts(), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

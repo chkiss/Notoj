@@ -197,9 +197,13 @@ copies (`*.sync-conflict-*`), which `git add -A` would otherwise commit on
 every keystroke.
 
 Syncing the `.md` files with Syncthing works out of the box: external edits
-are detected, reloaded, and committed, and sync-conflict copies are surfaced
-in the header (`c` resolves them in vimdiff; the discarded version is
-committed to history first, so it's always recoverable via `git show`).
+are detected, reloaded, and committed. A sync-conflict copy whose edits don't
+overlap the note's is merged in automatically: the two bodies are three-way
+merged against the note's git history, and the status bar says
+`<note>: merged a sync conflict`. The rest are surfaced in the header (`c`
+resolves them in vimdiff). Either way the conflict copy is committed to
+history before it is deleted, so it's always recoverable via `git show`.
+`auto_merge_conflicts=false` turns the automatic merge off.
 
 ### `.git` must not sync
 

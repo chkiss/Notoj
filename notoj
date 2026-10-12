@@ -5,6 +5,7 @@ import collections
 import ctypes
 import calendar
 import curses
+import difflib
 import fcntl
 import functools
 import hashlib
@@ -4026,16 +4027,178 @@ def find_conflicts():
     return sorted(results, key=lambda t: t[1])
 
 
-def resolve_conflict(original, conflict):
-    # Snapshot the conflict copy into git history first: the copy is deleted
-    # below regardless of what was (or wasn't) merged in vimdiff, and conflict
-    # files never enter the regular snapshot commits, so without this an
-    # accidental :qa would lose that version forever. -f because copies under
-    # .trash/ are gitignored.
+def snapshot_conflict_copy(conflict):
+    # Conflict files never enter the regular snapshot commits, so a copy that
+    # is about to be deleted gets its own commit first; without it a bad merge
+    # or an accidental :qa would lose that version forever. -f because copies
+    # under .trash/ are gitignored.
     rel = os.path.relpath(conflict, NOTES_DIR)
     subprocess.run(["git", "add", "-f", "--", rel], cwd=NOTES_DIR, capture_output=True)
     subprocess.run(["git", "commit", "-m", f"conflict copy: {_stem(conflict)}"],
                    cwd=NOTES_DIR, capture_output=True)
+
+
+# Auto-merge: most conflicts are two machines editing different parts of one
+# note — a stale editor buffer saved over a newer synced copy, or two agents
+# working in the same note minutes apart. Syncthing keeps the newer file and
+# renames the other, so one side's edit silently drops out of the note. Here
+# the two bodies are three-way merged against a version from the vault's own
+# git history; only a clean merge is applied, and anything else stays for `c`.
+#
+# Choosing the base: Syncthing records no ancestry, so it's inferred. For each
+# committed version V, d(V, ours) + d(V, theirs) counts the line changes the
+# merge would replay. The true common ancestor O minimizes it — but so does
+# every version along one side's own edit chain (O→A1→A2: going via A1 just
+# moves A1's changes from one term to the other), and picking A1 would make
+# the merge read A1's changes as deleted by the other side. O is the oldest of
+# the tied versions, and anything older than O adds the O-era changes twice,
+# so the oldest minimum is the base.
+#
+# The result must not depend on which machine merges it, or two notojs that
+# both see the conflict would write different files and conflict again. Its
+# frontmatter is the winner's, with modified: the later of the two and
+# version: one past the higher, so every machine writes the same bytes.
+
+AUTO_MERGE_HISTORY = 30   # committed versions considered as the merge base
+_auto_merge_tried = {}    # conflict path -> (mtimes) of a pair that didn't merge
+
+
+def _split_frontmatter(text):
+    """(frontmatter block including its --- lines, body); ("", text) if none."""
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            return text[:end + 5], text[end + 5:]
+    return "", text
+
+
+def _note_versions(path):
+    """Texts of `path` in git history, newest first, following renames."""
+    rel = os.path.relpath(path, NOTES_DIR)
+    r = subprocess.run(
+        ["git", "log", "--follow", f"-n{AUTO_MERGE_HISTORY}",
+         "--format=%x01%H", "--name-only", "--", rel],
+        cwd=NOTES_DIR, capture_output=True, text=True)
+    texts = []
+    for entry in r.stdout.split("\x01")[1:]:
+        lines = [l for l in entry.splitlines() if l]
+        if len(lines) < 2:
+            continue
+        s = subprocess.run(["git", "show", f"{lines[0]}:{lines[1]}"],
+                           cwd=NOTES_DIR, capture_output=True, text=True)
+        if s.returncode == 0:
+            texts.append(s.stdout)
+    return texts
+
+
+def _line_distance(a, b):
+    """Lines removed plus lines added to turn `a` into `b`."""
+    sm = difflib.SequenceMatcher(None, a.splitlines(), b.splitlines(),
+                                 autojunk=False)
+    return sum((i2 - i1) + (j2 - j1)
+               for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != "equal")
+
+
+def _merge_base(versions, ours, theirs):
+    """The body to merge against: the oldest version with the least total
+    distance to both sides (see the note above). None without history."""
+    best, best_d = None, None
+    for text in versions:   # newest first, so `<=` lets older ties win
+        body = _split_frontmatter(text)[1]
+        d = _line_distance(body, ours) + _line_distance(body, theirs)
+        if best_d is None or d <= best_d:
+            best, best_d = body, d
+    return best
+
+
+def _three_way(ours, base, theirs):
+    """git merge-file of three bodies: the merged text, or None on overlap."""
+    with tempfile.TemporaryDirectory() as d:
+        paths = []
+        for name, body in (("ours", ours), ("base", base), ("theirs", theirs)):
+            p = os.path.join(d, name)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(body)
+            paths.append(p)
+        r = subprocess.run(["git", "merge-file", "-p", *paths],
+                           capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _merged_frontmatter(fm_ours, meta_ours, meta_theirs):
+    modified = max(meta_ours.get("modified") or "", meta_theirs.get("modified") or "")
+    try:
+        version = max(int(meta_ours.get("version") or 0),
+                      int(meta_theirs.get("version") or 0)) + 1
+    except ValueError:
+        version = None
+    if modified:
+        fm_ours = re.sub(r"(?m)^modified:.*$", f"modified: {modified}", fm_ours, count=1)
+    if version is not None:
+        fm_ours = re.sub(r"(?m)^version:.*$", f"version: {version}", fm_ours, count=1)
+    return fm_ours
+
+
+def merge_conflict_texts(ours, theirs, versions):
+    """The merged note text for a winner (`ours`) and its conflict copy
+    (`theirs`), or None when it needs a person: the copies disagree on id or
+    title, there's no history to merge against, or the edits overlap."""
+    fm_o, body_o = _split_frontmatter(ours)
+    fm_t, body_t = _split_frontmatter(theirs)
+    meta_o = parse_frontmatter(fm_o[4:-5]) if fm_o else {}
+    meta_t = parse_frontmatter(fm_t[4:-5]) if fm_t else {}
+    if not fm_o or not fm_t:
+        return None
+    if meta_o.get("id") != meta_t.get("id") or meta_o.get("title") != meta_t.get("title"):
+        return None
+    if body_o == body_t:
+        body = body_o
+    else:
+        base = _merge_base(versions, body_o, body_t)
+        if base is None:
+            return None
+        body = _three_way(body_o, base, body_t)
+        if body is None:
+            return None
+    return _merged_frontmatter(fm_o, meta_o, meta_t) + body
+
+
+def auto_merge_conflicts():
+    """Merge every conflict copy that merges cleanly into its note, commit
+    each, and return the merged notes' stems. A pair that didn't merge is not
+    retried until one of its files changes; `c` resolves it by hand."""
+    if not config_bool("auto_merge_conflicts", True):
+        return []
+    merged = []
+    for original, conflict in find_conflicts():
+        try:
+            key = (os.path.getmtime(original), os.path.getmtime(conflict))
+        except OSError:
+            continue   # no winner to merge into — `c` adopts the copy
+        if _auto_merge_tried.get(conflict) == key or edit_locked(original):
+            continue
+        ours, theirs = read_note_text(original), read_note_text(conflict)
+        text = (merge_conflict_texts(ours, theirs, _note_versions(original))
+                if ours is not None and theirs is not None else None)
+        if text is None:
+            _auto_merge_tried[conflict] = key
+            continue
+        snapshot_conflict_copy(conflict)
+        if text != ours:
+            atomic_write(original, text)
+        os.remove(conflict)
+        rels = [os.path.relpath(p, NOTES_DIR) for p in (original, conflict)]
+        subprocess.run(["git", "add", "-A", "--", *rels], cwd=NOTES_DIR, capture_output=True)
+        subprocess.run(["git", "commit", "-m", f"merge conflict: {_stem(original)}"],
+                       cwd=NOTES_DIR, capture_output=True)
+        merged.append(_stem(original))
+    return merged
+
+
+def resolve_conflict(original, conflict):
+    # Snapshotted first because the copy is deleted below regardless of what
+    # was (or wasn't) merged in vimdiff.
+    snapshot_conflict_copy(conflict)
     suspend_curses()
     if os.path.exists(original):
         if not launch(["vimdiff", original, conflict]):
@@ -8517,6 +8680,9 @@ def run(stdscr, imports=(), move=False):
                 # enclosing folder should not outlive a scan.
                 ensure_stignore()
                 ensure_kajero_stignore()
+                # Before the snapshot, so a merged note reloads this tick.
+                for stem in auto_merge_conflicts():
+                    push_msg(f"{stem}: merged a sync conflict")
                 new_snap = file_snapshot(NOTES_DIR)
                 notes, changed = incremental_update(notes, snap, new_snap)
                 state["_conflicts"] = find_conflicts()

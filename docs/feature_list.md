@@ -92,7 +92,8 @@
 
 ## Conflict Preservation
 
-* Duplicate conflicting notes instead of silent merge
+* Merge non-overlapping conflicting edits automatically, against the note's git history
+* Leave overlapping edits as a conflict copy for vimdiff instead of guessing
 * Preserve all user text
 * Clear conflict naming
 

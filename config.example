@@ -254,6 +254,16 @@ preview_scroll = page
 # undo.persist=true
 
 # ===========================================================================
+# Sync conflicts
+# ===========================================================================
+# Merge a Syncthing conflict copy into its note on its own when the two
+# versions edited different lines, using the note's git history as the common
+# version. Overlapping edits, a copy whose id or title differs, and a note open
+# in an editor are left for `c` (vimdiff). Every merged copy is committed to
+# history before it is deleted. Default: true.
+# auto_merge_conflicts=true
+
+# ===========================================================================
 # Key remapping
 # ===========================================================================
 # Rebind a single-key action: key.<action> = <key>. A <key> is one character,
