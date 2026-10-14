@@ -4531,6 +4531,28 @@ if !empty($NOTOJ_EDIT_MARK)
   augroup END
 endif
 
+" ---- persistent undo -------------------------------------------------------
+" Keep each note's undo history after Vim closes, so text lost to a reload (L
+" at Vim's "file changed" prompt, after another machine or an agent edited the
+" note) can still be undone in a later session. The undo files go to notoj's
+" local state folder, never beside the note: Vim's default undodir "." would
+" put a .<name>.un~ in the notes folder and sync it to every machine. Left
+" alone when the user's vimrc already turns undofile on. This script is
+" sourced after the note was read, so its history is loaded by hand.
+if !&undofile
+  let s:undodir = (empty($XDG_STATE_HOME) ? expand('~/.local/state') : $XDG_STATE_HOME) . '/notoj/vim-undo'
+  if !isdirectory(s:undodir)
+    silent! call mkdir(s:undodir, 'p', 0700)
+  endif
+  if isdirectory(s:undodir)
+    let &undodir = s:undodir
+    set undofile
+    if filereadable(undofile(expand('%:p')))
+      silent! execute 'rundo' fnameescape(undofile(expand('%:p')))
+    endif
+  endif
+endif
+
 " ---- title-clobber guard -------------------------------------------------
 " notoj derives a note's title from the first body line and writes it into the
 " frontmatter, so retitling a note by editing `title:` alone is reverted on the

@@ -4570,6 +4570,62 @@ class VimOpenPositionIntegrationTests(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+@unittest.skipUnless(shutil.which("vim"), "vim not installed")
+class VimPersistentUndoTests(unittest.TestCase):
+    """notoj's helper keeps undo history across Vim sessions, in its own state
+    folder rather than beside the (synced) note."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.notes = os.path.join(self.d, "notes")
+        self.state = os.path.join(self.d, "state")
+        os.makedirs(self.notes)
+        self.note = os.path.join(self.notes, "note.md")
+        with open(self.note, "w", encoding="utf-8") as f:
+            f.write("first\n")
+        self.helper = os.path.join(self.d, "notoj.vim")
+        with open(self.helper, "w", encoding="utf-8") as f:
+            f.write(notoj.NOTOJ_VIM_SCRIPT)
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _vim(self, *cmds, vimrc="NONE"):
+        args = ["vim", "-N", "-u", vimrc, "-i", "NONE", "-n",
+                "-c", "source " + self.helper]
+        for c in cmds:
+            args += ["-c", c]
+        subprocess.run(args + ["-c", "qa!", self.note],
+                       env=dict(os.environ, XDG_STATE_HOME=self.state),
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=20)
+
+    def _text(self):
+        with open(self.note, encoding="utf-8") as f:
+            return f.read()
+
+    def test_a_later_session_can_undo_an_earlier_edit(self):
+        self._vim("call setline(1, 'second')", "w")
+        self.assertEqual(self._text(), "second\n")
+        self._vim("undo", "w")
+        self.assertEqual(self._text(), "first\n")
+
+    def test_undo_files_stay_out_of_the_notes_folder(self):
+        self._vim("call setline(1, 'second')", "w")
+        self.assertEqual(os.listdir(self.notes), ["note.md"])
+        self.assertTrue(os.listdir(os.path.join(self.state, "notoj", "vim-undo")))
+
+    def test_a_vimrc_that_sets_undofile_is_left_alone(self):
+        vimrc = os.path.join(self.d, "vimrc")
+        own = os.path.join(self.d, "own-undo")
+        os.makedirs(own)
+        with open(vimrc, "w", encoding="utf-8") as f:
+            f.write("set undofile\nlet &undodir = '%s'\n" % own)
+        self._vim("call setline(1, 'second')", "w", vimrc=vimrc)
+        self.assertTrue(os.listdir(own))
+        self.assertFalse(os.path.exists(os.path.join(self.state, "notoj")))
+
+
 @unittest.skipUnless(
     shutil.which("vim"), "vim not installed"
 )

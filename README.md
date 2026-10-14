@@ -159,6 +159,10 @@ re-imported: notoj simply opens with that note selected, which makes
 Notes are markdown files with YAML frontmatter (`id`, `created`, `modified`,
 `title`, `tags`). The contract external tools should know:
 
+- Vim sessions notoj opens keep each note's undo history after Vim closes,
+  in `~/.local/state/notoj/vim-undo` (never beside the note, where it would
+  sync), so text lost to a reload can be undone later. A vimrc that already
+  sets `undofile` is left alone.
 - The first body line is the title, and the filename follows it: editing
   that line renames the file automatically.
 - Retitling a note by editing the frontmatter `title:` and *not* the first
