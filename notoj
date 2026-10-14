@@ -1055,8 +1055,36 @@ def order_tags(tag_list):
     return sorted(tag_list, key=lambda t: (-TAG_FREQ.get(t, 0), t))
 
 
+_hidden_cache = (None, None)
+
+
+def hidden_tags():
+    """Tags kept out of the display: the list's tags column, the preview's tag
+    row, the tags view (T) and the shared-tags filter (t). Run inside a
+    kajero, every note carries the kajero's tag, so that one is hidden unless
+    `hide_kajero_tag` is off; `hidden_tags` names more, comma- or
+    space-separated. The tags stay in the files, and search still matches
+    them."""
+    global _hidden_cache
+    key = (NOTES_DIR, id(_read_config()))
+    if _hidden_cache[0] != key:
+        hidden = {t.lstrip("#") for t in
+                  re.split(r"[,\s]+", config_get("hidden_tags", "")) if t.lstrip("#")}
+        own = kajero_tag(NOTES_DIR) if NOTES_DIR else None
+        if own and config_bool("hide_kajero_tag", True):
+            hidden.add(own)
+        _hidden_cache = (key, frozenset(hidden))
+    return _hidden_cache[1]
+
+
+def shown_tags(tag_list):
+    """`tag_list` without the hidden tags, order kept."""
+    hidden = hidden_tags()
+    return [t for t in tag_list or [] if t not in hidden]
+
+
 def tags(n):
-    return " ".join(order_tags(n.get("tags") or []))
+    return " ".join(order_tags(shown_tags(n.get("tags"))))
 
 
 def search_text(n):
@@ -3768,7 +3796,8 @@ def tags_view(stdscr, notes, focus=None, ui=None):
     visits. `focus` preselects a tag (used when ESC from a tag filter jumps
     back here). Enter returns the chosen tag name (the caller filters the
     notes list on it); ESC returns None (back); q returns MODAL_QUIT."""
-    stats = tag_stats(notes)
+    hidden = hidden_tags()
+    stats = {t: v for t, v in tag_stats(notes).items() if t not in hidden}
     if not stats:
         return None
     vs = {"mode_i": (ui or {}).get("mode_i", 0)}
@@ -9131,7 +9160,7 @@ def run(stdscr, imports=(), move=False):
 
         elif key_matches(k, KEY["tag_filter"]) and filtered and not state["trash_mode"]:
             note = filtered[state["cur"]]
-            ntags = list(note.get("tags") or [])
+            ntags = shown_tags(note.get("tags"))
             if ntags:
                 state["tagf"] = {"tags": ntags, "idx": -1}
                 state["dup_mode"] = None

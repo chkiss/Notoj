@@ -63,6 +63,12 @@ Membership is the tag, so the existing tag filter (`#arlyn` in search, or the
 tags view) already shows exactly one kajero. There is no separate kajero
 filter and no vault switching.
 
+Run inside a kajero, every note carries the kajero's tag, so notoj leaves it
+out of the display there: the list's tags column, the preview's tag row, the
+tags view (`T`) and the shared-tags filter (`t`). It stays in the files, so
+the vault root still files the notes, and searching `arlyn` still matches.
+`hide_kajero_tag = false` shows it again; `hidden_tags` hides others.
+
 ## What else changes
 
 - Links: `[[wikilinks]]`, canonicalization, backlinks and Vim's `gf` resolve

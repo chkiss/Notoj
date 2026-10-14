@@ -79,6 +79,8 @@ take `true/false/yes/no/on/off/1/0`. The main options:
 | `osc52` | `true` | Let copy-to-clipboard use the OSC 52 escape sequence (works over SSH if the terminal permits it); off leaves only the local tools |
 | `list_max_w` | `80` | Max width of the left list panel; extra width goes to the preview |
 | `tag_display_order` | `freq` | Tag order for display: `freq`, `freq_asc`, `name`, `stored` |
+| `hidden_tags` | *(none)* | Tags left out of the list, preview, `T` and `t` (still in the files and in search) |
+| `hide_kajero_tag` | `true` | Run inside a kajero, hide its tag, which every note there carries |
 | `undo.persist` | `true` | Keep the undo history across sessions |
 | `tag_preview` | `true` | Dimmed ghost suffix at the tag prompt previewing what `Tab` would complete to |
 | `color.<slot>` | *(none)* | Colors for `accent`, `date`, `tag`, `tag_inactive`, `tag_preview`, `preview`, `header`, `match`, `match_fuzzy`, `match_focus_fg`/`_bg`, `footer_bg`, `message_fg`/`_bg`, plus the `date_gradient` |

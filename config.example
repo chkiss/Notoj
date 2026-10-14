@@ -112,6 +112,15 @@
 #   stored    leave as written in the file
 # tag_display_order=freq
 
+# Tags left out of the display (list tags column, preview tag row, the tags
+# view T, the shared-tags filter t), comma- or space-separated. They stay in
+# the files and search still matches them. Default: none.
+# hidden_tags=draft, inbox
+
+# Run inside a kajero (see docs/kajeroj.md), every note carries its tag, so
+# it's hidden like a hidden_tags entry. Turn off to show it. Default: true.
+# hide_kajero_tag=true
+
 # Show a dimmed "ghost completion" suffix at the tag-prompt cursor while typing
 # — the first existing tag that extends what you've typed — so Tab isn't blind:
 # it completes to the next candidate, cycling most-used-first; Shift-Tab cycles

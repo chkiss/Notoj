@@ -7828,6 +7828,59 @@ class TestKajeroDiscovery(KajeroVaultCase):
         self.assertEqual(notoj.kajeroj(), {})
 
 
+class TestHiddenTags(KajeroVaultCase):
+    """Inside a kajero every note carries its tag, so display drops it."""
+
+    def setUp(self):
+        super().setUp()
+        self._cache = notoj._config_cache
+        notoj._config_cache = {}
+        notoj._hidden_cache = (None, None)
+
+    def tearDown(self):
+        notoj._config_cache = self._cache
+        notoj._hidden_cache = (None, None)
+        super().tearDown()
+
+    def _inside(self, **config):
+        notoj.NOTES_DIR = _make_kajero(self.vault, "arlyn")
+        notoj._config_cache = dict(config)
+        notoj._hidden_cache = (None, None)
+
+    def test_vault_root_hides_nothing(self):
+        _make_kajero(self.vault, "arlyn")
+        self.assertEqual(notoj.hidden_tags(), frozenset())
+        self.assertEqual(notoj.tags(make_note("a", tags=["arlyn", "sanofi"])),
+                         "arlyn sanofi")
+
+    def test_inside_a_kajero_its_tag_is_hidden(self):
+        self._inside()
+        n = make_note("a", tags=["arlyn", "account"])
+        self.assertEqual(notoj.tags(n), "account")
+        self.assertEqual(notoj.tags(make_note("b", tags=["arlyn"])), "")
+        self.assertEqual(n["tags"], ["arlyn", "account"])   # data untouched
+
+    def test_search_still_matches_a_hidden_tag(self):
+        self._inside()
+        n = make_note("a", tags=["arlyn"])
+        self.assertIn("arlyn", notoj.search_text(n)[2])
+
+    def test_hide_kajero_tag_off_shows_it(self):
+        self._inside(hide_kajero_tag="false")
+        self.assertEqual(notoj.tags(make_note("a", tags=["arlyn"])), "arlyn")
+
+    def test_hidden_tags_config_adds_more(self):
+        self._inside(hidden_tags="#meeting, standup  account")
+        self.assertEqual(notoj.hidden_tags(),
+                         {"arlyn", "meeting", "standup", "account"})
+        self.assertEqual(notoj.shown_tags(["standup", "sanofi", "arlyn"]),
+                         ["sanofi"])
+
+    def test_hidden_tags_config_works_at_the_vault_root(self):
+        notoj._config_cache = {"hidden_tags": "draft"}
+        self.assertEqual(notoj.tags(make_note("a", tags=["draft", "x"])), "x")
+
+
 class TestKajeroReading(KajeroVaultCase):
     def test_load_and_snapshot_include_kajero_notes(self):
         k = _make_kajero(self.vault, "arlyn")
