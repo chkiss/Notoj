@@ -7373,9 +7373,18 @@ def _enable_mouse_select():
     if not mask:
         return False
     try:
-        return bool(mm(mask))
+        ok = bool(mm(mask))
     except curses.error:
         return False
+    # No click wait: with ncurses' default 166 ms click interval, a press
+    # followed by drag motion inside that window never arrives as
+    # BUTTON1_PRESSED (seen in Apple Terminal), so the drag never starts and
+    # the band and copy are lost. notoj tells clicks from drags itself.
+    try:
+        curses.mouseinterval(0)
+    except (curses.error, AttributeError):
+        pass
+    return ok
 
 
 def paint_selection(stdscr, sel, mid, pw, h):

@@ -7884,6 +7884,33 @@ class TestKajeroDiscovery(KajeroVaultCase):
         self.assertEqual(notoj.kajeroj(), {})
 
 
+class TestEnableMouseSelect(unittest.TestCase):
+    """Drag-select turns off ncurses' click wait, which swallowed the press
+    of a drag in Apple Terminal."""
+
+    def _enable(self, granted=1):
+        with unittest.mock.patch.object(notoj, "_read_config", return_value={}), \
+             unittest.mock.patch.object(notoj.curses, "mousemask",
+                                        return_value=(granted, 0), create=True) as mm, \
+             unittest.mock.patch.object(notoj.curses, "mouseinterval",
+                                        create=True) as mi:
+            return notoj._enable_mouse_select(), mm, mi
+
+    def test_click_interval_is_zero(self):
+        ok, mm, mi = self._enable()
+        self.assertTrue(ok)
+        mm.assert_called_once()
+        mi.assert_called_once_with(0)
+
+    def test_off_in_config_touches_nothing(self):
+        with unittest.mock.patch.object(notoj, "_read_config",
+                                        return_value={"preview_select": "false"}), \
+             unittest.mock.patch.object(notoj.curses, "mouseinterval",
+                                        create=True) as mi:
+            self.assertFalse(notoj._enable_mouse_select())
+        mi.assert_not_called()
+
+
 class TestHiddenTags(KajeroVaultCase):
     """Inside a kajero every note carries its tag, so display drops it."""
 
