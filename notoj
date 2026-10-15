@@ -1828,6 +1828,24 @@ def notag(meta):
     return str(meta.get("notag", "")).strip().lower() in ("true", "yes", "1")
 
 
+FENCE_OPEN_RE = re.compile(r"(`{3,}|~{3,})")
+
+
+def fence_line(stripped, fence):
+    """(is this a fence line, the fence open after it) for a stripped line,
+    given the fence open before it (None outside one). CommonMark's rule: a
+    run of three or more backticks or tildes opens a fence, and only a line
+    made of the same character, at least as many of them, closes it. So a
+    ``` line inside a ~~~~ block is content, not the end of the block."""
+    if fence is None:
+        m = FENCE_OPEN_RE.match(stripped)
+        return (True, m.group(1)) if m else (False, None)
+    if (len(stripped) >= len(fence) and stripped[0] == fence[0]
+            and stripped == stripped[0] * len(stripped)):
+        return True, None
+    return False, fence
+
+
 def extract_hashtags(text):
     """Extract inline #hashtags, ignoring ASCII-art rows, fenced code blocks,
     and inline `code` spans (a #literal inside backticks is content, not a tag).
@@ -1847,13 +1865,13 @@ def extract_hashtags(text):
     cost is that a real tag sharing a line with a stray '#' is dropped.
     """
     raw = []
-    in_fence = False
+    fence = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
+        hit, fence = fence_line(stripped, fence)
+        if hit:
             continue
-        if in_fence:
+        if fence:
             continue
         # Only ~3% of lines in a real vault contain a '#' at all, and a line
         # without one can neither hold a tag nor a stray '#'. Skipping them
@@ -2226,13 +2244,13 @@ def extract_links(text):
     """Outgoing note links in a body, as .md filenames, deduped in order.
     Fenced code blocks are skipped, like hashtag extraction."""
     out = []
-    in_fence = False
+    fence = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
+        hit, fence = fence_line(stripped, fence)
+        if hit:
             continue
-        if in_fence:
+        if fence:
             continue
         out.extend(line_link_targets(line))
     return list(dict.fromkeys(out))
@@ -2243,13 +2261,13 @@ def linking_lines(text, fname):
     so a hand-typed [[title]] doesn't miss on capitalization)."""
     fl = fname.lower()
     out = []
-    in_fence = False
+    fence = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
+        hit, fence = fence_line(stripped, fence)
+        if hit:
             continue
-        if in_fence:
+        if fence:
             continue
         if any(t.lower() == fl for t in line_link_targets(line)):
             out.append(line)
@@ -2303,15 +2321,15 @@ def canonicalize_wikilinks(path):
         return "[[" + actual + "]]"
 
     out_lines = []
-    in_fence = False
+    fence = None
     changed = False
     for line in body.splitlines(keepends=True):
         stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
+        hit, fence = fence_line(stripped, fence)
+        if hit:
             out_lines.append(line)
             continue
-        if in_fence:
+        if fence:
             out_lines.append(line)
             continue
         new_line = WIKILINK_RE.sub(canon, line)
@@ -2683,13 +2701,13 @@ def schedule_inline_loop(path):
     head = text[:fm_end + 5]
     body_lines = text[fm_end + 5:].split("\n")
 
-    in_fence = False
+    fence = None
     for i, line in enumerate(body_lines):
         stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
+        hit, fence = fence_line(stripped, fence)
+        if hit:
             continue
-        if in_fence or STRAY_HASH_RE.search(line):
+        if fence or STRAY_HASH_RE.search(line):
             continue
         m = LOOP_SPEC_RE.search(line)
         if not m:

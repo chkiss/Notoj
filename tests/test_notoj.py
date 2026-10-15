@@ -1640,6 +1640,27 @@ class TestExtractHashtags(unittest.TestCase):
         text = "real #tag\n```\n#define FOO 1\n#include <x>\n```\n#after"
         self.assertEqual(notoj.extract_hashtags(text), ["tag", "after"])
 
+    def test_backtick_line_inside_tilde_fence_does_not_close_it(self):
+        """A pasted template's ``` block inside a ~~~~ block: its footer stays
+        inside the outer fence (the "Work skill copies" note picked up
+        #account this way)."""
+        text = ("#real\n~~~~\n# Customer\n```\n# Call\n```\n"
+                "Footer: #arlyn #account\n~~~~\n#after")
+        self.assertEqual(notoj.extract_hashtags(text), ["real", "after"])
+
+    def test_fence_closes_only_on_same_char_and_length(self):
+        text = "````\n```\n#inside\n````\n#out"
+        self.assertEqual(notoj.extract_hashtags(text), ["out"])
+        text = "~~~\n~~~ not a close\n#inside\n~~~~\n#out"
+        self.assertEqual(notoj.extract_hashtags(text), ["out"])
+
+    def test_fence_line_helper(self):
+        self.assertEqual(notoj.fence_line("```python", None), (True, "```"))
+        self.assertEqual(notoj.fence_line("text", None), (False, None))
+        self.assertEqual(notoj.fence_line("```", "~~~~"), (False, "~~~~"))
+        self.assertEqual(notoj.fence_line("~~~", "~~~~"), (False, "~~~~"))
+        self.assertEqual(notoj.fence_line("~~~~~", "~~~~"), (True, None))
+
     def test_inline_code_span_skipped(self):
         self.assertEqual(notoj.extract_hashtags("color is `#B5B5B5` here"), [])
         self.assertEqual(
