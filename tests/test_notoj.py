@@ -46,6 +46,7 @@ curses_stub.KEY_MOUSE = 631
 curses_stub.BUTTON1_RELEASED = 0x001
 curses_stub.BUTTON1_PRESSED = 0x002
 curses_stub.REPORT_MOUSE_POSITION = 0x08000000
+curses_stub.doupdate = lambda: None
 # Extended terminfo capability keys: ncurses assigns their keycodes
 # dynamically (they differ per TERM), so tests pick arbitrary codes and rely
 # on the keyname, exactly as the app does. Names mirror what real ncurses
@@ -6539,6 +6540,20 @@ class TestLaunch(unittest.TestCase):
     def test_missing_program_returns_false_and_records_name(self):
         self.assertFalse(notoj.launch(["notoj-no-such-editor-xyz"]))
         self.assertIn("notoj-no-such-editor-xyz", notoj.launch.missing)
+
+    def test_drag_motion_is_requested_after_curses_resumes(self):
+        # The terminal keeps the last tracking mode asked for, and curses
+        # re-sends click-only 1000 when it resumes. Drag motion (1002) must
+        # come after that, or select-to-copy lights one cell after any edit.
+        # Also on a missing editor, since suspend_curses turned 1002 off.
+        for cmd in (["true"], ["notoj-no-such-editor-xyz"]):
+            order = []
+            with unittest.mock.patch.object(
+                    notoj.curses, "doupdate", lambda: order.append("resume")), \
+                 unittest.mock.patch.object(
+                     notoj, "_drag_motion", lambda on: order.append(("drag", on))):
+                notoj.launch(cmd)
+            self.assertEqual(order, ["resume", ("drag", True)], cmd)
 
     def test_nonzero_exit_is_not_a_launch_failure(self):
         # The program ran (exit 1); that's the editor's business, not a missing

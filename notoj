@@ -1345,14 +1345,26 @@ def launch(cmd):
     """Run an interactive external command (the editor, vimdiff) after
     suspend_curses(). Returns True, or False if the program isn't installed —
     recording its name in launch.missing so the caller can report it on the
-    status bar instead of crashing out of the TUI with the screen suspended."""
+    status bar instead of crashing out of the TUI with the screen suspended.
+
+    Either way the mouse is taken back from the child, and in a set order. A
+    terminal keeps one tracking mode, the last one requested, and curses only
+    re-sends its own (click-only 1000) when it resumes on the next refresh.
+    Asking for drag motion (1002) before that resume let 1000 land last, so
+    after any editor session drags stopped arriving and select-to-copy lit
+    one cell. Resume first, then ask."""
     try:
         subprocess.call(cmd)
-        _drag_motion(True)   # the child owned the mouse; take it back
         return True
     except (FileNotFoundError, PermissionError) as e:
         launch.missing = f"{cmd[0]}: {e.strerror}" if cmd else "editor not found"
         return False
+    finally:
+        try:
+            curses.doupdate()   # leave endwin: curses re-sends its mouse mode
+        except curses.error:
+            pass
+        _drag_motion(True)   # then drag motion, so it is the mode that sticks
 
 
 launch.missing = None
