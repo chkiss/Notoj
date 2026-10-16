@@ -3192,6 +3192,21 @@ class TestRemoveTag(unittest.TestCase):
             self.assertNotIn("#loop", text)
             self.assertIn("Find a tax CPA", text)
 
+    def test_leaves_code_alone(self):
+        # Code is never read as a tag, so closing the loop mustn't edit it.
+        body = ("Find a tax CPA #loop 2026-06-12\n"
+                "Type `#loop 2w` to schedule.\n"
+                "```\n#loop 3d\n```\n")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._note(body=body))
+            self.assertTrue(notoj.remove_tag(path, "loop"))
+            text = open(path, encoding="utf-8").read()
+            self.assertNotIn("2026-06-12", text)       # prose tag + date go
+            self.assertIn("Type `#loop 2w` to schedule.\n", text)
+            self.assertIn("```\n#loop 3d\n```\n", text)
+
     def test_keeps_other_tags(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "note.md")

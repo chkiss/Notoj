@@ -2125,6 +2125,25 @@ def add_tags_keep_date(path, new_tags):
     return added
 
 
+def _sub_outside_code(pattern, text):
+    """re.sub(pattern, "", text), skipping fenced code blocks and inline
+    `code` spans — the text extract_hashtags never reads as tags, so removing
+    a tag must not touch it either."""
+    out, fence = [], None
+    for line in text.splitlines(keepends=True):
+        hit, fence = fence_line(line.strip(), fence)
+        if hit or fence:
+            out.append(line)
+            continue
+        pos = 0
+        for m in INLINE_CODE_RE.finditer(line):
+            out.append(re.sub(pattern, "", line[pos:m.start()]))
+            out.append(m.group())
+            pos = m.end()
+        out.append(re.sub(pattern, "", line[pos:]))
+    return "".join(out)
+
+
 def remove_tag(path, tag):
     """Remove a tag from a note: drop it from the YAML tags field and strip any
     matching inline #hashtag from the body (so sync_hashtags won't re-add it).
@@ -2154,7 +2173,7 @@ def remove_tag(path, tag):
         # 2026-06-12", see schedule_inline_loop), so closing the loop doesn't
         # strand an orphaned date in the prose.
         pat += r'([ \t]+\d{4}-\d{2}-\d{2}(?![\w-]))?'
-    body_stripped = re.sub(pat, '', body)
+    body_stripped = _sub_outside_code(pat, body)
 
     new_tags = [t for t in existing if t != tag]
     if new_tags == existing and body_stripped == body:
