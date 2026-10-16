@@ -5624,6 +5624,24 @@ class TestConfigPathXDG(unittest.TestCase):
         notoj._config_cache = None
         self.assertEqual(notoj.config_get("esc_delay"), "60")
 
+    def test_trailing_comments_are_dropped_but_hash_words_kept(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="notoj-xdg-")
+        os.makedirs(os.path.join(root, "notoj"))
+        with open(os.path.join(root, "notoj", "config"), "w",
+                  encoding="utf-8") as f:
+            # The shape config.example annotates its settings with.
+            f.write("color.accent    = 214      # titles, recent dates\n"
+                    "open_position = title #\n"
+                    "hidden_tags = #draft #inbox\n"
+                    "key.tag = #\n")
+        self._set_xdg(root)
+        notoj._config_cache = None
+        self.assertEqual(notoj.config_get("color.accent"), "214")
+        self.assertEqual(notoj.config_get("open_position"), "title")
+        self.assertEqual(notoj.config_get("hidden_tags"), "#draft #inbox")
+        self.assertEqual(notoj.config_get("key.tag"), "#")
+
 
 class TestEscDelayConfig(unittest.TestCase):
     """The `esc_delay` knob controls set_escdelay — bare-ESC latency vs

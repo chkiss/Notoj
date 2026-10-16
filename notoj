@@ -64,10 +64,15 @@ CONFIG_FILE = _config_file()   # import-time snapshot; see _config_file()
 
 _config_cache = None
 
+CONFIG_COMMENT_RE = re.compile(r"\s+#(\s.*)?$")
+
 
 def _read_config():
     """Parse the config file into a {key: value} dict (cached). Lines are
-    `key = value`; blank lines and lines starting with `#` are ignored."""
+    `key = value`; blank lines and lines starting with `#` are ignored, and
+    so is a trailing comment — a `#` after whitespace and followed by a space
+    or the line's end, the way config.example annotates its settings. A `#`
+    starting a word stays (`hidden_tags = #draft #inbox`)."""
     global _config_cache
     if _config_cache is None:
         _config_cache = {}
@@ -78,7 +83,8 @@ def _read_config():
                     if not s or s.startswith("#") or "=" not in s:
                         continue
                     k, v = s.split("=", 1)
-                    _config_cache[k.strip()] = v.strip()
+                    _config_cache[k.strip()] = CONFIG_COMMENT_RE.sub(
+                        "", v.strip()).strip()
         except FileNotFoundError:
             pass
     return _config_cache

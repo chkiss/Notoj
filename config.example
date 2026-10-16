@@ -1,6 +1,7 @@
 # notoj config — copy to ~/.config/notoj/config and uncomment what you want.
 # Simple `key = value` lines. Blank lines and lines starting with '#' are
-# ignored. Booleans accept true/false/yes/no/on/off/1/0.
+# ignored, as is a trailing "  # comment" after a value, so the annotated lines
+# below work once uncommented. Booleans accept true/false/yes/no/on/off/1/0.
 #
 # notes_dir is set for you on first run (notoj prompts and saves it). Every
 # other setting below is OPTIONAL and shown with its default.
