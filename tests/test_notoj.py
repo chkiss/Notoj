@@ -343,6 +343,12 @@ class TestParseFrontmatter(unittest.TestCase):
         result = self._parse("tags:\n")
         self.assertEqual(result["tags"], [])
 
+    def test_unindented_and_quoted_block_items(self):
+        # Other tools write the dash flush left, and may single-quote items.
+        result = self._parse("tags:\n- foo\n- 'bar baz'\n- \"qux\"\nid: x\n")
+        self.assertEqual(result["tags"], ["foo", "bar baz", "qux"])
+        self.assertEqual(result["id"], "x")
+
     def test_list_with_items(self):
         fm = "tags:\n  - foo\n  - bar\n"
         result = self._parse(fm)
@@ -2193,6 +2199,16 @@ class TestAddTags(unittest.TestCase):
             "\n"
             f"{body}"
         )
+
+    def test_adds_to_unindented_block_list(self):
+        # The old items are kept and rewritten into the one block, not left
+        # dangling below it.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "note.md")
+            self._write(path, self._note(tags_block="tags:\n- work\n- todo\n"))
+            self.assertEqual(notoj.add_tags(path, ["new"]), ["new"])
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("tags:\n  - work\n  - todo\n  - new\n---\n", text)
 
     def test_adds_to_empty_tags(self):
         with tempfile.TemporaryDirectory() as d:

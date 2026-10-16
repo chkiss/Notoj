@@ -500,6 +500,11 @@ def _parse_flow_list(inner):
     return cleaned
 
 
+# A block-list item line. YAML lets the dash sit at any indent, including
+# none (`tags:\n- a`), and other tools write it that way.
+LIST_ITEM_RE = re.compile(r"\s*- ")
+
+
 def parse_frontmatter(text):
     result = {}
     lines = text.splitlines()
@@ -509,10 +514,12 @@ def parse_frontmatter(text):
     while i < len(lines):
         line = lines[i]
 
-        if line.startswith("  - ") and current_list_key is not None:
-            item = line[4:]
-            if item.startswith('"') and item.endswith('"'):
+        if current_list_key is not None and LIST_ITEM_RE.match(line):
+            item = line.lstrip()[2:].strip()
+            if len(item) >= 2 and item[0] == item[-1] == '"':
                 item = item[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            elif len(item) >= 2 and item[0] == item[-1] == "'":
+                item = item[1:-1].replace("''", "'")
             result[current_list_key].append(item)
             i += 1
             continue
@@ -1906,7 +1913,7 @@ def rewrite_tags_field(fm_text, tags):
             skip_items = True
             continue
         if skip_items:
-            if line.startswith("  - "):
+            if LIST_ITEM_RE.match(line):
                 continue
             skip_items = False
         out.append(line)
@@ -6143,7 +6150,7 @@ def _tags_fm_lines(fm_lines):
     as a block list rather than a flow list."""
     out, in_block = [], False
     for i, line in enumerate(fm_lines):
-        if in_block and line.startswith("  - "):
+        if in_block and LIST_ITEM_RE.match(line):
             out.append(i)
             continue
         in_block = False
