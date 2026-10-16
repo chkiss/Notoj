@@ -980,6 +980,16 @@ def place_note(path, ks=None, n=None):
     return path, True
 
 
+FM_HOUSEKEEPING = ("title", "created", "modified", "version")
+
+
+def fm_incomplete(fm_text):
+    """Whether a frontmatter block lacks a housekeeping field notoj keeps:
+    the ones normalize_external_note backfills."""
+    meta = parse_frontmatter(fm_text)
+    return not all(meta.get(k) for k in FM_HOUSEKEEPING)
+
+
 def load():
     notes = []
     ks = kajeroj()
@@ -1002,6 +1012,15 @@ def load():
             n = load_md(f)
         if n and not n.get("id"):
             ensure_id(f)
+            text = None
+            n = load_md(f)
+        # A note that arrived with only part of a frontmatter block (a prep
+        # note written with just its meetings:, while notoj wasn't running)
+        # gets the rest now, as the rescan would have given it: created and
+        # modified from the mtime, version 1, and title from the first line.
+        # Without this it showed no dates and sorted as the oldest note.
+        if n and fm_incomplete(n.get("fm_text") or ""):
+            f = normalize_external_note(f) or f
             text = None
             n = load_md(f)
         if n:
