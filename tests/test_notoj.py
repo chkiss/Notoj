@@ -8527,6 +8527,21 @@ class TestAutoMergeConflicts(unittest.TestCase):
         self.assertEqual(self.log()[:2], ["merge conflict: Brief", "conflict copy: "
                          "Brief.sync-conflict-20261012-012633-3X7RBTB"])
 
+    def test_merged_modified_survives_the_next_normalize(self):
+        # Every machine must end on the same bytes: the merge's modified:
+        # (the later side's) stands, rather than this machine's merge time.
+        with open(self.note, "w", encoding="utf-8") as f:
+            f.write(_conflict_note(self.lines_with(8, "ours"),
+                                   modified="2026-10-12T05:00:00Z"))
+        with open(self.copy, "w", encoding="utf-8") as f:
+            f.write(_conflict_note(self.lines_with(1, "theirs"),
+                                   modified="2026-10-12T06:00:00Z"))
+        self.assertEqual(notoj.auto_merge_conflicts(), ["Brief"])
+        merged = open(self.note, encoding="utf-8").read()
+        notoj.normalize_external_note(self.note)
+        self.assertIn("modified: 2026-10-12T06:00:00Z", merged)
+        self.assertEqual(open(self.note, encoding="utf-8").read(), merged)
+
     def test_overlap_is_left_alone_and_not_retried(self):
         self.write(self.note, self.lines_with(3, "ours"))
         self.write(self.copy, self.lines_with(3, "theirs"))

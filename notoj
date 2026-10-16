@@ -4241,6 +4241,13 @@ def auto_merge_conflicts():
         snapshot_conflict_copy(conflict)
         if text != ours:
             atomic_write(original, text)
+            # mtime == the merged modified:, or the next scan's normalize pass
+            # stamps modified: with this machine's merge time and the two
+            # machines' merges stop being the same bytes.
+            fm = _split_frontmatter(text)[0]
+            ts = iso_to_ts(parse_frontmatter(fm[4:-5]).get("modified")) if fm else 0
+            if ts:
+                os.utime(original, (ts, ts))
         os.remove(conflict)
         rels = [os.path.relpath(p, NOTES_DIR) for p in (original, conflict)]
         subprocess.run(["git", "add", "-A", "--", *rels], cwd=NOTES_DIR, capture_output=True)
