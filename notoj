@@ -684,9 +684,10 @@ def ensure_canonical(path):
     Running this first in the adoption pipeline makes every downstream parse see
     plain LF text. Preserves mtime so the cleanup never reads as a fresh edit.
 
-    Returns the canonical text when it rewrote the file, else None, so a caller
-    that is about to parse the note can use it instead of reading again. None
-    means "nothing was changed", not "nothing is there"."""
+    Returns the note's canonical text, rewritten or already clean, so a caller
+    that is about to parse the note can use it instead of reading the file a
+    second time. None when the file can't be read, isn't UTF-8 (left alone),
+    or couldn't be rewritten — the caller then falls back to read_note_text."""
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -695,13 +696,12 @@ def ensure_canonical(path):
 
     had_bom = raw.startswith(b"\xef\xbb\xbf")
     body = raw[3:] if had_bom else raw
-    if not had_bom and b"\r" not in body:
-        return None
-
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
         return None  # not UTF-8 — leave it alone rather than corrupt it
+    if not had_bom and "\r" not in text:
+        return text
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     try:

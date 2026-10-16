@@ -6655,12 +6655,21 @@ class TestSingleReadLoadPath(unittest.TestCase):
                 notoj.sync_hashtags(path, self.NOTE.replace("Body", "Body #fromtext")))
             self.assertIn("fromtext", notoj.load_md(path)["tags"])
 
-    def test_ensure_canonical_returns_text_only_when_it_rewrites(self):
+    def test_ensure_canonical_returns_text_rewritten_or_not(self):
         with tempfile.TemporaryDirectory() as d:
             clean = os.path.join(d, "clean.md")
             with open(clean, "w", encoding="utf-8") as f:
                 f.write(self.NOTE)
-            self.assertIsNone(notoj.ensure_canonical(clean))   # nothing to do
+            mtime = os.path.getmtime(clean)
+            # Already clean: the text comes back (load() needs no second
+            # read) and the file is untouched.
+            self.assertEqual(notoj.ensure_canonical(clean), self.NOTE)
+            self.assertEqual(os.path.getmtime(clean), mtime)
+
+            latin = os.path.join(d, "latin.md")
+            with open(latin, "wb") as f:
+                f.write("caf\xe9\n".encode("latin-1"))
+            self.assertIsNone(notoj.ensure_canonical(latin))   # not UTF-8
 
             crlf = os.path.join(d, "crlf.md")
             with open(crlf, "wb") as f:
