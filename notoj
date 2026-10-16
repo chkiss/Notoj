@@ -2497,7 +2497,7 @@ def snooze_loop(review, note_id, now=None):
     the review dict and returns the number of days snoozed."""
     if now is None:
         now = datetime.now().timestamp()
-    review[note_id] = {"due": now + SNOOZE_DAYS * 86400}
+    schedule_loop(review, note_id, now + SNOOZE_DAYS * 86400)
     return SNOOZE_DAYS
 
 
@@ -2629,8 +2629,16 @@ def parse_calendar_when(s, now):
 
 
 def schedule_loop(review, note_id, due_ts):
-    """Set an explicit resurface date for a loop (mutates the review dict)."""
-    review[note_id] = {"due": due_ts}
+    """Set an explicit resurface date for a loop (mutates the review dict).
+
+    Keeps the entry's "src" — the inline "#loop <date>" last applied — so the
+    next save of the note sees that date as already applied and leaves this
+    due date standing (see schedule_inline_loop)."""
+    entry = {"due": due_ts}
+    src = (review.get(note_id) or {}).get("src")
+    if src:
+        entry["src"] = src
+    review[note_id] = entry
 
 
 def repeatable(state):

@@ -3691,6 +3691,20 @@ class TestScheduleInlineLoop(unittest.TestCase):
         notoj.schedule_inline_loop(p)
         self.assertEqual(notoj.load_review()["abc"]["due"], snoozed)
 
+    def test_real_snooze_and_schedule_survive_resave(self):
+        # The z and S paths replace the entry, so they must carry "src" over
+        # themselves; the test above only edits "due" in place.
+        p = self._note("renew passport #loop 2030-01-15\n")
+        notoj.schedule_inline_loop(p)
+        for defer in (lambda r: notoj.snooze_loop(r, "abc"),
+                      lambda r: notoj.schedule_loop(r, "abc", 2_000_000_000.0)):
+            review = notoj.load_review()
+            defer(review)
+            notoj.save_review(review)
+            due = review["abc"]["due"]
+            notoj.schedule_inline_loop(p)   # an ordinary re-save
+            self.assertEqual(notoj.load_review()["abc"]["due"], due)
+
     def test_hand_edited_date_reschedules(self):
         p = self._note("renew passport #loop 2030-01-15\n")
         notoj.schedule_inline_loop(p)
