@@ -2532,6 +2532,13 @@ PIN_BEFORE = 5 * 60       # seconds a note is pinned before its meeting starts
 PIN_AFTER = 60 * 60       # ...and after it ends
 MEETING_MARK = "»"
 
+
+def meeting_pins_on():
+    """The `meeting_pins` setting: off means no pinning and no », while the
+    notes keep their `meetings:` lines for when it's turned back on.
+    Default: on."""
+    return config_bool("meeting_pins", True)
+
 _MEETING_RE = re.compile(
     r"\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})"
     r"(?:\s+([+-])(\d{2}):?(\d{2}))?\s*$")
@@ -8205,8 +8212,10 @@ def draw(stdscr, notes, state):
     # flagged one — and absent entirely (costing nothing) when the view has
     # none, which is the normal case. A meeting-pinned note's » shares it.
     now_ts = datetime.now().timestamp()
+    pins_on = meeting_pins_on()
     gutter = ALERT_GUTTER if any(
-        n.get("title_conflict") or (n.get("meetings") and meeting_pin(n, now_ts))
+        n.get("title_conflict")
+        or (pins_on and n.get("meetings") and meeting_pin(n, now_ts))
         for n in notes) else 0
 
     # When sorted by creation date, the date and (age) columns track
@@ -8271,7 +8280,8 @@ def draw(stdscr, notes, state):
         # The marker sits in the band the fill above already painted, so on the
         # selected row it inverts with the rest of the row instead of punching
         # a hole in the highlight.
-        pin = meeting_pin(n, now_ts) if gutter and n.get("meetings") else None
+        pin = (meeting_pin(n, now_ts)
+               if pins_on and gutter and n.get("meetings") else None)
         if gutter and n.get("title_conflict"):
             addnstr_w(stdscr, y, 0, ALERT_MARK, gutter,
                       alert_attr() | (curses.A_REVERSE if selected else 0))
@@ -8814,7 +8824,8 @@ def run(stdscr, imports=(), move=False):
             else:
                 base, keep = notes, False
             ordered = order_notes(base, state["sort"], state["rev"], q, keep)
-            if plain and state["sort"] == "relevance" and not q.strip():
+            if (pin_key and plain and state["sort"] == "relevance"
+                    and not q.strip()):
                 ordered = pin_meetings(ordered, now)
             return ordered
 
@@ -8826,9 +8837,11 @@ def run(stdscr, imports=(), move=False):
         now = time.time()
         plain = not (state["trash_mode"] or state["dup_mode"] is not None
                      or state["review_mode"] or state["tagf"] is not None)
+        # With meeting_pins off nothing is walked, so nothing pins.
         if state.get("_mtg_src") is not notes:
             state["_mtg_src"] = notes
-            state["_mtg_notes"] = [n for n in notes if n.get("meetings")]
+            state["_mtg_notes"] = ([n for n in notes if n.get("meetings")]
+                                   if meeting_pins_on() else [])
         pin_key = tuple((id(n), p[1]) for n in state["_mtg_notes"]
                         for p in (meeting_pin(n, now),) if p)
         # A pin opening or closing moves rows under the cursor; keep it on the
