@@ -208,7 +208,11 @@ preview_scroll = page
 # per line, as date, start-end in 24-hour time, and UTC offset:
 #   meetings:
 #     - 2026-10-16 10:15-11:00 -04:00
-# Off: no pinning and no "»"; the meetings: lines stay put. Default: true.
+# It can also bring other notes along, by file name: while it is pinned, the
+# notes in its pin_with: list pin directly under it with a "›".
+#   pin_with:
+#     - AbbVie account
+# Off: no pinning and no "»" or "›"; the lines stay put. Default: true.
 # meeting_pins=true
 
 # ---- Colors ----

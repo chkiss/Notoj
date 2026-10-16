@@ -663,6 +663,7 @@ def load_md(path, text=None):
             "body_title": body_title,
             "tags": meta.get("tags") or [],
             "meetings": note_meetings(meta.get("meetings")),
+            "pin_with": note_names(meta.get("pin_with")),
             "system_tags": meta.get("system_tags") or [],
             "modificationDate": iso_to_ts(meta.get("modified")),
             "creationDate": iso_to_ts(meta.get("created")),
@@ -2527,10 +2528,20 @@ def find_duplicates(notes):
 # order and carries a » in the list's gutter: amber until the start, green
 # from then on. A series note lists every meeting; whichever is in its
 # window pins it.
+#
+# It can also name notes to bring along, by file name:
+#
+#   pin_with:
+#     - AbbVie account
+#
+# While the note is pinned, those pin directly under it with a ›, in the
+# same color: the context for the meeting (an account note, last week's
+# occurrence of a series).
 
 PIN_BEFORE = 5 * 60       # seconds a note is pinned before its meeting starts
 PIN_AFTER = 60 * 60       # ...and after it ends
 MEETING_MARK = "»"
+COMPANION_MARK = "›"
 
 
 def meeting_pins_on():
@@ -2538,6 +2549,7 @@ def meeting_pins_on():
     notes keep their `meetings:` lines for when it's turned back on.
     Default: on."""
     return config_bool("meeting_pins", True)
+
 
 _MEETING_RE = re.compile(
     r"\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})"
@@ -2584,16 +2596,68 @@ def meeting_pin(n, now):
     return best
 
 
+def note_names(value):
+    """The note names in a frontmatter `pin_with:` value — a list or one
+    inline entry — as lowercase file stems. A [[wikilink]] or a trailing .md
+    is accepted and stripped."""
+    items = value if isinstance(value, list) else [value] if value else []
+    out = []
+    for v in items:
+        s = str(v).strip() if v is not None else ""
+        if s.startswith("[[") and s.endswith("]]"):
+            s = s[2:-2].strip()
+        if s.lower().endswith(".md"):
+            s = s[:-3]
+        if s:
+            out.append(s.lower())
+    return out
+
+
+def pin_plan(notes, now):
+    """The pinned notes among `notes`, in the order they lead the list:
+    [(note, started, companion)]. Notes whose own meeting is on come by
+    meeting start (ties keep list order), each followed by the notes its
+    `pin_with:` names that are in `notes` too. A companion shows once, under
+    the earliest meeting naming it, and never under a note that is pinned in
+    its own right — that one keeps its own place."""
+    own = sorted(((p[0], i, n, p[1]) for i, n in enumerate(notes)
+                  if n.get("meetings")
+                  for p in (meeting_pin(n, now),) if p),
+                 key=lambda x: (x[0], x[1]))
+    if not own:
+        return []
+    own_ids = {id(n) for _, _, n, _ in own}
+    by_stem = {}
+    if any(n.get("pin_with") for _, _, n, _ in own):
+        for n in notes:
+            by_stem.setdefault(_stem(n["path"]).lower(), n)
+    plan, seen = [], set()
+    for _, _, n, started in own:
+        plan.append((n, started, False))
+        seen.add(id(n))
+        for name in n.get("pin_with") or ():
+            c = by_stem.get(name)
+            if c is not None and id(c) not in seen and id(c) not in own_ids:
+                plan.append((c, started, True))
+                seen.add(id(c))
+    return plan
+
+
 def pin_meetings(notes, now):
-    """`notes` with every pinned one moved to the front, earliest meeting
-    first; the rest keep their order."""
-    pinned = sorted(((p[0], i, n) for i, n in enumerate(notes)
-                     for p in (meeting_pin(n, now),) if p),
-                    key=lambda x: (x[0], x[1]))
-    if not pinned:
+    """`notes` with the pinned ones (pin_plan) moved to the front; the rest
+    keep their order."""
+    plan = pin_plan(notes, now)
+    if not plan:
         return notes
-    first = {id(n) for _, _, n in pinned}
-    return [n for _, _, n in pinned] + [n for n in notes if id(n) not in first]
+    first = {id(n) for n, _, _ in plan}
+    return [n for n, _, _ in plan] + [n for n in notes if id(n) not in first]
+
+
+def pin_marks(notes, now):
+    """{id(note): (started, companion)} for the pinned notes among `notes`,
+    for drawing their » or ›."""
+    return {id(n): (started, companion)
+            for n, started, companion in pin_plan(notes, now)}
 
 
 # ----------------------------
@@ -8212,11 +8276,9 @@ def draw(stdscr, notes, state):
     # flagged one — and absent entirely (costing nothing) when the view has
     # none, which is the normal case. A meeting-pinned note's » shares it.
     now_ts = datetime.now().timestamp()
-    pins_on = meeting_pins_on()
-    gutter = ALERT_GUTTER if any(
-        n.get("title_conflict")
-        or (pins_on and n.get("meetings") and meeting_pin(n, now_ts))
-        for n in notes) else 0
+    marks = pin_marks(notes, now_ts) if meeting_pins_on() else {}
+    gutter = ALERT_GUTTER if marks or any(
+        n.get("title_conflict") for n in notes) else 0
 
     # When sorted by creation date, the date and (age) columns track
     # creationDate instead of modificationDate — forward and reverse alike, with
@@ -8280,14 +8342,15 @@ def draw(stdscr, notes, state):
         # The marker sits in the band the fill above already painted, so on the
         # selected row it inverts with the rest of the row instead of punching
         # a hole in the highlight.
-        pin = (meeting_pin(n, now_ts)
-               if pins_on and gutter and n.get("meetings") else None)
+        mark = marks.get(id(n))
         if gutter and n.get("title_conflict"):
             addnstr_w(stdscr, y, 0, ALERT_MARK, gutter,
                       alert_attr() | (curses.A_REVERSE if selected else 0))
-        elif pin:
-            addnstr_w(stdscr, y, 0, MEETING_MARK, gutter,
-                      meeting_attr(pin[1]) | (curses.A_REVERSE if selected else 0))
+        elif mark:
+            started, companion = mark
+            addnstr_w(stdscr, y, 0, COMPANION_MARK if companion else MEETING_MARK,
+                      gutter,
+                      meeting_attr(started) | (curses.A_REVERSE if selected else 0))
         t_clip = clip_to_width(t, title_w - gutter)
         draw_line_highlighted(stdscr, y, gutter, t_clip, title_w - gutter,
                               attr_title, row_hi)

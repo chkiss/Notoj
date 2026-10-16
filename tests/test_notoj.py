@@ -3019,6 +3019,51 @@ class TestMeetingPins(unittest.TestCase):
         self.assertEqual([n["path"] for n in out],
                          ["/v/sooner.md", "/v/a.md", "/v/later.md", "/v/b.md"])
 
+    def test_pin_with_names_are_normalized(self):
+        self.assertEqual(
+            notoj.note_names(["AbbVie account", "[[Product sync 2026-10-09]]",
+                              "Planning.md", "  ", None]),
+            ["abbvie account", "product sync 2026-10-09", "planning"])
+        self.assertEqual(notoj.note_names("AbbVie account"), ["abbvie account"])
+        self.assertEqual(notoj.note_names(None), [])
+
+    def test_load_md_reads_pin_with(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "m.md")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("---\nid: m\npin_with:\n  - AbbVie account\ntags: []\n---\n\nM\n")
+            self.assertEqual(notoj.load_md(p)["pin_with"], ["abbvie account"])
+
+    def test_companions_pin_under_their_meeting(self):
+        acct = make_note(path="/v/AbbVie account.md")
+        other = make_note(path="/v/Other.md")
+        mtg = self.note("2026-10-16 10:15-11:00 -04:00", path="/v/AbbVie readout.md")
+        mtg["pin_with"] = ["abbvie account", "no such note"]   # a miss is skipped
+        out = notoj.pin_meetings([other, acct, mtg], self.START - 60)
+        self.assertEqual([n["path"] for n in out],
+                         ["/v/AbbVie readout.md", "/v/AbbVie account.md", "/v/Other.md"])
+        marks = notoj.pin_marks([other, acct, mtg], self.START - 60)
+        self.assertEqual(marks, {id(mtg): (False, False), id(acct): (False, True)})
+        self.assertIsNone(notoj.pin_marks([acct], self.START - 60).get(id(acct)))
+
+    def test_a_shared_companion_shows_once_under_the_earliest_meeting(self):
+        acct = make_note(path="/v/Acme account.md")
+        first = self.note("2026-10-16 10:15-11:00 -04:00", path="/v/first.md")
+        second = self.note("2026-10-16 10:30-11:00 -04:00", path="/v/second.md")
+        for m in (first, second):
+            m["pin_with"] = ["acme account"]
+        out = notoj.pin_meetings([acct, second, first], self.START + 20 * 60)
+        self.assertEqual([n["path"] for n in out],
+                         ["/v/first.md", "/v/Acme account.md", "/v/second.md"])
+
+    def test_a_companion_with_its_own_meeting_keeps_its_own_place(self):
+        later = self.note("2026-10-16 10:30-11:00 -04:00", path="/v/later.md")
+        first = self.note("2026-10-16 10:15-11:00 -04:00", path="/v/first.md")
+        first["pin_with"] = ["later"]
+        plan = notoj.pin_plan([later, first], self.START + 20 * 60)
+        self.assertEqual([(n["path"], c) for n, _, c in plan],
+                         [("/v/first.md", False), ("/v/later.md", False)])
+
     def test_setting_defaults_on_and_turns_off(self):
         saved = notoj._config_cache
         self.addCleanup(setattr, notoj, "_config_cache", saved)
