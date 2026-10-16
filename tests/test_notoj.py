@@ -3019,6 +3019,15 @@ class TestMeetingPins(unittest.TestCase):
         self.assertEqual([n["path"] for n in out],
                          ["/v/sooner.md", "/v/a.md", "/v/later.md", "/v/b.md"])
 
+    def test_setting_defaults_on_and_turns_off(self):
+        saved = notoj._config_cache
+        self.addCleanup(setattr, notoj, "_config_cache", saved)
+        notoj._config_cache = {}
+        self.assertTrue(notoj.meeting_pins_on())
+        for v in ("false", "off", "no", "0"):
+            notoj._config_cache = {"meeting_pins": v}
+            self.assertFalse(notoj.meeting_pins_on(), v)
+
     def test_nothing_pinned_returns_the_list_itself(self):
         notes = [make_note(path="/v/a.md"), self.note("2026-10-09 10:15-11:00 -04:00")]
         self.assertIs(notoj.pin_meetings(notes, self.START), notes)

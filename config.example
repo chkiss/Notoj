@@ -201,6 +201,16 @@ preview_scroll = page
 #           Vim — with the narrowed term only placing the cursor
 # vim_search_scope = term
 
+# Pin a note to the top of the plain notes list (default order, no search)
+# while one of its meetings is on: from 5 minutes before it starts until an
+# hour after it ends, with a "»" in front of the title (color.meeting_soon,
+# then color.meeting_live). A note lists its meetings in its frontmatter, one
+# per line, as date, start-end in 24-hour time, and UTC offset:
+#   meetings:
+#     - 2026-10-16 10:15-11:00 -04:00
+# Off: no pinning and no "»"; the meetings: lines stay put. Default: true.
+# meeting_pins=true
+
 # ---- Colors ----
 # Names: black red green yellow blue magenta cyan white default — or a 0-255
 # palette index on 256-color terminals.
@@ -239,10 +249,6 @@ preview_scroll = page
 #                              # within 5 minutes (default: color.accent)
 #   color.meeting_live = 40    # the same "»" once the meeting has started,
 #                              # until an hour after it ends (8 colors: green)
-# A note pins to the top of the plain notes list in its default order while
-# a meeting in its frontmatter is on, written one per line:
-#   meetings:
-#     - 2026-10-16 10:15-11:00 -04:00   # date, start-end (24h), UTC offset
 # Status/alert bar — the amber band that shows cross-session undo prompts and
 # stale-skip notices. Defaults to the inverse of the title look (the accent
 # and footer-band colors swapped: default-fg text on an amber band). Override
