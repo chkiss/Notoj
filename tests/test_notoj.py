@@ -2454,6 +2454,16 @@ class TestEditLock(unittest.TestCase):
         self._lock_as(path, os.getpid())
         self.assertFalse(notoj.edit_locked(path))
 
+    def test_reused_pid_of_another_program_is_not_notoj(self):
+        # A crashed notoj's pid now belongs to something else. On macOS there
+        # is no /proc, and any live pid used to count, locking the note.
+        p = subprocess.Popen(["sleep", "30"])
+        try:
+            self.assertFalse(notoj._pid_is_notoj(p.pid))
+        finally:
+            p.kill()
+            p.wait()
+
     def test_open_note_holds_lock_while_editing(self):
         path = self._note()
         n = notoj.load_md(path)

@@ -4992,9 +4992,10 @@ def release_edit_lock(lock):
 
 
 def _pid_is_notoj(pid):
-    """Whether `pid` is a live notoj process. The cmdline check keeps a lock
-    left by a crashed instance from blocking its note forever once the pid is
-    reused; without /proc, any live pid counts."""
+    """Whether `pid` is a live notoj process. The command-line check keeps a
+    lock left by a crashed instance from blocking its note forever once the
+    pid is reused: read from /proc on Linux, from ps where there is no /proc
+    (macOS). Only when neither can answer does any live pid count."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -5005,9 +5006,16 @@ def _pid_is_notoj(pid):
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             return b"notoj" in f.read()
     except FileNotFoundError:
-        return not os.path.isdir("/proc")
+        if os.path.isdir("/proc"):
+            return False
     except OSError:
         return True
+    try:
+        r = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                           capture_output=True, text=True)
+    except OSError:
+        return True
+    return r.returncode == 0 and "notoj" in r.stdout
 
 
 def edit_locked(path):
