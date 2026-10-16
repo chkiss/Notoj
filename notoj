@@ -1263,12 +1263,18 @@ def set_cursor_style(code):
 def set_term_title(text):
     """Set the terminal tab/window title. OSC 0 everywhere except GNU
     screen, which ignores it and wants its native ESC-k sequence; tmux
-    relays OSC 0 to the outer terminal (and names the pane)."""
+    relays OSC 0 to the outer terminal (and names the pane). The text is kept
+    in set_term_title.last so launch() can put it back after a child program
+    (Vim with 'title') renames the window."""
+    set_term_title.last = text
     try:
         sys.stdout.write(_title_seq(text))
         sys.stdout.flush()
     except (OSError, ValueError):
         pass
+
+
+set_term_title.last = None
 
 
 def _title_seq(text):
@@ -1365,6 +1371,11 @@ def launch(cmd):
         except curses.error:
             pass
         _drag_motion(True)   # then drag motion, so it is the mode that sticks
+        # Vim with 'title' renames the window and leaves "Thanks for flying
+        # Vim" on quit; the loop only re-sends the title when the selected
+        # note changes, so every path back from a child restores it here.
+        if set_term_title.last is not None:
+            set_term_title(set_term_title.last)
 
 
 launch.missing = None

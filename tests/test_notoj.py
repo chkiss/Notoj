@@ -6555,6 +6555,21 @@ class TestLaunch(unittest.TestCase):
                 notoj.launch(cmd)
             self.assertEqual(order, ["resume", ("drag", True)], cmd)
 
+    def test_title_is_put_back_after_the_child(self):
+        # Vim with 'title' renames the window. Paths into Vim other than
+        # opening a note (vimdiff from H or g h, conflicts, an abandoned new
+        # note) don't change the selection, so launch() restores the title.
+        saved = notoj.set_term_title.last
+        self.addCleanup(setattr, notoj.set_term_title, "last", saved)
+        for cmd in (["true"], ["notoj-no-such-editor-xyz"]):
+            written = []
+            with unittest.mock.patch.object(notoj.sys, "stdout") as out:
+                out.write.side_effect = written.append
+                notoj.set_term_title("notoj: A")
+                written.clear()
+                notoj.launch(cmd)
+            self.assertIn(notoj._title_seq("notoj: A"), written, cmd)
+
     def test_nonzero_exit_is_not_a_launch_failure(self):
         # The program ran (exit 1); that's the editor's business, not a missing
         # binary — launch reports success so no false "can't launch" message.
