@@ -24,7 +24,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     import readline
@@ -662,6 +662,7 @@ def load_md(path, text=None):
             "title_conflict": conflict,
             "body_title": body_title,
             "tags": meta.get("tags") or [],
+            "meetings": note_meetings(meta.get("meetings")),
             "system_tags": meta.get("system_tags") or [],
             "modificationDate": iso_to_ts(meta.get("modified")),
             "creationDate": iso_to_ts(meta.get("created")),
@@ -2490,6 +2491,83 @@ def find_duplicates(notes):
         if len(group) >= 2:
             result.extend(sorted(group, key=lambda n: n.get("modificationDate") or 0, reverse=True))
     return result
+
+
+# ----------------------------
+# Meeting pins
+# ----------------------------
+#
+# A note's frontmatter can list the meetings it preps or logs:
+#
+#   meetings:
+#     - 2026-10-16 10:15-11:00 -04:00
+#
+# date, start-end in 24-hour time, and the UTC offset (without one, local
+# time). From five minutes before a meeting starts until an hour after it
+# ends, the note is pinned to the top of the plain notes list in its default
+# order and carries a » in the list's gutter: amber until the start, green
+# from then on. A series note lists every meeting; whichever is in its
+# window pins it.
+
+PIN_BEFORE = 5 * 60       # seconds a note is pinned before its meeting starts
+PIN_AFTER = 60 * 60       # ...and after it ends
+MEETING_MARK = "»"
+
+_MEETING_RE = re.compile(
+    r"\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})"
+    r"(?:\s+([+-])(\d{2}):?(\d{2}))?\s*$")
+
+
+def parse_meeting(s):
+    """(start_ts, end_ts) for one `meetings:` entry, or None if it doesn't
+    parse. An end at or before the start runs past midnight into the next
+    day."""
+    m = _MEETING_RE.match(str(s or ""))
+    if not m:
+        return None
+    y, mo, d, h1, m1, h2, m2, sign, oh, om = m.groups()
+    tz = None
+    if sign:
+        off = timedelta(hours=int(oh), minutes=int(om))
+        tz = timezone(off if sign == "+" else -off)
+    try:
+        start = datetime(int(y), int(mo), int(d), int(h1), int(m1), tzinfo=tz)
+        end = start.replace(hour=int(h2), minute=int(m2))
+    except ValueError:
+        return None
+    if end <= start:
+        end += timedelta(days=1)
+    return start.timestamp(), end.timestamp()
+
+
+def note_meetings(value):
+    """The parsed meetings from a frontmatter `meetings:` value — a list, or
+    a single entry written inline. Entries that don't parse are skipped."""
+    items = value if isinstance(value, list) else [value] if value else []
+    return [t for t in (parse_meeting(v) for v in items) if t]
+
+
+def meeting_pin(n, now):
+    """(start_ts, started) of the meeting holding `n` pinned at `now`, or None.
+    With several in their window at once, the earliest start wins."""
+    best = None
+    for start, end in n.get("meetings") or ():
+        if start - PIN_BEFORE <= now < end + PIN_AFTER:
+            if best is None or start < best[0]:
+                best = (start, now >= start)
+    return best
+
+
+def pin_meetings(notes, now):
+    """`notes` with every pinned one moved to the front, earliest meeting
+    first; the rest keep their order."""
+    pinned = sorted(((p[0], i, n) for i, n in enumerate(notes)
+                     for p in (meeting_pin(n, now),) if p),
+                    key=lambda x: (x[0], x[1]))
+    if not pinned:
+        return notes
+    first = {id(n) for _, _, n in pinned}
+    return [n for _, _, n in pinned] + [n for n in notes if id(n) not in first]
 
 
 # ----------------------------
@@ -5859,6 +5937,13 @@ def init_colors():
     # glyph in a gutter of its own is never mistaken for one.
     pair(13, _cfg_color("color.alert", curses.COLOR_RED), -1)
 
+    # The » on a note a meeting has pinned: the accent (amber) until the
+    # meeting starts, then green — the "just edited" end of the date gradient
+    # — while it runs and for the hour after.
+    pair(16, _cfg_color("color.meeting_soon", accent), -1)
+    pair(17, _cfg_color("color.meeting_live",
+                        40 if curses.COLORS >= 256 else curses.COLOR_GREEN), -1)
+
     # Approximate hits: the word the note actually uses where the query was a
     # near-miss ("syncthing" for a typed "syncthign"). Same hue as an exact
     # match — it IS the match — but muted, because the text on screen isn't
@@ -6028,6 +6113,12 @@ ALERT_GUTTER = 2          # marker + one space, carved out of the title column
 def alert_attr():
     """Attr for the list's alert marker (see init_pair 13)."""
     return curses.color_pair(13) | curses.A_BOLD
+
+
+def meeting_attr(started):
+    """Attr for the » on a meeting-pinned note: pair 16 before the meeting
+    starts, 17 once it has (see init_colors)."""
+    return curses.color_pair(17 if started else 16) | curses.A_BOLD
 
 
 def match_focus_attr():
@@ -8093,8 +8184,11 @@ def draw(stdscr, notes, state):
     # tag columns stay where they are. Keyed off the whole view and not just
     # the rows on screen, so titles don't jog sideways as you scroll past the
     # flagged one — and absent entirely (costing nothing) when the view has
-    # none, which is the normal case.
-    gutter = ALERT_GUTTER if any(n.get("title_conflict") for n in notes) else 0
+    # none, which is the normal case. A meeting-pinned note's » shares it.
+    now_ts = datetime.now().timestamp()
+    gutter = ALERT_GUTTER if any(
+        n.get("title_conflict") or (n.get("meetings") and meeting_pin(n, now_ts))
+        for n in notes) else 0
 
     # When sorted by creation date, the date and (age) columns track
     # creationDate instead of modificationDate — forward and reverse alike, with
@@ -8126,7 +8220,6 @@ def draw(stdscr, notes, state):
     # LEFT PANE
     # ----------------------------
 
-    now_ts = datetime.now().timestamp()
     for i, n in enumerate(visible):
         y = i + 1
 
@@ -8159,9 +8252,13 @@ def draw(stdscr, notes, state):
         # The marker sits in the band the fill above already painted, so on the
         # selected row it inverts with the rest of the row instead of punching
         # a hole in the highlight.
+        pin = meeting_pin(n, now_ts) if gutter and n.get("meetings") else None
         if gutter and n.get("title_conflict"):
             addnstr_w(stdscr, y, 0, ALERT_MARK, gutter,
                       alert_attr() | (curses.A_REVERSE if selected else 0))
+        elif pin:
+            addnstr_w(stdscr, y, 0, MEETING_MARK, gutter,
+                      meeting_attr(pin[1]) | (curses.A_REVERSE if selected else 0))
         t_clip = clip_to_width(t, title_w - gutter)
         draw_line_highlighted(stdscr, y, gutter, t_clip, title_w - gutter,
                               attr_title, row_hi)
@@ -8697,7 +8794,32 @@ def run(stdscr, imports=(), move=False):
                 base, keep = filter_by_tags(notes, tagf_active(state["tagf"])), False
             else:
                 base, keep = notes, False
-            return order_notes(base, state["sort"], state["rev"], q, keep)
+            ordered = order_notes(base, state["sort"], state["rev"], q, keep)
+            if plain and state["sort"] == "relevance" and not q.strip():
+                ordered = pin_meetings(ordered, now)
+            return ordered
+
+        # Which notes a meeting pins right now, and whether each has started.
+        # Part of the key below, so the list reorders when a pin window opens
+        # or closes — the idle tick runs this loop even with no key pressed.
+        # Only notes with meetings are walked, and that list is rebuilt only
+        # when a reload swaps in a new notes list.
+        now = time.time()
+        plain = not (state["trash_mode"] or state["dup_mode"] is not None
+                     or state["review_mode"] or state["tagf"] is not None)
+        if state.get("_mtg_src") is not notes:
+            state["_mtg_src"] = notes
+            state["_mtg_notes"] = [n for n in notes if n.get("meetings")]
+        pin_key = tuple((id(n), p[1]) for n in state["_mtg_notes"]
+                        for p in (meeting_pin(n, now),) if p)
+        # A pin opening or closing moves rows under the cursor; keep it on the
+        # note it was on rather than on whatever slid into its row.
+        if (state.get("_pin_key", pin_key) != pin_key
+                and "_restore_path" not in state):
+            prev = state["_filter_cache"].get("val") or []
+            if 0 <= state["cur"] < len(prev):
+                state["_restore_path"] = prev[state["cur"]]["path"]
+        state["_pin_key"] = pin_key
 
         # Rank/filter only when an input that affects the list changes — not on
         # every j/k. id(notes) flips exactly when an incremental reload swaps in
@@ -8711,6 +8833,7 @@ def run(stdscr, imports=(), move=False):
             state["trash_mode"], state["_trash_gen"],
             id(state["dup_mode"]), state["review_mode"], id(state["_review"]),
             tuple(tagf_active(state["tagf"])) if state["tagf"] is not None else None,
+            pin_key,
         )
         filtered = frame_cache(state["_filter_cache"], filter_key, compute_filtered)
 

@@ -2953,6 +2953,77 @@ class TestFindLoops(unittest.TestCase):
         self.assertEqual(len(notoj.find_loops([n], review, now=now)), 1)
 
 
+class TestMeetingPins(unittest.TestCase):
+    # 2026-10-16 10:15-11:00 at -04:00, as epoch seconds.
+    START = datetime(2026, 10, 16, 14, 15, tzinfo=timezone.utc).timestamp()
+    END = START + 45 * 60
+
+    def note(self, *meetings, path="/v/n.md"):
+        n = make_note(path=path)
+        n["meetings"] = [notoj.parse_meeting(m) for m in meetings]
+        return n
+
+    def test_parses_the_written_forms(self):
+        want = (self.START, self.END)
+        for s in ("2026-10-16 10:15-11:00 -04:00", "2026-10-16 10:15–11:00 -0400",
+                  "  2026-10-16 10:15 - 11:00 -04:00 "):
+            self.assertEqual(notoj.parse_meeting(s), want, s)
+
+    def test_rejects_what_isnt_a_meeting(self):
+        for s in ("", None, "tomorrow", "2026-10-16", "2026-02-30 10:00-11:00",
+                  "2026-10-16 25:00-26:00"):
+            self.assertIsNone(notoj.parse_meeting(s), s)
+
+    def test_end_before_start_runs_past_midnight(self):
+        start, end = notoj.parse_meeting("2026-10-16 23:30-00:30 -04:00")
+        self.assertEqual(end - start, 3600)
+
+    def test_no_offset_means_local_time(self):
+        start, _ = notoj.parse_meeting("2026-10-16 10:15-11:00")
+        self.assertEqual(start, datetime(2026, 10, 16, 10, 15).timestamp())
+
+    def test_load_md_reads_a_list_or_one_inline_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "m.md")
+            for block in ("meetings:\n  - 2026-10-16 10:15-11:00 -04:00\n  - junk\n",
+                          'meetings: "2026-10-16 10:15-11:00 -04:00"\n'):
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(f"---\nid: m\n{block}tags: []\n---\n\nM\n")
+                self.assertEqual(notoj.load_md(p)["meetings"],
+                                 [(self.START, self.END)], block)
+
+    def test_window_runs_five_minutes_before_to_an_hour_after_the_end(self):
+        n = self.note("2026-10-16 10:15-11:00 -04:00")
+        pin = lambda t: notoj.meeting_pin(n, t)
+        self.assertIsNone(pin(self.START - 5 * 60 - 1))
+        self.assertEqual(pin(self.START - 5 * 60), (self.START, False))  # amber
+        self.assertEqual(pin(self.START), (self.START, True))            # green
+        self.assertEqual(pin(self.END + 3600 - 1), (self.START, True))
+        self.assertIsNone(pin(self.END + 3600))
+
+    def test_series_note_pins_on_whichever_meeting_is_on(self):
+        n = self.note("2026-10-09 10:15-11:00 -04:00", "2026-10-16 10:15-11:00 -04:00")
+        self.assertEqual(notoj.meeting_pin(n, self.START + 60), (self.START, True))
+        self.assertIsNone(notoj.meeting_pin(n, self.START + 3 * 86400))
+
+    def test_pinned_notes_lead_earliest_first_and_the_rest_keep_order(self):
+        a = make_note(path="/v/a.md")
+        later = self.note("2026-10-16 10:30-11:00 -04:00", path="/v/later.md")
+        b = make_note(path="/v/b.md")
+        sooner = self.note("2026-10-16 10:15-11:00 -04:00", path="/v/sooner.md")
+        # 10:35: both are on. At 10:16 the 10:30 one isn't pinned yet.
+        out = notoj.pin_meetings([a, later, b, sooner], self.START + 20 * 60)
+        self.assertEqual([n["path"] for n in out],
+                         ["/v/sooner.md", "/v/later.md", "/v/a.md", "/v/b.md"])
+        out = notoj.pin_meetings([a, later, b, sooner], self.START + 60)
+        self.assertEqual([n["path"] for n in out],
+                         ["/v/sooner.md", "/v/a.md", "/v/later.md", "/v/b.md"])
+
+    def test_nothing_pinned_returns_the_list_itself(self):
+        notes = [make_note(path="/v/a.md"), self.note("2026-10-09 10:15-11:00 -04:00")]
+        self.assertIs(notoj.pin_meetings(notes, self.START), notes)
+
+
 class TestSnoozeLoop(unittest.TestCase):
     def test_fixed_horizon_does_not_grow(self):
         now = 1_000_000.0

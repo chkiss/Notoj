@@ -235,6 +235,14 @@ preview_scroll = page
 #   color.footer_bg = 239      # footer status-bar band (256-color only)
 #   color.alert     = 1        # the list's "!" marker (red) on a note whose
 #                              # frontmatter title: and first line disagree
+#   color.meeting_soon = 214   # the list's "»" on a note whose meeting starts
+#                              # within 5 minutes (default: color.accent)
+#   color.meeting_live = 40    # the same "»" once the meeting has started,
+#                              # until an hour after it ends (8 colors: green)
+# A note pins to the top of the plain notes list in its default order while
+# a meeting in its frontmatter is on, written one per line:
+#   meetings:
+#     - 2026-10-16 10:15-11:00 -04:00   # date, start-end (24h), UTC offset
 # Status/alert bar — the amber band that shows cross-session undo prompts and
 # stale-skip notices. Defaults to the inverse of the title look (the accent
 # and footer-band colors swapped: default-fg text on an amber band). Override
