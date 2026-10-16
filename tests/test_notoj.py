@@ -3324,6 +3324,21 @@ class TestUndoRedoActions(unittest.TestCase):
             finally:
                 self._restore()
 
+    def test_trash_redo_skips_a_note_that_moved(self):
+        # Restored, then renamed elsewhere before the redo: skipped, not a
+        # FileNotFoundError out of the main loop.
+        with tempfile.TemporaryDirectory() as d:
+            self._setdirs(d)
+            try:
+                p = os.path.join(d, "note.md")
+                self._loopnote(p)
+                act = {"kind": "trash", "orig": p, "trash": notoj.do_trash(p)}
+                notoj.undo_action(act)
+                os.rename(p, os.path.join(d, "retitled.md"))
+                self.assertIs(notoj.redo_action(act), notoj.STALE)
+            finally:
+                self._restore()
+
     def test_defer_undo_redo(self):
         # "defer" backs both snooze (z) and schedule (S): they only differ in
         # how the due date is computed, so one undo path covers both.

@@ -5266,6 +5266,11 @@ def redo_action(act, review=None):
             save_review(review)
         return act.get("path")
     if kind == "trash":
+        # The note may have moved since the undo restored it: into a kajero
+        # this session (followed), or renamed elsewhere (skipped, not crashed).
+        act["orig"] = live_path(act["orig"])
+        if not os.path.exists(act["orig"]):
+            return STALE
         act["trash"] = do_trash(act["orig"])
         return None
     if kind == "loop":
@@ -8468,7 +8473,7 @@ def run(stdscr, imports=(), move=False):
         act = state["_redo"][-1]
         focus = redo_action(act, state["_review"])
         if focus is STALE:
-            push_msg("redo skipped — note changed elsewhere since this edit")
+            push_msg("redo skipped — note changed or moved elsewhere since")
             return
         state["_redo"].pop()
         state["_undo"].append(act)
