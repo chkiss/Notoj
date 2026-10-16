@@ -5448,8 +5448,12 @@ def import_file(src, move=False):
     copy2 carries the source mtime across, so created:/modified: say when the
     file was really written rather than when it was imported — the same contract
     a note gets when it arrives in the notes dir over Syncthing. With move=True
-    the original is removed once the vault copy is committed."""
-    dest = unique_dest(os.path.basename(src))
+    the original is removed once the vault copy is committed.
+
+    The copy is always named .md: notes are found by that extension, and the
+    title rename below only fires when the title differs from the file name,
+    so a "Recipes.markdown" titled "Recipes" would otherwise never show up."""
+    dest = unique_dest(_stem(src) + ".md")
     try:
         shutil.copy2(src, dest)
     except OSError:

@@ -4976,6 +4976,12 @@ class TestImportFile(unittest.TestCase):
         self.assertEqual(n["tags"], ["tagged"])   # body hashtag synced
         self.assertEqual(self.commits, ["import: my draft.md"])
 
+    def test_markdown_extension_lands_as_md(self):
+        # Title matches the stem, so no title rename would fix the extension.
+        final = notoj.import_file(self._src("Recipes.markdown", b"Recipes\n\nsoup\n"))
+        self.assertEqual(os.path.basename(final), "Recipes.md")
+        self.assertIn(final, notoj.note_files())
+
     def test_source_mtime_becomes_created_and_modified(self):
         final = notoj.import_file(self._src())
         text = open(final, encoding="utf-8").read()
