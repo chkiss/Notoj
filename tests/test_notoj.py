@@ -3024,6 +3024,47 @@ class TestMeetingPins(unittest.TestCase):
         self.assertIs(notoj.pin_meetings(notes, self.START), notes)
 
 
+class TestLoadCompletesPartialFrontmatter(unittest.TestCase):
+    """A note on disk at startup with only part of a frontmatter block (a
+    prep note written with just meetings:, while notoj wasn't running) gets
+    the rest, as the rescan gives a note that arrives while notoj runs."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self._old = notoj.NOTES_DIR, notoj.REVIEW_FILE
+        notoj.NOTES_DIR = self.d
+        notoj.REVIEW_FILE = os.path.join(self.d, ".notoj_review.json")
+        self.addCleanup(lambda: setattr(notoj, "NOTES_DIR", self._old[0])
+                        or setattr(notoj, "REVIEW_FILE", self._old[1]))
+
+    def test_meetings_only_block_is_completed_and_keeps_its_date(self):
+        p = os.path.join(self.d, "Acme kickoff 2026-10-20.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("---\nmeetings:\n  - 2026-10-20 10:00-10:30 -04:00\n---\n\n"
+                    "Acme kickoff 2026-10-20\n\nprep\n")
+        os.utime(p, (1_791_000_000, 1_791_000_000))
+        [n] = notoj.load()
+        self.assertEqual(n["title"], "Acme kickoff 2026-10-20")
+        self.assertEqual(n["modificationDate"], 1_791_000_000)
+        self.assertEqual(n["creationDate"], 1_791_000_000)
+        self.assertEqual(n["version"], "1")
+        self.assertTrue(n["id"])
+        self.assertEqual(len(n["meetings"]), 1)
+        self.assertEqual(int(os.path.getmtime(n["path"])), 1_791_000_000)
+
+    def test_a_complete_block_is_not_rewritten(self):
+        p = os.path.join(self.d, "Done.md")
+        text = ("---\nid: d\ntitle: Done\ncreated: 2026-10-01T00:00:00Z\n"
+                "modified: 2026-10-01T00:00:00Z\nversion: 3\ntags: []\n---\n\nDone\n")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        with unittest.mock.patch.object(notoj, "normalize_external_note") as norm:
+            notoj.load()
+        norm.assert_not_called()
+        self.assertEqual(open(p, encoding="utf-8").read(), text)
+
+
 class TestSnoozeLoop(unittest.TestCase):
     def test_fixed_horizon_does_not_grow(self):
         now = 1_000_000.0
