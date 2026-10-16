@@ -3277,32 +3277,47 @@ def git_commit(msg):
 # History helpers
 # ----------------------------
 
-def get_note_commits(path):
+def _follow_log(path, limit=None):
+    """The note's commits, newest first, following renames: one dict per
+    commit with its hash, time, subject and the note's path AT that commit.
+    Every retitle renames the file, so a commit before the last retitle
+    holds the note under another name, and only that name finds it there."""
     rel = os.path.relpath(path, NOTES_DIR)
-    r = subprocess.run(
-        ["git", "log", "--follow", "--format=%H\t%at\t%s", "--", rel],
-        cwd=NOTES_DIR, capture_output=True, text=True
-    )
+    argv = ["git", "log", "--follow", "--format=%x01%H\t%at\t%s", "--name-only"]
+    if limit:
+        argv.append(f"-n{limit}")
+    r = subprocess.run(argv + ["--", rel], cwd=NOTES_DIR,
+                       capture_output=True, text=True)
     commits = []
-    for line in r.stdout.strip().splitlines():
-        if "\t" not in line:
+    for entry in r.stdout.split("\x01")[1:]:
+        lines = [l for l in entry.splitlines() if l]
+        if not lines or lines[0].count("\t") < 2:
             continue
-        h, ts, msg = line.split("\t", 2)
-        commits.append({"hash": h, "ts": float(ts), "msg": msg})
+        h, ts, msg = lines[0].split("\t", 2)
+        commits.append({"hash": h, "ts": float(ts), "msg": msg,
+                        "path": lines[1] if len(lines) > 1 else rel})
     return commits
 
 
-def get_diff_lines(path, commit_hash):
+def get_note_commits(path):
+    return _follow_log(path)
+
+
+def get_diff_lines(path, commit_hash, old_rel=None):
+    """The diff from the note at `commit_hash` to the file now. `old_rel` is
+    the note's path in that commit when it has been renamed since; naming
+    both paths with -M diffs the content instead of showing a whole new file."""
     rel = os.path.relpath(path, NOTES_DIR)
+    paths = [old_rel, rel] if old_rel and old_rel != rel else [rel]
     r = subprocess.run(
-        ["git", "diff", commit_hash, "--", rel],
+        ["git", "diff", "-M", commit_hash, "--", *paths],
         cwd=NOTES_DIR, capture_output=True, text=True
     )
     return r.stdout.splitlines()
 
 
-def open_vimdiff_at(path, commit_hash):
-    rel = os.path.relpath(path, NOTES_DIR)
+def open_vimdiff_at(path, commit_hash, old_rel=None):
+    rel = old_rel or os.path.relpath(path, NOTES_DIR)
     r = subprocess.run(
         ["git", "show", f"{commit_hash}:{rel}"],
         cwd=NOTES_DIR, capture_output=True, text=True
@@ -3320,15 +3335,10 @@ def open_vimdiff_at(path, commit_hash):
 
 
 def open_hist_last(n):
-    rel = os.path.relpath(n["path"], NOTES_DIR)
-    r = subprocess.run(
-        ["git", "log", "--follow", "-2", "--format=%H", "--", rel],
-        cwd=NOTES_DIR, capture_output=True, text=True
-    )
-    hashes = [h for h in r.stdout.strip().splitlines() if h]
-    if len(hashes) < 2:
+    commits = _follow_log(n["path"], 2)
+    if len(commits) < 2:
         return False
-    open_vimdiff_at(n["path"], hashes[1])
+    open_vimdiff_at(n["path"], commits[1]["hash"], commits[1]["path"])
     return True
 
 
@@ -3746,7 +3756,8 @@ def hist_view(stdscr, n):
     vs = {"diff": []}
 
     def load_diff(cur):
-        vs["diff"] = get_diff_lines(n["path"], commits[cur]["hash"])
+        vs["diff"] = get_diff_lines(n["path"], commits[cur]["hash"],
+                                    commits[cur]["path"])
         # The rows are keyed by the selected commit, but the diff behind a
         # given index can also change under a "/" refilter — drop them.
         prev.invalidate()
@@ -3791,7 +3802,8 @@ def hist_view(stdscr, n):
         if k in [ord("q"), 27]:
             return (None,)
         if k in (10, 13):
-            open_vimdiff_at(n["path"], commits[st["sel"]]["hash"])
+            open_vimdiff_at(n["path"], commits[st["sel"]]["hash"],
+                            commits[st["sel"]]["path"])
             stdscr.refresh()
         return None
 
@@ -4129,17 +4141,9 @@ def _split_frontmatter(text):
 
 def _note_versions(path):
     """Texts of `path` in git history, newest first, following renames."""
-    rel = os.path.relpath(path, NOTES_DIR)
-    r = subprocess.run(
-        ["git", "log", "--follow", f"-n{AUTO_MERGE_HISTORY}",
-         "--format=%x01%H", "--name-only", "--", rel],
-        cwd=NOTES_DIR, capture_output=True, text=True)
     texts = []
-    for entry in r.stdout.split("\x01")[1:]:
-        lines = [l for l in entry.splitlines() if l]
-        if len(lines) < 2:
-            continue
-        s = subprocess.run(["git", "show", f"{lines[0]}:{lines[1]}"],
+    for c in _follow_log(path, AUTO_MERGE_HISTORY):
+        s = subprocess.run(["git", "show", f"{c['hash']}:{c['path']}"],
                            cwd=NOTES_DIR, capture_output=True, text=True)
         if s.returncode == 0:
             texts.append(s.stdout)

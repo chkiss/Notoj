@@ -6649,37 +6649,63 @@ class TestCountNoteCommits(unittest.TestCase):
 
 
 class TestOpenHistLast(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        self._old = notoj.NOTES_DIR
+        notoj.NOTES_DIR = self.d
+        _git(self.d, "init", "-q")
+        _git(self.d, "config", "user.name", "t")
+        _git(self.d, "config", "user.email", "t@t")
+
+    def tearDown(self):
+        notoj.NOTES_DIR = self._old
+        self.tmp.cleanup()
+
+    def commit(self, name, text, msg):
+        with open(os.path.join(self.d, name), "w", encoding="utf-8") as f:
+            f.write(text)
+        _git(self.d, "add", "-A")
+        _git(self.d, "commit", "-q", "-m", msg)
+
     def test_two_versions_diffs_and_reports_success(self):
-        saved = notoj.NOTES_DIR
-        notoj.NOTES_DIR = "/vault"
-        try:
-            fake = unittest.mock.Mock(return_value=types.SimpleNamespace(
-                stdout="aaa\nbbb\n"))
-            opened = []
-            with unittest.mock.patch.object(notoj.subprocess, "run", fake), \
-                 unittest.mock.patch.object(
-                     notoj, "open_vimdiff_at",
-                     lambda path, h: opened.append((path, h))):
-                ok = notoj.open_hist_last({"path": "/vault/a.md"})
-            self.assertTrue(ok)
-            self.assertEqual(opened, [("/vault/a.md", "bbb")])
-        finally:
-            notoj.NOTES_DIR = saved
+        self.commit("a.md", "a\n\none\n", "one")
+        h1 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.d,
+                            capture_output=True, text=True).stdout.strip()
+        self.commit("a.md", "a\n\ntwo\n", "two")
+        opened = []
+        with unittest.mock.patch.object(
+                notoj, "open_vimdiff_at",
+                lambda path, h, old: opened.append((path, h, old))):
+            ok = notoj.open_hist_last({"path": os.path.join(self.d, "a.md")})
+        self.assertTrue(ok)
+        self.assertEqual(opened, [(os.path.join(self.d, "a.md"), h1, "a.md")])
 
     def test_single_version_reports_failure_without_opening(self):
-        saved = notoj.NOTES_DIR
-        notoj.NOTES_DIR = "/vault"
-        try:
-            with unittest.mock.patch.object(
-                    notoj.subprocess, "run",
-                    unittest.mock.Mock(return_value=types.SimpleNamespace(
-                        stdout="aaa\n"))), \
-                 unittest.mock.patch.object(
-                     notoj, "open_vimdiff_at") as opened:
-                self.assertFalse(notoj.open_hist_last({"path": "/vault/a.md"}))
-                opened.assert_not_called()
-        finally:
-            notoj.NOTES_DIR = saved
+        self.commit("a.md", "a\n", "one")
+        with unittest.mock.patch.object(notoj, "open_vimdiff_at") as opened:
+            self.assertFalse(notoj.open_hist_last(
+                {"path": os.path.join(self.d, "a.md")}))
+            opened.assert_not_called()
+
+    def test_history_follows_a_retitle(self):
+        # Every retitle renames the file. The commit before it holds the note
+        # under its old name, so that is the name to show and diff against.
+        self.commit("Old.md", "Old\n\nline a\nline b\nline c\n", "one")
+        os.rename(os.path.join(self.d, "Old.md"), os.path.join(self.d, "New.md"))
+        self.commit("New.md", "New\n\nline a\nline b\nline c\n", "retitle")
+        new = os.path.join(self.d, "New.md")
+        commits = notoj.get_note_commits(new)
+        self.assertEqual([c["path"] for c in commits], ["New.md", "Old.md"])
+        diff = notoj.get_diff_lines(new, commits[1]["hash"], commits[1]["path"])
+        self.assertIn("-Old", diff)
+        self.assertIn("+New", diff)
+        self.assertNotIn("new file mode 100644", diff)
+        shown = []
+        with unittest.mock.patch.object(notoj, "launch", shown.append), \
+             unittest.mock.patch.object(notoj, "suspend_curses", lambda: None):
+            notoj.open_vimdiff_at(new, commits[1]["hash"], commits[1]["path"])
+        self.assertEqual(len(shown), 1)   # git show found the old name
 
 
 class TestHistLaunch(unittest.TestCase):
