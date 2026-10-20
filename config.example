@@ -213,7 +213,7 @@ preview_scroll = page
 #   pin_with:
 #     - AbbVie account
 # Off: no pinning and no "»" or "›"; the lines stay put. Default: true.
-# meeting_pins=true
+# meeting_pins = true
 
 # ---- Colors ----
 # Names: black red green yellow blue magenta cyan white default — or a 0-255
