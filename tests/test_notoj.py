@@ -3107,6 +3107,19 @@ class TestLoadCompletesPartialFrontmatter(unittest.TestCase):
         self.assertEqual(len(n["meetings"]), 1)
         self.assertEqual(int(os.path.getmtime(n["path"])), 1_791_000_000)
 
+    def test_an_untitled_note_is_left_alone(self):
+        # A new, empty note has no title: line and no body to derive one
+        # from. That isn't incomplete: normalize would change nothing, so
+        # load() must not send it through normalize on every launch.
+        p = os.path.join(self.d, "Untitled.md")
+        text = ("---\nid: u\ncreated: 2026-10-01T00:00:00Z\n"
+                "modified: 2026-10-01T00:00:00Z\nversion: 1\ntags: []\n---\n\n")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        with unittest.mock.patch.object(notoj, "normalize_external_note") as norm:
+            notoj.load()
+        norm.assert_not_called()
+
     def test_a_complete_block_is_not_rewritten(self):
         p = os.path.join(self.d, "Done.md")
         text = ("---\nid: d\ntitle: Done\ncreated: 2026-10-01T00:00:00Z\n"
