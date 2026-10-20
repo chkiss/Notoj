@@ -3056,6 +3056,24 @@ class TestMeetingPins(unittest.TestCase):
         self.assertEqual([n["path"] for n in out],
                          ["/v/first.md", "/v/Acme account.md", "/v/second.md"])
 
+    def test_a_shared_stem_resolves_to_the_meeting_notes_own_folder(self):
+        # Two notes named Standup in different kajeroj: the meeting note's
+        # own folder wins, whatever order the notes came in. With no note
+        # in that folder, the first in list order is taken, every time.
+        a = make_note(path="/v/clients/Standup.md")
+        b = make_note(path="/v/internal/Standup.md")
+        mtg = self.note("2026-10-16 10:15-11:00 -04:00", path="/v/internal/Sync.md")
+        mtg["pin_with"] = ["standup"]
+        for order in ([a, b, mtg], [b, a, mtg]):
+            plan = notoj.pin_plan(order, self.START)
+            self.assertEqual([n["path"] for n, _, _ in plan],
+                             ["/v/internal/Sync.md", "/v/internal/Standup.md"])
+        far = self.note("2026-10-16 10:15-11:00 -04:00", path="/v/other/Sync.md")
+        far["pin_with"] = ["standup"]
+        plan = notoj.pin_plan([b, a, far], self.START)
+        self.assertEqual([n["path"] for n, _, _ in plan],
+                         ["/v/other/Sync.md", "/v/internal/Standup.md"])
+
     def test_a_companion_with_its_own_meeting_keeps_its_own_place(self):
         later = self.note("2026-10-16 10:30-11:00 -04:00", path="/v/later.md")
         first = self.note("2026-10-16 10:15-11:00 -04:00", path="/v/first.md")

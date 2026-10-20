@@ -2637,17 +2637,29 @@ def pin_plan(notes, now):
     by_stem = {}
     if any(n.get("pin_with") for _, _, n, _ in own):
         for n in notes:
-            by_stem.setdefault(_stem(n["path"]).lower(), n)
+            by_stem.setdefault(_stem(n["path"]).lower(), []).append(n)
     plan, seen = [], set()
     for _, _, n, started in own:
         plan.append((n, started, False))
         seen.add(id(n))
+        here = os.path.dirname(n["path"])
         for name in n.get("pin_with") or ():
-            c = by_stem.get(name)
+            c = companion_for(by_stem.get(name) or (), here)
             if c is not None and id(c) not in seen and id(c) not in own_ids:
                 plan.append((c, started, True))
                 seen.add(id(c))
     return plan
+
+
+def companion_for(candidates, here):
+    """The note a `pin_with:` name means when several share its stem: the
+    one in the meeting note's own folder `here` (a kajero keeps an account
+    note beside its meetings), else the first in list order. None when
+    there are none."""
+    for c in candidates:
+        if os.path.dirname(c["path"]) == here:
+            return c
+    return candidates[0] if candidates else None
 
 
 def pin_order(notes, plan):
