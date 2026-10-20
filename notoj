@@ -2650,21 +2650,30 @@ def pin_plan(notes, now):
     return plan
 
 
-def pin_meetings(notes, now):
-    """`notes` with the pinned ones (pin_plan) moved to the front; the rest
-    keep their order."""
-    plan = pin_plan(notes, now)
+def pin_order(notes, plan):
+    """`notes` with the notes in `plan` (a pin_plan) moved to the front; the
+    rest keep their order."""
     if not plan:
         return notes
     first = {id(n) for n, _, _ in plan}
     return [n for n, _, _ in plan] + [n for n in notes if id(n) not in first]
 
 
+def plan_marks(plan):
+    """{id(note): (started, companion)} for a pin_plan, for drawing each
+    pinned note's » or ›."""
+    return {id(n): (started, companion) for n, started, companion in plan}
+
+
+def pin_meetings(notes, now):
+    """`notes` with the pinned ones (pin_plan) moved to the front; the rest
+    keep their order."""
+    return pin_order(notes, pin_plan(notes, now))
+
+
 def pin_marks(notes, now):
-    """{id(note): (started, companion)} for the pinned notes among `notes`,
-    for drawing their » or ›."""
-    return {id(n): (started, companion)
-            for n, started, companion in pin_plan(notes, now)}
+    """{id(note): (started, companion)} for the pinned notes among `notes`."""
+    return plan_marks(pin_plan(notes, now))
 
 
 # ----------------------------
@@ -8281,9 +8290,10 @@ def draw(stdscr, notes, state):
     # tag columns stay where they are. Keyed off the whole view and not just
     # the rows on screen, so titles don't jog sideways as you scroll past the
     # flagged one — and absent entirely (costing nothing) when the view has
-    # none, which is the normal case. A meeting-pinned note's » shares it.
+    # none, which is the normal case. A meeting-pinned note's » shares it;
+    # the main loop works the marks out with the list, once per change.
     now_ts = datetime.now().timestamp()
-    marks = pin_marks(notes, now_ts) if meeting_pins_on() else {}
+    marks = state.get("_pin_marks") or {}
     gutter = ALERT_GUTTER if marks or any(
         n.get("title_conflict") for n in notes) else 0
 
@@ -8882,6 +8892,34 @@ def run(stdscr, imports=(), move=False):
             state["_trash"] = load_trash()
             state["_trash_gen"] += 1
 
+        # Which notes a meeting pins right now, and whether each has started.
+        # Part of the key below, so the list reorders when a pin window opens
+        # or closes — the idle tick runs this loop even with no key pressed.
+        # Only notes with meetings are walked, and that list is rebuilt only
+        # when a reload swaps in a new notes list. Pins apply to the plain
+        # notes list in its default order with no search: everywhere else
+        # the key is empty, so a window opening there neither reorders the
+        # view nor recomputes it, and no » is drawn.
+        now = time.time()
+        pins_apply = (state["sort"] == "relevance" and not q.strip()
+                      and not (state["trash_mode"] or state["dup_mode"] is not None
+                               or state["review_mode"] or state["tagf"] is not None))
+        # With meeting_pins off nothing is walked, so nothing pins.
+        if state.get("_mtg_src") is not notes:
+            state["_mtg_src"] = notes
+            state["_mtg_notes"] = ([n for n in notes if n.get("meetings")]
+                                   if meeting_pins_on() else [])
+        pin_key = tuple((id(n), p[1]) for n in state["_mtg_notes"]
+                        for p in (meeting_pin(n, now),) if p) if pins_apply else ()
+        # A pin opening or closing moves rows under the cursor; keep it on the
+        # note it was on rather than on whatever slid into its row.
+        if (state.get("_pin_key", pin_key) != pin_key
+                and "_restore_path" not in state):
+            prev = state["_filter_cache"].get("val") or []
+            if 0 <= state["cur"] < len(prev):
+                state["_restore_path"] = prev[state["cur"]]["path"]
+        state["_pin_key"] = pin_key
+
         def compute_filtered():
             if state["trash_mode"]:
                 base, keep = state["_trash"], False
@@ -8894,34 +8932,12 @@ def run(stdscr, imports=(), move=False):
             else:
                 base, keep = notes, False
             ordered = order_notes(base, state["sort"], state["rev"], q, keep)
-            if (pin_key and plain and state["sort"] == "relevance"
-                    and not q.strip()):
-                ordered = pin_meetings(ordered, now)
-            return ordered
-
-        # Which notes a meeting pins right now, and whether each has started.
-        # Part of the key below, so the list reorders when a pin window opens
-        # or closes — the idle tick runs this loop even with no key pressed.
-        # Only notes with meetings are walked, and that list is rebuilt only
-        # when a reload swaps in a new notes list.
-        now = time.time()
-        plain = not (state["trash_mode"] or state["dup_mode"] is not None
-                     or state["review_mode"] or state["tagf"] is not None)
-        # With meeting_pins off nothing is walked, so nothing pins.
-        if state.get("_mtg_src") is not notes:
-            state["_mtg_src"] = notes
-            state["_mtg_notes"] = ([n for n in notes if n.get("meetings")]
-                                   if meeting_pins_on() else [])
-        pin_key = tuple((id(n), p[1]) for n in state["_mtg_notes"]
-                        for p in (meeting_pin(n, now),) if p)
-        # A pin opening or closing moves rows under the cursor; keep it on the
-        # note it was on rather than on whatever slid into its row.
-        if (state.get("_pin_key", pin_key) != pin_key
-                and "_restore_path" not in state):
-            prev = state["_filter_cache"].get("val") or []
-            if 0 <= state["cur"] < len(prev):
-                state["_restore_path"] = prev[state["cur"]]["path"]
-        state["_pin_key"] = pin_key
+            # The pinned notes' » and › are worked out here, with the order,
+            # once per list change: draw() runs on every keystroke and only
+            # reads them.
+            plan = pin_plan(ordered, now) if pin_key else []
+            state["_pin_marks"] = plan_marks(plan)
+            return pin_order(ordered, plan)
 
         # Rank/filter only when an input that affects the list changes — not on
         # every j/k. id(notes) flips exactly when an incremental reload swaps in
