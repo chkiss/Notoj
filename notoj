@@ -149,7 +149,8 @@ def action_keycode(action, default_label):
 # remappable to a different 2-key chord via key.<action> = <two chars>.
 CHORD_DEFAULTS = {"goto_top": "gg", "dups_view": "gd",
                   "trash_view": "gt", "resurface": "gr",
-                  "hist_diff": "gh", "title_conflicts": "g!"}
+                  "hist_diff": "gh", "title_conflicts": "g!",
+                  "fixes": "g?"}
 CHORD_ACTIONS = set(CHORD_DEFAULTS)
 
 
@@ -284,6 +285,9 @@ KEYMAP = [
               "left alone — for each, sync the first line to the title, keep both, or "
               "open it. Such notes are marked with a red ! in the list and counted in "
               "the header"),
+        ("fixes", "g ?", "walk the notes left to fix, counted in the header: notes "
+              "changed while notoj was closed, which launch leaves unadopted when "
+              "5 or more arrive at once — adopt each, adopt the rest, open it, or skip"),
         ("backlinks", "b", "backlinks: notes linking to the selected one via [[wikilinks]] "
               "or [text](note.md) links (Enter jumps to the linking note; / searches)"),
         ("help", "?", "this key reference"),
@@ -672,6 +676,10 @@ def load_md(path, text=None):
             # not: the two disagree and neither has been clobbered yet.
             "title_conflict": conflict,
             "body_title": body_title,
+            # title: and modified: as written, for load() to tell whether
+            # adopting the note would change them (adoption_edits).
+            "fm_title": fm_title,
+            "fm_modified": meta.get("modified") or "",
             "tags": meta.get("tags") or [],
             "meetings": note_meetings(meta.get("meetings")),
             "pin_with": note_names(meta.get("pin_with")),
@@ -1013,6 +1021,7 @@ def fm_incomplete(fm_text):
 
 def load():
     notes = []
+    pending = []   # indexes into notes of those adopting would edit
     ks = kajeroj()
 
     for f in note_files():
@@ -1055,9 +1064,44 @@ def load():
             f, placed = place_note(f, ks, n)
             if placed:
                 n = load_md(f) or n
+            if adoption_due(n):
+                pending.append(len(notes))
             notes.append(n)
 
+    # Notes changed outside notoj while it was closed: the rescan would have
+    # adopted each as it arrived (title from the first line, modified from
+    # the mtime). A few are adopted now the same way. ADOPT_AT_START or more
+    # at once is a batch rewrite nobody watched happen, so those stay as they
+    # are, flagged for the g? walk and a warning at launch.
+    if len(pending) < ADOPT_AT_START:
+        for i in pending:
+            f = normalize_external_note(notes[i]["path"]) or notes[i]["path"]
+            notes[i] = load_md(f) or notes[i]
+    else:
+        for i in pending:
+            notes[i]["unadopted"] = adoption_due(notes[i])
+
     return notes
+
+
+# Notes changed while notoj was closed that startup adopts on its own; at
+# this many or more it leaves them all for the g? walk instead.
+ADOPT_AT_START = 5
+
+
+def adoption_due(n):
+    """The edits adopting loaded note `n` would make (adoption_edits), {}
+    when none. A note open in an editor counts as having none: the rescan
+    defers those too, and adopting would rewrite the file under the editor."""
+    path = n["path"]
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return {}
+    edits = adoption_edits(path, n.get("fm_title") or "",
+                           n.get("body_title") or "",
+                           n.get("fm_modified") or "", mtime)
+    return edits if edits and not edit_locked(path) else {}
 
 
 # ----------------------------
@@ -1438,6 +1482,26 @@ def file_snapshot(directory):
     return snap
 
 
+def mtime_iso(mtime):
+    """A file mtime as the UTC timestamp notoj writes in `modified:`."""
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def adoption_edits(path, fm_title, body_title, fm_modified, mtime):
+    """The title: and modified: edits normalize_external_note would make to
+    a note, as {"title": (old, new), "modified": (old, new)} holding only the
+    fields that change. load() asks this of every note at startup, from what
+    load_md already parsed, to count the edits before making any."""
+    edits = {}
+    if title_differs(path, fm_title, body_title):
+        edits["title"] = (fm_title, body_title)
+    new_modified = mtime_iso(mtime)
+    if new_modified != fm_modified:
+        edits["modified"] = (fm_modified, new_modified)
+    return edits
+
+
 def normalize_external_note(path):
     """Fix stale title: and modified: frontmatter after an external edit.
 
@@ -1472,13 +1536,7 @@ def normalize_external_note(path):
         body = body[1:]
 
     new_title = derive_title(body)
-
-    file_mtime_iso = datetime.fromtimestamp(
-        mtime, tz=timezone.utc
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    old_title = meta.get("title") or ""
-    old_modified = meta.get("modified") or ""
+    file_mtime_iso = mtime_iso(mtime)
 
     fm_lines = text[4:fm_end].splitlines()
     has_created, has_modified, has_version = fm_housekeeping(fm_lines)
@@ -1487,8 +1545,10 @@ def normalize_external_note(path):
     # would revert the edit and rename the file back under it. The note keeps
     # both values until the conflict is resolved — load_md flags it and the UI
     # prompts on open. Everything else (modified, backfill) proceeds normally.
-    title_changed = title_differs(path, old_title, new_title)
-    modified_changed = file_mtime_iso != old_modified
+    edits = adoption_edits(path, meta.get("title") or "", new_title,
+                           meta.get("modified") or "", mtime)
+    title_changed = "title" in edits
+    modified_changed = "modified" in edits
     # Externally-produced files often arrive with only a partial frontmatter
     # block — e.g. an id/title/tags header and none of the housekeeping dates.
     # Backfill whatever is missing so the note sorts, dedupes, and resurfaces
@@ -5865,6 +5925,33 @@ def title_conflict_notice(n):
     ]
 
 
+def fix_list(notes):
+    """The notes the g? walk offers: those launch left unadopted."""
+    return [n for n in notes if n.get("unadopted")]
+
+
+def unadopted_notice(n, left):
+    """The g? walk's screen for a note launch left unadopted: the edits
+    adopting it would make, and the choices."""
+    lines = [
+        "This note changed while notoj was closed and wasn't adopted.",
+        "",
+        f"Launch adopts such notes as a rescan would, but not {ADOPT_AT_START}",
+        "or more at once. Adopting this one changes:",
+        "",
+        f"  note:  {title(n)}",
+    ]
+    for field, (old, new) in n["unadopted"].items():
+        lines.append(f"  {field}:  {old or '(none)'}  →  {new}")
+    return lines + [
+        "",
+        "a  adopt this note",
+        f"r  adopt the rest ({left} left)",
+        "e  open it (saving it adopts it)",
+        "s  skip it (stays listed in the header)",
+    ]
+
+
 def choice_screen(stdscr, lines, keys):
     """Full-screen interstitial offering more than yes/no. `keys` maps a
     character to the value returned for it; ESC/q returns None. Same drawing
@@ -8205,6 +8292,8 @@ def draw(stdscr, notes, state):
     loop_badge = f" | [{state['_loops_due']} loop(s) due — gr]" if state.get("_loops_due") else ""
     tc = state.get("_title_conflicts") or []
     title_badge = f" | [{len(tc)} retitle(s) — g!]" if tc else ""
+    fx = state.get("_fixes") or []
+    fix_badge = f" | [{len(fx)} to fix — g?]" if fx else ""
     # The "filter:" field only shows while you're actually searching — same in
     # every view (notes / trash / duplicates / loops).
     filt = f" | filter:{state['q']}" if (state["q"] or state.get("search_mode")) else ""
@@ -8239,7 +8328,7 @@ def draw(stdscr, notes, state):
         header = f"tagged {tagf_label(state['tagf'])} ({len(notes)} notes){filt} | sort:{sort}{conflict_badge}"
     else:
         sort = sort_label(state["sort"], state["rev"], state["q"], "modified ↓", False)
-        header = f"notes{filt} | sort:{sort}{conflict_badge}{dup_badge}{loop_badge}{title_badge}"
+        header = f"notes{filt} | sort:{sort}{conflict_badge}{dup_badge}{loop_badge}{title_badge}{fix_badge}"
 
     # Header rule: underline the top row edge to edge. Unlike the content rows
     # (whose mixed colors made a row-wide underline look patchy), everything
@@ -8540,6 +8629,7 @@ def draw(stdscr, notes, state):
             (9, "h/H hist" if hc >= 2 else ""),
             (2, "c conflicts" if conflicts else ""),
             (2, "g! retitles" if tc else ""),
+            (2, "g? fixes" if state.get("_fixes") else ""),
             (3, "? help"), (1, "q quit"),
         ]
     footer = fit_hints(segments, w - 1)
@@ -8679,6 +8769,7 @@ def run(stdscr, imports=(), move=False):
         "_sel": None,           # drag-select: {"a": (y, x), "b": (y, x)}
         "_conflicts": [],
         "_title_conflicts": [],
+        "_fixes": [],
         "_filter_cache": {},    # memoized rank/filter, rebuilt only on real input change
     }
 
@@ -8691,6 +8782,7 @@ def run(stdscr, imports=(), move=False):
     state["_loops_due"] = len(find_loops(notes, state["_review"]))
     state["_conflicts"] = find_conflicts()
     state["_title_conflicts"] = [n for n in notes if n.get("title_conflict")]
+    state["_fixes"] = fix_list(notes)
 
     saved = load_cursor()
     if saved:
@@ -8704,6 +8796,14 @@ def run(stdscr, imports=(), move=False):
         state["_msg_pool"] = import_msgs(imported, failed)
         state["_msg_rot"] = time.monotonic()
         state["_msg_until"] = time.monotonic() + MSG_TTL
+    if state["_fixes"]:
+        # Held until a key rather than faded: it's the one notice that this
+        # launch left notes alone.
+        state["_msg_pool"].append(
+            f"{len(state['_fixes'])} notes changed while notoj was closed "
+            "and weren't adopted — g? to review")
+        state["_msg_rot"] = time.monotonic()
+        state["_msg_until"] = None
 
     def refresh_notes():
         nonlocal notes, snap
@@ -8720,6 +8820,7 @@ def run(stdscr, imports=(), move=False):
         # note is opened: a conflict on a note you don't happen to open would
         # otherwise sit unresolved (and unmentioned) indefinitely.
         state["_title_conflicts"] = [n for n in notes if n.get("title_conflict")]
+        state["_fixes"] = fix_list(notes)
         # Inline "#loop <when>" scheduling writes the review file from inside
         # the update pipeline, so reload it rather than trust the in-memory copy.
         state["_review"] = load_review()
@@ -9447,6 +9548,40 @@ def run(stdscr, imports=(), move=False):
                     elif pick == "edit":
                         record(open_note(cur))
                 refresh_notes()
+                state["cur"] = 0
+                state["off"] = 0
+                state["p_scroll"] = 0
+
+            elif act == "fixes":
+                # Walk the notes launch left unadopted. r adopts the rest
+                # without asking; ESC/q stops and leaves them listed.
+                pending = list(state.get("_fixes") or [])
+                if not pending:
+                    push_msg("no notes to fix")
+                adopted, adopt_all = set(), False
+                for i, note in enumerate(pending):
+                    if not adopt_all:
+                        pick = choice_screen(
+                            stdscr, unadopted_notice(note, len(pending) - i),
+                            {"a": "adopt", "r": "all", "e": "edit", "s": "skip"})
+                        if pick is None:
+                            break
+                        if pick == "edit":
+                            record(open_note(note))
+                            continue
+                        if pick == "skip":
+                            continue
+                        adopt_all = pick == "all"
+                    if not edit_locked(note["path"]):
+                        adopted.add(normalize_external_note(note["path"])
+                                    or note["path"])
+                refresh_notes()
+                # A note whose only edit was modified: keeps its size and its
+                # mtime, so the rescan above can't see it change; reload those.
+                notes = [(load_md(n["path"]) or n)
+                         if n.get("unadopted") and n["path"] in adopted else n
+                         for n in notes]
+                state["_fixes"] = fix_list(notes)
                 state["cur"] = 0
                 state["off"] = 0
                 state["p_scroll"] = 0

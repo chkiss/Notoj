@@ -173,6 +173,12 @@ Notes are markdown files with YAML frontmatter (`id`, `created`, `modified`,
   and the note lists under the typed title, marked with a red `!` in the
   list and counted in the header (`[2 retitle(s) — g!]`). `g !` walks the
   pending ones, offering the same choice for each.
+- A note changed while notoj was closed is adopted at launch the way a
+  rescan adopts one that changes while it runs: title from the first line,
+  `modified:` from the file's date. Five or more at once are left as they
+  are instead, with a warning and a count in the header
+  (`[7 to fix — g?]`). `g ?` walks them: adopt each, adopt the rest, open
+  it, or skip.
 - Inline `#hashtags` sync into the frontmatter `tags:` field on save.
   Fenced code blocks and `` `code` `` spans are exempt, so backtick a literal
   like `` `#B5B5B5` `` to keep it content. Add `notag: true` to the

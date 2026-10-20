@@ -308,7 +308,7 @@ preview_scroll = page
 #   Other:    hist_browse(H)  conflict(c)  quit(q)
 # Two-key chords rebind to another TWO-key chord (value = the two characters):
 #   Chords:   goto_top(gg)  dups_view(gd)  trash_view(gt)  resurface(gr)
-#             hist_diff(gh)  title_conflicts(g!)
+#             hist_diff(gh)  title_conflicts(g!)  fixes(g?)
 # Don't bind a single-key action to a chord's first key (the chord wins).
 # Examples:
 #   key.quit = Q

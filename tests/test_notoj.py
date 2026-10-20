@@ -3170,6 +3170,7 @@ class TestLoadCompletesPartialFrontmatter(unittest.TestCase):
                 "modified: 2026-10-01T00:00:00Z\nversion: 1\ntags: []\n---\n\n")
         with open(p, "w", encoding="utf-8") as f:
             f.write(text)
+        os.utime(p, (OCT_1, OCT_1))
         with unittest.mock.patch.object(notoj, "normalize_external_note") as norm:
             notoj.load()
         norm.assert_not_called()
@@ -3180,10 +3181,77 @@ class TestLoadCompletesPartialFrontmatter(unittest.TestCase):
                 "modified: 2026-10-01T00:00:00Z\nversion: 3\ntags: []\n---\n\nDone\n")
         with open(p, "w", encoding="utf-8") as f:
             f.write(text)
+        os.utime(p, (OCT_1, OCT_1))
         with unittest.mock.patch.object(notoj, "normalize_external_note") as norm:
             notoj.load()
         norm.assert_not_called()
         self.assertEqual(open(p, encoding="utf-8").read(), text)
+
+
+# 2026-10-01T00:00:00Z, the modified: the startup-load fixtures carry.
+OCT_1 = 1_790_812_800
+
+
+class TestLoadAdoptsAFewChangedNotes(unittest.TestCase):
+    """Notes changed while notoj was closed: startup adopts fewer than
+    ADOPT_AT_START as the rescan would, and leaves a bigger batch unadopted
+    for the g? walk."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self._old = notoj.NOTES_DIR, notoj.REVIEW_FILE
+        notoj.NOTES_DIR = self.d
+        notoj.REVIEW_FILE = os.path.join(self.d, ".notoj_review.json")
+        self.addCleanup(lambda: setattr(notoj, "NOTES_DIR", self._old[0])
+                        or setattr(notoj, "REVIEW_FILE", self._old[1]))
+
+    def write(self, name, title, mtime=OCT_1 + 3600):
+        # Complete block, dated OCT_1; the file's mtime an hour later, as an
+        # edit made elsewhere leaves it.
+        p = os.path.join(self.d, name + ".md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(f"---\nid: {name}\ntitle: {name}\ncreated: 2026-10-01T00:00:00Z\n"
+                    f"modified: 2026-10-01T00:00:00Z\nversion: 2\ntags: []\n---\n\n"
+                    f"{title}\n")
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def test_a_few_are_adopted(self):
+        for i in range(notoj.ADOPT_AT_START - 2):
+            self.write(f"n{i}", f"n{i}")
+        self.write("old", "new title", mtime=OCT_1)   # one under the threshold
+        notes = {n["id"]: n for n in notoj.load()}
+        self.assertEqual(notes["n0"]["modificationDate"], OCT_1 + 3600)
+        self.assertEqual(notes["old"]["title"], "new title")
+        self.assertEqual(os.path.basename(notes["old"]["path"]), "new title.md")
+        self.assertFalse(any(n.get("unadopted") for n in notes.values()))
+        self.assertEqual(int(os.path.getmtime(notes["n0"]["path"])), OCT_1 + 3600)
+
+    def test_a_batch_is_left_and_flagged(self):
+        paths = [self.write(f"n{i}", f"n{i}") for i in range(notoj.ADOPT_AT_START)]
+        before = [open(p, encoding="utf-8").read() for p in paths]
+        notes = notoj.load()
+        self.assertEqual([open(p, encoding="utf-8").read() for p in paths], before)
+        self.assertEqual(len(notoj.fix_list(notes)), notoj.ADOPT_AT_START)
+        self.assertEqual(notes[0]["unadopted"]["modified"],
+                         ("2026-10-01T00:00:00Z", "2026-10-01T01:00:00Z"))
+
+    def test_a_note_open_in_an_editor_is_not_counted(self):
+        paths = [self.write(f"n{i}", f"n{i}") for i in range(notoj.ADOPT_AT_START)]
+        with unittest.mock.patch.object(notoj, "edit_locked",
+                                        side_effect=lambda p: p == paths[0]):
+            notes = {n["path"]: n for n in notoj.load()}
+        self.assertFalse(notes[paths[0]].get("unadopted"))
+        self.assertEqual(notes[paths[1]]["modificationDate"], OCT_1 + 3600)
+
+    def test_notice_shows_the_edits(self):
+        n = make_note(title="A", path="/v/A.md")
+        n["unadopted"] = {"title": ("", "A"), "modified": ("x", "y")}
+        text = "\n".join(notoj.unadopted_notice(n, 7))
+        self.assertIn("title:  (none)  →  A", text)
+        self.assertIn("modified:  x  →  y", text)
+        self.assertIn("r  adopt the rest (7 left)", text)
 
 
 class TestSnoozeLoop(unittest.TestCase):
