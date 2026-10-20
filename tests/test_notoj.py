@@ -2969,6 +2969,13 @@ class TestMeetingPins(unittest.TestCase):
                   "  2026-10-16 10:15 - 11:00 -04:00 "):
             self.assertEqual(notoj.parse_meeting(s), want, s)
 
+    def test_takes_a_calendar_exports_z_and_seconds(self):
+        want = (self.START, self.END)
+        for s in ("2026-10-16 14:15-15:00 Z", "2026-10-16 14:15-15:00Z",
+                  "2026-10-16 10:15:00-11:00:00 -04:00",
+                  "2026-10-16 14:15:00-15:00:00 Z"):
+            self.assertEqual(notoj.parse_meeting(s), want, s)
+
     def test_rejects_what_isnt_a_meeting(self):
         for s in ("", None, "tomorrow", "2026-10-16", "2026-02-30 10:00-11:00",
                   "2026-10-16 25:00-26:00"):

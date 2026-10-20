@@ -2559,20 +2559,25 @@ def meeting_pins_on():
 
 
 _MEETING_RE = re.compile(
-    r"\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})"
-    r"(?:\s+([+-])(\d{2}):?(\d{2}))?\s*$")
+    r"\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})(?::\d{2})?"
+    r"\s*[-–]\s*(\d{1,2}):(\d{2})(?::\d{2})?"
+    r"(?:\s*(Z)|\s+([+-])(\d{2}):?(\d{2}))?\s*$")
 
 
 def parse_meeting(s):
     """(start_ts, end_ts) for one `meetings:` entry, or None if it doesn't
-    parse. An end at or before the start runs past midnight into the next
-    day."""
+    parse. The documented form is `2026-10-16 10:15-11:00 -04:00`; a
+    calendar export's `Z` for UTC and `:SS` on the times are taken too,
+    since an entry that doesn't parse is dropped without a word. An end at
+    or before the start runs past midnight into the next day."""
     m = _MEETING_RE.match(str(s or ""))
     if not m:
         return None
-    y, mo, d, h1, m1, h2, m2, sign, oh, om = m.groups()
+    y, mo, d, h1, m1, h2, m2, zulu, sign, oh, om = m.groups()
     tz = None
-    if sign:
+    if zulu:
+        tz = timezone.utc
+    elif sign:
         off = timedelta(hours=int(oh), minutes=int(om))
         tz = timezone(off if sign == "+" else -off)
     try:
