@@ -3248,10 +3248,51 @@ class TestLoadAdoptsAFewChangedNotes(unittest.TestCase):
     def test_notice_shows_the_edits(self):
         n = make_note(title="A", path="/v/A.md")
         n["unadopted"] = {"title": ("", "A"), "modified": ("x", "y")}
-        text = "\n".join(notoj.unadopted_notice(n, 7))
+        text = "\n".join(notoj.fix_notice(n, 7))
         self.assertIn("title:  (none)  →  A", text)
         self.assertIn("modified:  x  →  y", text)
         self.assertIn("r  adopt the rest (7 left)", text)
+        self.assertNotIn("meetings:", text)
+
+
+class TestBadMeetings(unittest.TestCase):
+    """A meetings: line that doesn't parse is kept, as written, for the g?
+    walk and the warning, instead of vanishing."""
+
+    def test_unparsed_entries_are_kept_as_written(self):
+        self.assertEqual(notoj.bad_meetings(["2026-10-16 10:15-11:00 -04:00",
+                                             "2026-10-16 10:15am", "tomorrow"]),
+                         ["2026-10-16 10:15am", "tomorrow"])
+        self.assertEqual(notoj.bad_meetings("2026-10-16 10:15-11:00Z"), [])
+        self.assertEqual(notoj.bad_meetings(None), [])
+
+    def test_load_md_carries_them(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "M.md")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("---\nid: m\ntitle: M\nmeetings:\n  - 2026-10-16 10:15 EDT\n"
+                        "  - 2026-10-16 12:00-12:30 -04:00\n---\n\nM\n")
+            n = notoj.load_md(p)
+        self.assertEqual(n["meetings_bad"], ["2026-10-16 10:15 EDT"])
+        self.assertEqual(len(n["meetings"]), 1)
+
+    def test_listed_to_fix_only_while_pins_are_on(self):
+        saved = notoj._config_cache
+        self.addCleanup(setattr, notoj, "_config_cache", saved)
+        n = make_note(path="/v/M.md")
+        n["meetings_bad"] = ["tomorrow"]
+        notoj._config_cache = {}
+        self.assertEqual(notoj.fix_list([n, make_note(path="/v/x.md")]), [n])
+        notoj._config_cache = {"meeting_pins": "false"}
+        self.assertEqual(notoj.fix_list([n]), [])
+
+    def test_notice_names_the_lines_and_offers_no_adopt(self):
+        n = make_note(title="M", path="/v/M.md")
+        n["meetings_bad"] = ["2026-10-16 10:15am"]
+        text = "\n".join(notoj.fix_notice(n, 0))
+        self.assertIn("  - 2026-10-16 10:15am", text)
+        self.assertIn("e  open it", text)
+        self.assertNotIn("adopt", text)
 
 
 class TestSnoozeLoop(unittest.TestCase):

@@ -287,7 +287,8 @@ KEYMAP = [
               "the header"),
         ("fixes", "g ?", "walk the notes left to fix, counted in the header: notes "
               "changed while notoj was closed, which launch leaves unadopted when "
-              "5 or more arrive at once — adopt each, adopt the rest, open it, or skip"),
+              "5 or more arrive at once (adopt each, adopt the rest, open it, or "
+              "skip), and notes with a meetings: line notoj can't read"),
         ("backlinks", "b", "backlinks: notes linking to the selected one via [[wikilinks]] "
               "or [text](note.md) links (Enter jumps to the linking note; / searches)"),
         ("help", "?", "this key reference"),
@@ -682,6 +683,7 @@ def load_md(path, text=None):
             "fm_modified": meta.get("modified") or "",
             "tags": meta.get("tags") or [],
             "meetings": note_meetings(meta.get("meetings")),
+            "meetings_bad": bad_meetings(meta.get("meetings")),
             "pin_with": note_names(meta.get("pin_with")),
             "system_tags": meta.get("system_tags") or [],
             "modificationDate": iso_to_ts(meta.get("modified")),
@@ -2665,6 +2667,14 @@ def note_meetings(value):
     a single entry written inline. Entries that don't parse are skipped."""
     items = value if isinstance(value, list) else [value] if value else []
     return [t for t in (parse_meeting(v) for v in items) if t]
+
+
+def bad_meetings(value):
+    """The entries in a frontmatter `meetings:` value that don't parse, as
+    written. note_meetings drops them; these are what the g? walk and the
+    warning name, since a note that should pin and doesn't gives no sign."""
+    items = value if isinstance(value, list) else [value] if value else []
+    return [str(v) for v in items if parse_meeting(v) is None]
 
 
 def meeting_pin(n, now):
@@ -5926,30 +5936,42 @@ def title_conflict_notice(n):
 
 
 def fix_list(notes):
-    """The notes the g? walk offers: those launch left unadopted."""
-    return [n for n in notes if n.get("unadopted")]
+    """The notes the g? walk offers: those launch left unadopted, and, while
+    meeting pins are on, those with a meetings: line that doesn't parse."""
+    pins = meeting_pins_on()
+    return [n for n in notes
+            if n.get("unadopted") or (pins and n.get("meetings_bad"))]
 
 
-def unadopted_notice(n, left):
-    """The g? walk's screen for a note launch left unadopted: the edits
-    adopting it would make, and the choices."""
-    lines = [
-        "This note changed while notoj was closed and wasn't adopted.",
-        "",
-        f"Launch adopts such notes as a rescan would, but not {ADOPT_AT_START}",
-        "or more at once. Adopting this one changes:",
-        "",
-        f"  note:  {title(n)}",
-    ]
-    for field, (old, new) in n["unadopted"].items():
-        lines.append(f"  {field}:  {old or '(none)'}  →  {new}")
-    return lines + [
-        "",
-        "a  adopt this note",
-        f"r  adopt the rest ({left} left)",
-        "e  open it (saving it adopts it)",
-        "s  skip it (stays listed in the header)",
-    ]
+def fix_notice(n, left):
+    """The g? walk's screen for one note: the edits adopting it would make
+    when launch left it unadopted, the meetings: lines that don't parse, and
+    the choices that apply. `left` counts the unadopted notes from this one
+    on, for adopt-the-rest."""
+    lines = [f"To fix: {title(n)}", ""]
+    if n.get("unadopted"):
+        lines += [
+            "It changed while notoj was closed and wasn't adopted. Launch adopts",
+            f"such notes as a rescan would, but not {ADOPT_AT_START} or more at once.",
+            "Adopting it changes:",
+            "",
+        ]
+        for field, (old, new) in n["unadopted"].items():
+            lines.append(f"  {field}:  {old or '(none)'}  →  {new}")
+        lines.append("")
+    if n.get("meetings_bad"):
+        lines += ["notoj can't read these meetings: lines, so it won't pin the note",
+                  "for them:", ""]
+        lines += [f"  - {e}" for e in n["meetings_bad"]]
+        lines += ["", "Write each as  2026-10-16 10:15-11:00 -04:00  (the date, start and",
+                  "end in 24-hour time, and the UTC offset).", ""]
+    if n.get("unadopted"):
+        lines += ["a  adopt this note",
+                  f"r  adopt the rest ({left} left)",
+                  "e  open it (saving it adopts it)"]
+    else:
+        lines.append("e  open it")
+    return lines + ["s  skip it (stays listed in the header)"]
 
 
 def choice_screen(stdscr, lines, keys):
@@ -8796,14 +8818,18 @@ def run(stdscr, imports=(), move=False):
         state["_msg_pool"] = import_msgs(imported, failed)
         state["_msg_rot"] = time.monotonic()
         state["_msg_until"] = time.monotonic() + MSG_TTL
-    if state["_fixes"]:
+    unadopted = sum(1 for n in state["_fixes"] if n.get("unadopted"))
+    if unadopted:
         # Held until a key rather than faded: it's the one notice that this
         # launch left notes alone.
         state["_msg_pool"].append(
-            f"{len(state['_fixes'])} notes changed while notoj was closed "
+            f"{unadopted} notes changed while notoj was closed "
             "and weren't adopted — g? to review")
         state["_msg_rot"] = time.monotonic()
         state["_msg_until"] = None
+    # meetings: lines that don't parse, already named in a warning; set
+    # here so launch names each one once (warn_bad_meetings).
+    state["_mtg_bad"] = set()
 
     def refresh_notes():
         nonlocal notes, snap
@@ -8821,6 +8847,7 @@ def run(stdscr, imports=(), move=False):
         # otherwise sit unresolved (and unmentioned) indefinitely.
         state["_title_conflicts"] = [n for n in notes if n.get("title_conflict")]
         state["_fixes"] = fix_list(notes)
+        warn_bad_meetings()
         # Inline "#loop <when>" scheduling writes the review file from inside
         # the update pipeline, so reload it rather than trust the in-memory copy.
         state["_review"] = load_review()
@@ -8849,6 +8876,21 @@ def run(stdscr, imports=(), move=False):
         state["_msg_pool"] = []
         state["_msg_idx"] = 0
         state["_msg_until"] = None
+
+    def warn_bad_meetings():
+        """Name each meetings: line that doesn't parse, once, when it first
+        shows up (at launch or as a note arrives), held until a key: a note
+        that should pin and doesn't gives no other sign."""
+        bad = {(n["path"], e): n for n in state["_fixes"]
+               for e in n.get("meetings_bad") or ()}
+        new = [(e, n) for (p, e), n in bad.items() if (p, e) not in state["_mtg_bad"]]
+        state["_mtg_bad"] = set(bad)
+        if new:
+            push_msg(*(f"can't read meetings: line \"{e}\" in {title(n)} — g? to review"
+                       for e, n in new))
+            state["_msg_until"] = None
+
+    warn_bad_meetings()
 
     def record(act):
         """Push a fresh destructive action onto the undo stack; a new action
@@ -9226,6 +9268,8 @@ def run(stdscr, imports=(), move=False):
                 if changed:
                     snap = resnapshot(snap)
                     state["_dups"] = find_duplicates(notes)
+                    state["_fixes"] = fix_list(notes)
+                    warn_bad_meetings()   # a note arriving with a bad meetings: line
                     state["_review"] = load_review()   # inline scheduling may have written it
                     state["_hist_cache"].clear()
                     if state["dup_mode"] is not None:
@@ -9553,25 +9597,28 @@ def run(stdscr, imports=(), move=False):
                 state["p_scroll"] = 0
 
             elif act == "fixes":
-                # Walk the notes launch left unadopted. r adopts the rest
-                # without asking; ESC/q stops and leaves them listed.
+                # Walk the notes left to fix (fix_list). r adopts the rest of
+                # the unadopted ones without asking, while a note with only a
+                # bad meetings: line still asks; ESC/q stops and leaves them
+                # listed.
                 pending = list(state.get("_fixes") or [])
                 if not pending:
                     push_msg("no notes to fix")
                 adopted, adopt_all = set(), False
                 for i, note in enumerate(pending):
-                    if not adopt_all:
-                        pick = choice_screen(
-                            stdscr, unadopted_notice(note, len(pending) - i),
-                            {"a": "adopt", "r": "all", "e": "edit", "s": "skip"})
+                    if not (adopt_all and note.get("unadopted")):
+                        keys = {"e": "edit", "s": "skip"}
+                        if note.get("unadopted"):
+                            keys.update(a="adopt", r="all")
+                        left = sum(1 for n in pending[i:] if n.get("unadopted"))
+                        pick = choice_screen(stdscr, fix_notice(note, left), keys)
                         if pick is None:
                             break
                         if pick == "edit":
                             record(open_note(note))
+                        if pick not in ("adopt", "all"):
                             continue
-                        if pick == "skip":
-                            continue
-                        adopt_all = pick == "all"
+                        adopt_all = adopt_all or pick == "all"
                     if not edit_locked(note["path"]):
                         adopted.add(normalize_external_note(note["path"])
                                     or note["path"])

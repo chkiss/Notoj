@@ -178,7 +178,8 @@ Notes are markdown files with YAML frontmatter (`id`, `created`, `modified`,
   `modified:` from the file's date. Five or more at once are left as they
   are instead, with a warning and a count in the header
   (`[7 to fix — g?]`). `g ?` walks them: adopt each, adopt the rest, open
-  it, or skip.
+  it, or skip. The same walk lists any note with a `meetings:` line notoj
+  can't read, which is named in a warning when it first appears.
 - Inline `#hashtags` sync into the frontmatter `tags:` field on save.
   Fenced code blocks and `` `code` `` spans are exempt, so backtick a literal
   like `` `#B5B5B5` `` to keep it content. Add `notag: true` to the
