@@ -596,6 +596,17 @@ def title_hand_edited(path, fm_title, derived):
     return slugify(fm_title) not in (stem, base)
 
 
+def title_differs(path, fm_title, derived):
+    """Whether `derived` (the body's first line, from derive_title) should
+    replace the note's `title:`. Not when it's empty or the same, not for a
+    hand edit (title_hand_edited), and not when it is only `fm_title` cut at
+    TITLE_MAX the way derive_title cuts: a title written whole past the cap
+    would otherwise lose its tail on every adoption."""
+    return (bool(derived) and derived != fm_title
+            and fm_title[:TITLE_MAX].rstrip() != derived
+            and not title_hand_edited(path, fm_title, derived))
+
+
 def read_note_text(path):
     """A note's text, read the tolerant way: utf-8-sig drops a leading BOM if
     present, and CRLF/CR are normalized to LF. Returns None if unreadable.
@@ -1476,8 +1487,7 @@ def normalize_external_note(path):
     # would revert the edit and rename the file back under it. The note keeps
     # both values until the conflict is resolved — load_md flags it and the UI
     # prompts on open. Everything else (modified, backfill) proceeds normally.
-    title_changed = (bool(new_title) and new_title != old_title
-                     and not title_hand_edited(path, old_title, new_title))
+    title_changed = title_differs(path, old_title, new_title)
     modified_changed = file_mtime_iso != old_modified
     # Externally-produced files often arrive with only a partial frontmatter
     # block — e.g. an id/title/tags header and none of the housekeeping dates.
@@ -4579,8 +4589,7 @@ def check_rename(n):
     # the first body line. The Vim layer catches this at :w and offers to sync
     # the two, so reaching here means Vim was opted out of (NOTOJ_NO_TITLE_GUARD,
     # a non-Vim default_editor) or the user chose to keep both values.
-    title_changed = (bool(new_first_line) and new_first_line != fm_title
-                     and not title_hand_edited(path, fm_title, new_first_line))
+    title_changed = title_differs(path, fm_title, new_first_line)
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     fm_lines = text[4:fm_end].splitlines()

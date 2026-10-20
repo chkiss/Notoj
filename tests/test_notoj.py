@@ -2656,6 +2656,35 @@ class TestNormalizeExternalNote(unittest.TestCase):
             finally:
                 notoj.NOTES_DIR = old_notes
 
+    def test_title_past_the_cap_keeps_its_tail(self):
+        # derive_title cuts the first line at TITLE_MAX, so a title written
+        # whole past the cap differs from it — adopting that cut would trim
+        # the title and rename the file.
+        long = "x" * notoj.TITLE_MAX + ")"
+        with tempfile.TemporaryDirectory() as d:
+            old_notes = notoj.NOTES_DIR
+            notoj.NOTES_DIR = d
+            try:
+                path = os.path.join(d, long + ".md")
+                self._write(path, (
+                    "---\n"
+                    "id: abc\n"
+                    f"title: {long}\n"
+                    "created: 2013-10-08T13:08:43Z\n"
+                    "modified: 2000-01-01T00:00:00Z\n"
+                    "version: 1\n"
+                    "tags: []\n"
+                    "---\n"
+                    "\n"
+                    f"{long}\n"
+                ))
+                result_path = notoj.normalize_external_note(path)
+                self.assertEqual(result_path, path)
+                with open(path, encoding="utf-8") as f:
+                    self.assertIn(f"title: {long}\n", f.read())
+            finally:
+                notoj.NOTES_DIR = old_notes
+
     def test_no_change_when_title_matches(self):
         with tempfile.TemporaryDirectory() as d:
             old_notes = notoj.NOTES_DIR
