@@ -981,14 +981,23 @@ def place_note(path, ks=None, n=None):
     return path, True
 
 
-FM_HOUSEKEEPING = ("title", "created", "modified", "version")
+def fm_housekeeping(fm_lines):
+    """(has_created, has_modified, has_version) for a frontmatter block's
+    lines: the housekeeping fields normalize_external_note backfills. A line
+    scan, not a parse — load() asks this of every note at startup. Title is
+    not one of them: normalize adopts a title from the body when there is
+    one, and a note with no body has none to adopt, so testing for it would
+    send that note through normalize on every launch."""
+    return (any(l.startswith("created:") for l in fm_lines),
+            any(l.startswith("modified:") for l in fm_lines),
+            any(l.startswith("version:") for l in fm_lines))
 
 
 def fm_incomplete(fm_text):
-    """Whether a frontmatter block lacks a housekeeping field notoj keeps:
-    the ones normalize_external_note backfills."""
-    meta = parse_frontmatter(fm_text)
-    return not all(meta.get(k) for k in FM_HOUSEKEEPING)
+    """Whether a frontmatter block lacks a field normalize_external_note
+    would backfill — the same test it makes, so a note that passes here is
+    one it would leave alone."""
+    return not all(fm_housekeeping(fm_text.splitlines()))
 
 
 def load():
@@ -1461,9 +1470,7 @@ def normalize_external_note(path):
     old_modified = meta.get("modified") or ""
 
     fm_lines = text[4:fm_end].splitlines()
-    has_created = any(line.startswith("created:") for line in fm_lines)
-    has_modified = any(line.startswith("modified:") for line in fm_lines)
-    has_version = any(line.startswith("version:") for line in fm_lines)
+    has_created, has_modified, has_version = fm_housekeeping(fm_lines)
 
     # A title: retitled by hand is left standing: adopting the derived title
     # would revert the edit and rename the file back under it. The note keeps
