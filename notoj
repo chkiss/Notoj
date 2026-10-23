@@ -8841,13 +8841,7 @@ def run(stdscr, imports=(), move=False):
         snap = resnapshot(snap) if changed else new_snap
         set_tag_freq(notes)
         state["_trash"] = None
-        state["_dups"] = find_duplicates(notes)
-        # Pending hand-retitles. Surfaced every scan rather than only when the
-        # note is opened: a conflict on a note you don't happen to open would
-        # otherwise sit unresolved (and unmentioned) indefinitely.
-        state["_title_conflicts"] = [n for n in notes if n.get("title_conflict")]
-        state["_fixes"] = fix_list(notes)
-        warn_bad_meetings()
+        recount_badges()
         # Inline "#loop <when>" scheduling writes the review file from inside
         # the update pipeline, so reload it rather than trust the in-memory copy.
         state["_review"] = load_review()
@@ -8855,8 +8849,21 @@ def run(stdscr, imports=(), move=False):
         state["_conflicts"] = find_conflicts()
         state["_hist_cache"].clear()   # commit counts may have changed
         state["_hist_gen"] += 1        # any in-flight count is now stale
+
+    def recount_badges():
+        """The header's note lists, after a reload swapped in a new notes
+        list. Both reloads (refresh_notes and the idle-tick scan) call this,
+        so a list added later can't be refreshed by one and missed by the
+        other, as the retitles once were by the idle tick."""
+        state["_dups"] = find_duplicates(notes)
         if state["dup_mode"] is not None:
             state["dup_mode"] = state["_dups"]
+        # Pending hand-retitles. Surfaced every scan rather than only when the
+        # note is opened: a conflict on a note you don't happen to open would
+        # otherwise sit unresolved (and unmentioned) indefinitely.
+        state["_title_conflicts"] = [n for n in notes if n.get("title_conflict")]
+        state["_fixes"] = fix_list(notes)
+        warn_bad_meetings()
 
     def push_msg(*texts):
         """Add status line(s) to the bar's pool for the current action, deduped.
@@ -9267,13 +9274,9 @@ def run(stdscr, imports=(), move=False):
                 state["_conflicts"] = find_conflicts()
                 if changed:
                     snap = resnapshot(snap)
-                    state["_dups"] = find_duplicates(notes)
-                    state["_fixes"] = fix_list(notes)
-                    warn_bad_meetings()   # a note arriving with a bad meetings: line
+                    recount_badges()
                     state["_review"] = load_review()   # inline scheduling may have written it
                     state["_hist_cache"].clear()
-                    if state["dup_mode"] is not None:
-                        state["dup_mode"] = state["_dups"]
                     cur_path = filtered[state["cur"]]["path"] if 0 <= state["cur"] < len(filtered) else None
                     state["_restore_path"] = cur_path
                     git_commit("sync: external changes")
