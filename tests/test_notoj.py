@@ -4724,6 +4724,37 @@ class EditInEditorMarkPlumbingTests(unittest.TestCase):
         self.assertNotIn("NOTOJ_EDIT_MARK", os.environ)
 
 
+class VimHelperFileTests(unittest.TestCase):
+    """The sourced helper .vim lives in $TMPDIR, which macOS purges after three
+    days untouched; a long-running notoj must rewrite it rather than keep
+    pointing Vim at a deleted file."""
+
+    def setUp(self):
+        self._saved = notoj._vim_helper_path
+        notoj._vim_helper_path = None
+
+    def tearDown(self):
+        p = notoj._vim_helper_path
+        if p and os.path.exists(p):
+            os.remove(p)
+        notoj._vim_helper_path = self._saved
+
+    def test_reuses_the_file_while_it_exists(self):
+        notoj.vim_source_args()
+        first = notoj._vim_helper_path
+        notoj.vim_source_args()
+        self.assertEqual(first, notoj._vim_helper_path)
+
+    def test_rewrites_the_file_once_it_is_purged(self):
+        notoj.vim_source_args()
+        os.remove(notoj._vim_helper_path)
+        args = notoj.vim_source_args()
+        self.assertTrue(os.path.exists(notoj._vim_helper_path))
+        with open(notoj._vim_helper_path, encoding="utf-8") as f:
+            self.assertIn("NotojOpenAtLastPos", f.read())
+        self.assertIn(notoj._vim_helper_path.replace(" ", "\\ "), args[-1])
+
+
 @unittest.skipUnless(
     shutil.which("vim"), "vim not installed"
 )

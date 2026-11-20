@@ -5025,9 +5025,14 @@ def vim_cmd(note=None):
 def vim_source_args():
     """Materialize the embedded notoj vimscript to a temp file (once per run)
     and return the -c args that source it, giving spawned Vim sessions
-    note-link gf support."""
+    note-link gf support.
+
+    The file is rewritten whenever it has gone missing, not only on the first
+    call: macOS purges $TMPDIR files left untouched for three days, so a notoj
+    left open longer than that would otherwise hand Vim a path that no longer
+    exists (E484, then E117 on NotojOpenAtLastPos)."""
     global _vim_helper_path
-    if _vim_helper_path is None:
+    if _vim_helper_path is None or not os.path.exists(_vim_helper_path):
         fd, path = tempfile.mkstemp(prefix="notoj-", suffix=".vim")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(NOTOJ_VIM_SCRIPT)
