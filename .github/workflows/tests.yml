@@ -12,7 +12,10 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: once latest became 26.04, setup-python had
+    # no 3.8 build for it and the 3.8 job failed before running a test.
+    # 24.04 still has 3.8; move off it when it loses that build or goes away.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
