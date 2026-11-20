@@ -8127,6 +8127,67 @@ class TestMouseSelectEvent(unittest.TestCase):
         # release col 10 -> row-1 slice is chars 0..9 of "delta epsilon"
         self.assertEqual(cp.call_args[0][0], "alpha beta gamma\ndelta epsi")
 
+    def _drag_copy(self, note, y1, c1, y2, c2, w=100):
+        """Press at pane column c1 of row y1, release at c2 of row y2, and
+        return what was handed to the clipboard."""
+        st = self._state()
+        show, list_w, mid, pw = notoj.preview_geometry(w)
+        with unittest.mock.patch.object(
+                notoj, "copy_to_clipboard",
+                unittest.mock.Mock(return_value="pbcopy")) as cp:
+            notoj.mouse_select_event(st, self._ev(y1, mid + 1 + c1, self.PRESS),
+                                     note, [], w, 30)
+            notoj.mouse_select_event(st, self._ev(y2, mid + 1 + c2,
+                                                  self.RELEASE),
+                                     note, [], w, 30)
+        return cp.call_args[0][0] if cp.call_args else None
+
+    # The preview draws markdown with its markers dropped, so the copy must
+    # read the same cells the reader sees: the raw row would hand over the
+    # `**` and then lose as many characters off the end of the selection.
+
+    def test_copy_skips_bold_markers_and_keeps_the_full_span(self):
+        note = make_note(title="t", content="say **alpha** beta gamma",
+                         path="/v/a.md")
+        # On screen: "say alpha beta gamma"; columns 0..13 are "say alpha beta"
+        self.assertEqual(self._drag_copy(note, 1, 0, 1, 13), "say alpha beta")
+
+    def test_copy_inside_a_bold_run_after_the_markers(self):
+        note = make_note(title="t", content="**alpha** beta gamma",
+                         path="/v/a.md")
+        # On screen: "alpha beta gamma"; columns 6..15 are "beta gamma"
+        self.assertEqual(self._drag_copy(note, 1, 6, 1, 15), "beta gamma")
+
+    def test_copy_of_a_heading_drops_the_hashes(self):
+        note = make_note(title="t", content="intro\n## Next steps here",
+                         path="/v/a.md")
+        self.assertEqual(self._drag_copy(note, 2, 0, 2, 9), "Next steps")
+
+    def test_copy_of_a_code_span_drops_the_backticks(self):
+        note = make_note(title="t", content="run `make test` now",
+                         path="/v/a.md")
+        self.assertEqual(self._drag_copy(note, 1, 0, 1, 16), "run make test now")
+
+    def test_copy_across_a_bold_run_split_by_wrap(self):
+        # A pane narrow enough to wrap the bold run: markers are paired over
+        # the whole source line, so both rows must lose theirs.
+        w = 60
+        show, list_w, mid, pw = notoj.preview_geometry(w)
+        words = " ".join("w%02d" % i for i in range(pw // 4 - 2))
+        note = make_note(title="t",
+                         content="%s **bold run that wraps over** end" % words,
+                         path="/v/a.md")
+        rows = notoj.preview_rows(note, [], pw, {"q": ""})
+        self.assertGreater(len(rows), 1)
+        got = self._drag_copy(note, 1, 0, len(rows), pw, w=w)
+        self.assertEqual(got, "%s bold run that wraps over end" % words)
+
+    def test_copy_is_raw_when_markdown_rendering_is_off(self):
+        notoj._config_cache["render_markdown"] = "false"
+        note = make_note(title="t", content="**alpha** beta",
+                         path="/v/a.md")
+        self.assertEqual(self._drag_copy(note, 1, 0, 1, 13), "**alpha** beta")
+
     def test_hover_noise_without_a_selection_skips_repaint(self):
         # Mouse wiggle over the window with nothing selected is constant
         # traffic; it must not trigger a frame each time.

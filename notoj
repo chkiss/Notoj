@@ -7882,7 +7882,19 @@ def mouse_select_event(state, ev, note, tokens, w, h):
             return None, True         # a plain click selects nothing
         rows_all = preview_rows(note, tokens, pw, state)
         start = state["p_scroll"]
-        window = rows_all[start:start + (h - 2)]
+        end = start + (h - 2)
+        window = rows_all[start:end]
+        if config_bool("render_markdown", True):
+            # Columns on screen index the text as DRAWN, markers dropped
+            # (`**`, backticks, a heading's `# `). Slicing the raw row by them
+            # copied the markers and lost as many characters off the end, so
+            # read each row the way the preview paints it: the same
+            # line-level markup states, so a run split by wrap drops its
+            # markers on both rows. The tag row (src None) is drawn literally.
+            states = row_md_states(rows_all, start, end)
+            window = [(_md_logical(t, states.get(start + i)) if src is not None
+                       else t, src)
+                      for i, (t, src) in enumerate(window)]
         text = selection_text(window,
                               ay - 1, ax - (mid + 1),
                               ey - 1, ex - (mid + 1))
