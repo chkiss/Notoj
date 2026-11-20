@@ -145,6 +145,16 @@ preview_scroll = page
 # back to wl-copy / xclip / xsel / pbcopy when installed. Default: true.
 # preview_select=true
 
+# What a preview drag-select copies while markdown is rendered:
+#   text      what the band covers as drawn, markers dropped: a drag over
+#             **alpha** copies alpha.
+#   markdown  the same characters plus the markers of every run the drag
+#             wholly covers: a drag over all of **alpha** copies **alpha**,
+#             and a heading copied whole keeps its #s. A run the drag only
+#             cuts into loses its markers, so a copy never ends in a lone **.
+# With render_markdown=false the copy is raw either way. Default: text.
+# selection_copy=text
+
 # Allow the OSC 52 clipboard escape as a copy target (see preview_select).
 # Turn off if your terminal prompts on OSC 52 or you want local tools only.
 # Default: true.

@@ -8182,6 +8182,65 @@ class TestMouseSelectEvent(unittest.TestCase):
         got = self._drag_copy(note, 1, 0, len(rows), pw, w=w)
         self.assertEqual(got, "%s bold run that wraps over end" % words)
 
+    # selection_copy=markdown: a run the drag wholly covers keeps its markers.
+
+    def _md(self):
+        notoj._config_cache["selection_copy"] = "markdown"
+
+    def test_markdown_copy_keeps_markers_of_a_fully_covered_run(self):
+        self._md()
+        note = make_note(title="t", content="say **alpha** beta gamma",
+                         path="/v/a.md")
+        # On screen "say alpha beta gamma": columns 0..13 are "say alpha beta"
+        self.assertEqual(self._drag_copy(note, 1, 0, 1, 13),
+                         "say **alpha** beta")
+
+    def test_markdown_copy_of_just_the_bold_word(self):
+        self._md()
+        note = make_note(title="t", content="say **alpha** beta",
+                         path="/v/a.md")
+        # Columns 4..8 are exactly "alpha": its markers sit off-screen at
+        # both edges and still come along.
+        self.assertEqual(self._drag_copy(note, 1, 4, 1, 8), "**alpha**")
+
+    def test_markdown_copy_drops_markers_of_a_part_covered_run(self):
+        self._md()
+        note = make_note(title="t", content="**alpha** beta",
+                         path="/v/a.md")
+        # Columns 2..9 are "pha beta": the run is cut, so no lone closer.
+        self.assertEqual(self._drag_copy(note, 1, 2, 1, 9), "pha beta")
+
+    def test_markdown_copy_keeps_heading_code_and_italic(self):
+        self._md()
+        note = make_note(title="t",
+                         content="## Plan\nrun `make` and *then* go",
+                         path="/v/a.md")
+        # On screen row 2 is "run make and then go", 20 columns.
+        self.assertEqual(self._drag_copy(note, 1, 0, 2, 19),
+                         "## Plan\nrun `make` and *then* go")
+
+    def test_markdown_copy_across_a_bold_run_split_by_wrap(self):
+        self._md()
+        w = 60
+        show, list_w, mid, pw = notoj.preview_geometry(w)
+        words = " ".join("w%02d" % i for i in range(pw // 4 - 2))
+        src = "%s **bold run that wraps over** end" % words
+        note = make_note(title="t", content=src, path="/v/a.md")
+        rows = notoj.preview_rows(note, [], pw, {"q": ""})
+        self.assertGreater(len(rows), 1)
+        self.assertEqual(self._drag_copy(note, 1, 0, len(rows), pw, w=w), src)
+
+    def test_markdown_copy_of_plain_text_matches_text_mode(self):
+        self._md()
+        self.assertEqual(self._drag_copy(self.NOTE, 1, 0, 2, 9),
+                         "alpha beta gamma\ndelta epsi")
+
+    def test_unknown_selection_copy_value_falls_back_to_text(self):
+        notoj._config_cache["selection_copy"] = "html"
+        note = make_note(title="t", content="**alpha** beta",
+                         path="/v/a.md")
+        self.assertEqual(self._drag_copy(note, 1, 0, 1, 9), "alpha beta")
+
     def test_copy_is_raw_when_markdown_rendering_is_off(self):
         notoj._config_cache["render_markdown"] = "false"
         note = make_note(title="t", content="**alpha** beta",

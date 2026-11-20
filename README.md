@@ -76,6 +76,7 @@ take `true/false/yes/no/on/off/1/0`. The main options:
 | `vim_search_scope` | `term` | With a term singled out, hand Vim just that `term` or the whole `query` (positioning by the term either way) |
 | `preview_scroll` | `page` | Lines PgDn/PgUp scroll any preview pane: `page` (full pane height), or a line count; **Shift** halves the step (a smaller interval), **Ctrl** or **Alt** makes it one line (linewise) |
 | `preview_select` | `true` | Drag with the left mouse button in the preview pane to copy the selected text — a soft-blue band follows the cursor live while you drag (Claude Code / VS Code style), and wrapped rows unwrap back into their source lines. Presses on the notes list are ignored; any keystroke cancels a selection; **Shift**-drag keeps native terminal selection working. Delivery: OSC 52 first, then wl-copy/xclip/xsel/pbcopy |
+| `selection_copy` | `text` | What a preview drag-select copies while markdown is rendered: `text` copies what the band covers as drawn, markers dropped (**alpha** copies as `alpha`); `markdown` adds back the markers of every run the drag wholly covers (`**alpha**`, a whole heading's `#`s), while a run the drag only cuts into still loses its markers |
 | `osc52` | `true` | Let copy-to-clipboard use the OSC 52 escape sequence (works over SSH if the terminal permits it); off leaves only the local tools |
 | `list_max_w` | `80` | Max width of the left list panel; extra width goes to the preview |
 | `tag_display_order` | `freq` | Tag order for display: `freq`, `freq_asc`, `name`, `stored` |

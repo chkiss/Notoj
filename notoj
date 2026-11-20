@@ -5134,6 +5134,22 @@ def vim_search_scope():
     return "query" if v == "query" else "term"
 
 
+def selection_copy():
+    """What a drag-select in the rendered preview copies (`selection_copy`):
+
+      text      (default) what the band covers as drawn — markers dropped,
+                so **alpha** copies as alpha.
+      markdown  the same characters, plus the markers of every run the
+                selection wholly covers, so a drag over all of **alpha**
+                copies **alpha**; a run the drag only cuts into still
+                copies without its markers.
+
+    Only matters while render_markdown is on; with it off the preview shows
+    the raw markdown and the copy is raw either way."""
+    v = (config_get("selection_copy", "text") or "text").strip().lower()
+    return "markdown" if v == "markdown" else "text"
+
+
 def tab_cycles_terms_in_tag_view():
     """Whether Tab cycles search terms rather than tags inside a tag-filter
     view, where both could be cycled (`tab_in_search_in_tag_view`). Either way
@@ -7760,6 +7776,110 @@ def selection_text(rows, r1, c1, r2, c2):
     return "\n".join(groups)
 
 
+def _md_marker_runs(line):
+    """Every markup run in one whole SOURCE line, as ``(markers, cs, ce)``:
+    the indices of the characters the preview drops for it, and the
+    [cs, ce) range of the content they wrap. The same pairing _md_line_arrays
+    draws with — a heading prefix, code spans, then emphasis over the line
+    with code blanked out — so what this calls a run is what the reader saw
+    styled as one."""
+    m = MD_HEADER.match(line)
+    if m:
+        return [(tuple(range(m.start(2))), m.start(2), len(line))]
+    runs = []
+    delims = sorted(_code_delims(line))
+    masked = ["\0" if c == "`" else c for c in line]
+    for a, b in zip(delims[0::2], delims[1::2]):
+        runs.append(((a, b), a + 1, b))
+        for k in range(a + 1, b):
+            masked[k] = "\0"
+    for mt in _md_inline_pattern().finditer("".join(masked)):
+        w = _MD_MARKER_WIDTH[mt.lastgroup]
+        s, e = mt.start(), mt.end()
+        runs.append((tuple(range(s, s + w)) + tuple(range(e - w, e)),
+                     s + w, e - w))
+    return runs
+
+
+def _md_copy_slice(line, lo, hi, drop):
+    """line[lo..hi] as markdown: the characters drawn there, plus the markers
+    of every run whose content lies wholly inside the selection — including
+    an opener just before `lo` or a closer just after `hi`. A run the
+    selection only cuts into loses its markers, so a part-selection never
+    carries an unpaired `**`."""
+    keep = set()
+    for markers, cs, ce in _md_marker_runs(line):
+        if lo <= cs and ce - 1 <= hi:
+            keep.update(markers)
+    first = min([lo] + [k for k in keep if k < lo])
+    last = max([hi] + [k for k in keep if k > hi])
+    return "".join(line[k] for k in range(first, last + 1)
+                   if k in keep or (lo <= k <= hi and not drop[k]))
+
+
+def selection_markdown(rows, r1, c1, r2, c2):
+    """The text a drag over rendered preview `rows` selects, as markdown —
+    selection_copy=markdown. Takes the same arguments as selection_text, but
+    `rows` must be every preview row with r/c indexing into them, because a
+    wrapped source line can start above the visible window and its markers
+    pair over the whole line.
+
+    Screen columns are walked over what the preview draws (markers dropped),
+    so the drag picks exactly the characters the band covers; each source
+    line then gives back its selected stretch with the markers of runs the
+    selection wholly covers (see _md_copy_slice). The tag row (src None) is
+    drawn literally and copied literally."""
+    if not rows:
+        return ""
+    if r1 > r2:
+        r1, r2, c1, c2 = r2, r1, c2, c1
+    r1 = max(0, min(r1, len(rows) - 1))
+    r2 = max(0, min(r2, len(rows) - 1))
+
+    groups = []    # [line, drop, lo, hi] per source line spanned, in order
+    r = r1
+    while r <= r2:
+        src = rows[r][1]
+        g0 = r
+        while g0 > 0 and src is not None and rows[g0 - 1][1] == src:
+            g0 -= 1
+        g1 = r + 1
+        while g1 < len(rows) and src is not None and rows[g1][1] == src:
+            g1 += 1
+        texts = [rows[k][0] for k in range(g0, g1)]
+        if len(texts) == 1:
+            line, spans = texts[0], [(0, 0)]
+        else:
+            line, spans = _rejoin_wrapped(texts)
+        drop = (_md_line_arrays(line)[1] if src is not None
+                else [False] * len(line))
+        lo = hi = None
+        for k in range(max(g0, r1), min(g1, r2 + 1)):
+            text = rows[k][0]
+            off, pad = spans[k - g0]
+            if k == r1 == r2:
+                a, b = min(c1, c2), max(c1, c2) + 1
+            elif k == r1:
+                a, b = c1, 1 << 30
+            elif k == r2:
+                a, b = 0, c2 + 1
+            else:
+                a, b = 0, 1 << 30
+            col = 0
+            for t, ch in enumerate(text):
+                idx = off + t - pad if t >= pad else None
+                if idx is not None and drop[idx]:
+                    continue                  # a marker: no cell on screen
+                if a <= col < b and idx is not None:
+                    lo = idx if lo is None else min(lo, idx)
+                    hi = idx if hi is None else max(hi, idx)
+                col += char_width(ch)
+        groups.append(_md_copy_slice(line, lo, hi, drop).strip()
+                      if lo is not None else "")
+        r = g1
+    return "\n".join(groups)
+
+
 CLIPBOARD_TOOLS = (("wl-copy", ("wl-copy",)),
                    ("xclip", ("xclip", "-silent", "-selection", "clipboard")),
                    ("xsel", ("xsel", "--clipboard", "--input")),
@@ -7884,20 +8004,31 @@ def mouse_select_event(state, ev, note, tokens, w, h):
         start = state["p_scroll"]
         end = start + (h - 2)
         window = rows_all[start:end]
-        if config_bool("render_markdown", True):
-            # Columns on screen index the text as DRAWN, markers dropped
-            # (`**`, backticks, a heading's `# `). Slicing the raw row by them
-            # copied the markers and lost as many characters off the end, so
-            # read each row the way the preview paints it: the same
-            # line-level markup states, so a run split by wrap drops its
-            # markers on both rows. The tag row (src None) is drawn literally.
-            states = row_md_states(rows_all, start, end)
-            window = [(_md_logical(t, states.get(start + i)) if src is not None
-                       else t, src)
-                      for i, (t, src) in enumerate(window)]
-        text = selection_text(window,
-                              ay - 1, ax - (mid + 1),
-                              ey - 1, ex - (mid + 1))
+        render_md = config_bool("render_markdown", True)
+        if render_md and selection_copy() == "markdown" and window:
+            # Rows stay clamped to the visible window, as selection_text
+            # clamps them; only the markup pairing reads past its edges.
+            last = start + len(window) - 1
+            clamp = lambda y: max(start, min(start + y - 1, last))
+            text = selection_markdown(rows_all,
+                                      clamp(ay), ax - (mid + 1),
+                                      clamp(ey), ex - (mid + 1))
+        else:
+            if render_md:
+                # Columns on screen index the text as DRAWN, markers dropped
+                # (`**`, backticks, a heading's `# `). Slicing the raw row by
+                # them copied the markers and lost as many characters off the
+                # end, so read each row the way the preview paints it: the
+                # same line-level markup states, so a run split by wrap drops
+                # its markers on both rows. The tag row (src None) is drawn
+                # literally.
+                states = row_md_states(rows_all, start, end)
+                window = [(_md_logical(t, states.get(start + i))
+                           if src is not None else t, src)
+                          for i, (t, src) in enumerate(window)]
+            text = selection_text(window,
+                                  ay - 1, ax - (mid + 1),
+                                  ey - 1, ex - (mid + 1))
         if not text.strip():
             return None, True         # a blank drag: nothing to say
         how = copy_to_clipboard(text)
